@@ -724,7 +724,10 @@
               "maximum": 100
             },
             "hideKey": {
-              "type": "string",
+              "type": [
+                "string",
+                "integer"
+              ],
               "maxLength": 40
             }
           },

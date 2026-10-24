@@ -308,7 +308,11 @@ export function ModulePreferencesEditor({
                   label={t('settings.modules.field.overlayHideKey')}
                   control={
                     <KeyComboInput
-                      value={String(prefs.gameOverlay?.hideKey ?? '')}
+                      value={
+                        typeof prefs.gameOverlay?.hideKey === 'string'
+                          ? prefs.gameOverlay.hideKey
+                          : ''
+                      }
                       label={t('settings.modules.field.overlayHideKey')}
                       hint={t('settings.modules.field.overlayHideKeyHint')}
                       onChange={(value) => change('gameOverlay', 'hideKey', value)}

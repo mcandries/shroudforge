@@ -194,4 +194,23 @@ mod tests {
             assert_eq!(config["modules"][module]["enabled"], true, "{module}");
         }
     }
+
+    #[test]
+    fn game_overlay_defaults_and_a_legacy_numeric_hide_key_still_load() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = crate::paths::loader_config(root.path());
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, br#"{"schemaVersion":1}"#).unwrap();
+        let config = read_loader(root.path()).unwrap();
+        assert_eq!(config["modules"]["gameOverlay"]["enabled"], true);
+        assert_eq!(config["modules"]["gameOverlay"]["hideKey"], "");
+
+        // Builds before the key was captured as text saved a key code.
+        fs::write(
+            &config_path,
+            br#"{"schemaVersion":1,"modules":{"gameOverlay":{"hideKey":0}}}"#,
+        )
+        .unwrap();
+        assert!(read_loader(root.path()).is_ok());
+    }
 }
