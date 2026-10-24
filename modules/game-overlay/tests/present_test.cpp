@@ -1,7 +1,8 @@
-// Manual check for the overlay layer: opens a window, presents a few blue
-// frames through a real swapchain, then reads back the last presented image
-// and prints the pixel inside the square and one outside it.
+// Manual check for the overlay layer: opens a 1280x720 window, publishes a
+// few test zones through the layer's C API, presents frames through a real
+// swapchain, then reads back the last presented image and saves it as a BMP.
 //
+// Usage: enshrouded.exe <assets folder> <output.bmp>
 // Copy it beside the built layer as enshrouded.exe (the layer only draws in
 // the game process), then run it with VK_ADD_IMPLICIT_LAYER_PATH pointing at
 // that folder and SHROUDFORGE_OVERLAY_ENABLE=1.
@@ -14,6 +15,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #define CHECK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) { std::printf("%s failed: %d\n", #call, r_); return 1; } } while (0)
@@ -22,7 +24,88 @@ PFN_vkGetInstanceProcAddr gipa;
 #define INSTANCE_FN(name) auto name = reinterpret_cast<PFN_##name>(gipa(instance, #name))
 #define DEVICE_FN(name) auto name = reinterpret_cast<PFN_##name>(gdpa(device, #name))
 
-int main() {
+using SetZoneFn = int (*)(const char*, const char*, const char*, char*, uint32_t);
+using GetStatusFn = int (*)(char*, uint32_t);
+
+std::string replace_all(std::string text, const std::string& from, const std::string& to) {
+    for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) text.replace(at, from.size(), to);
+    return text;
+}
+
+bool publish_zones(const std::string& assets) {
+    HMODULE layer = GetModuleHandleW(L"shroudforge_overlay.dll");
+    if (!layer) {
+        std::printf("layer not loaded\n");
+        return false;
+    }
+    auto set_zone = reinterpret_cast<SetZoneFn>(GetProcAddress(layer, "ShroudforgeOverlay_SetZone"));
+    const char* zones[][2] = {
+        {"status", R"({
+            "anchor": "top-right", "offset": [-24, 24], "size": [360, 0], "padding": [22, 18], "spacing": 6,
+            "frame": {"image": "@/frame.png", "slice": 12, "scale": 1},
+            "text": {"size": 20, "color": "#F0E6D2", "shadow": true},
+            "items": [
+                {"type": "row", "spacing": 10, "items": [
+                    {"type": "image", "image": "@/icon.png", "size": 32},
+                    {"text": "Architect", "size": 28, "color": "#E2B040"}]},
+                {"type": "separator", "color": "#E2B04080", "thickness": 2},
+                "Mode : REMPLIR",
+                {"text": "Départ : 12, 40, -3", "color": "#A0C8FF"},
+                {"text": "Un texte assez long pour vérifier le retour à la ligne dans une zone de largeur fixe.", "size": 16},
+                {"type": "progress", "value": 0.6, "size": [0, 10], "rounding": 4},
+                {"text": "60 %", "align": "right", "size": 14}
+            ]})"},
+        {"hint", R"({
+            "anchor": "bottom", "offset": [0, -40], "padding": [16, 10], "background": "#101418C0",
+            "border": "#E2B040", "border_width": 2, "rounding": 8,
+            "items": [{"text": "F6 : remplir une ligne    F7 : une surface    F8 : un volume", "size": 22, "outline": 1}]})"},
+        {"title", R"({
+            "anchor": [0.3, 0.45], "pivot": "center",
+            "items": [{"text": "Overlay ShroudForge", "size": 48, "color": "#FFFFFF", "shadow": true, "outline": 2}]})"},
+    };
+    for (auto& [id, body] : zones) {
+        char error[256]{};
+        const std::string zone_json = replace_all(body, "@", replace_all(assets, "\\", "/"));
+        if (set_zone("test-mod", id, zone_json.c_str(), error, sizeof(error)) != 0) {
+            std::printf("zone %s refused: %s\n", id, error);
+            return false;
+        }
+    }
+    char bad_error[256]{};
+    if (set_zone("test-mod", "bad", R"({"anchor": "nowhere"})", bad_error, sizeof(bad_error)) == 0) {
+        std::printf("an invalid zone was accepted\n");
+        return false;
+    }
+    std::printf("invalid zone refused as expected: %s\n", bad_error);
+    return true;
+}
+
+void save_bmp(const char* path, const void* bgra, uint32_t width, uint32_t height) {
+    BITMAPFILEHEADER file{};
+    BITMAPINFOHEADER info{};
+    info.biSize = sizeof(info);
+    info.biWidth = static_cast<LONG>(width);
+    info.biHeight = -static_cast<LONG>(height);
+    info.biPlanes = 1;
+    info.biBitCount = 32;
+    info.biCompression = BI_RGB;
+    const DWORD bytes = width * height * 4;
+    file.bfType = 0x4D42;
+    file.bfOffBits = sizeof(file) + sizeof(info);
+    file.bfSize = file.bfOffBits + bytes;
+    FILE* out = nullptr;
+    if (fopen_s(&out, path, "wb") != 0 || !out) return;
+    fwrite(&file, sizeof(file), 1, out);
+    fwrite(&info, sizeof(info), 1, out);
+    fwrite(bgra, bytes, 1, out);
+    fclose(out);
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::printf("usage: %s <assets folder> <output.bmp>\n", argv[0]);
+        return 2;
+    }
     HMODULE loader = LoadLibraryW(L"vulkan-1.dll");
     if (!loader) return 1;
     gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
@@ -34,8 +117,10 @@ int main() {
     window_class.hInstance = GetModuleHandleW(nullptr);
     window_class.lpszClassName = L"overlay_present_test";
     RegisterClassW(&window_class);
+    RECT rect{0, 0, 1280, 720};
+    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
     HWND window = CreateWindowW(window_class.lpszClassName, L"overlay present test", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        100, 100, 640, 480, nullptr, nullptr, window_class.hInstance, nullptr);
+        50, 50, rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, window_class.hInstance, nullptr);
 
     const char* instance_extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -46,6 +131,7 @@ int main() {
     instance_info.enabledExtensionCount = 2;
     instance_info.ppEnabledExtensionNames = instance_extensions;
     CHECK(vkCreateInstance(&instance_info, nullptr, &instance));
+    if (!publish_zones(argv[1])) return 1;
 
     INSTANCE_FN(vkEnumeratePhysicalDevices);
     INSTANCE_FN(vkCreateWin32SurfaceKHR);
@@ -80,6 +166,7 @@ int main() {
 
     DEVICE_FN(vkGetDeviceQueue);
     DEVICE_FN(vkCreateSwapchainKHR);
+    DEVICE_FN(vkDestroySwapchainKHR);
     DEVICE_FN(vkGetSwapchainImagesKHR);
     DEVICE_FN(vkAcquireNextImageKHR);
     DEVICE_FN(vkQueuePresentKHR);
@@ -101,6 +188,7 @@ int main() {
     DEVICE_FN(vkBindBufferMemory);
     DEVICE_FN(vkMapMemory);
     DEVICE_FN(vkDeviceWaitIdle);
+    DEVICE_FN(vkDestroyDevice);
 
     VkQueue queue;
     vkGetDeviceQueue(device, 0, 0, &queue);
@@ -187,15 +275,13 @@ int main() {
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         vkBeginCommandBuffer(cb, &begin);
         const bool check = frame == 30;
-        if (check) {
-            // Read back the image presented last frame: same index, contents kept.
-            index = last_index;
-        }
+        // On the last frame, read back the image presented just before: same index, contents kept.
+        if (check) index = last_index;
         if (!check) {
             barrier(images[index], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            VkClearColorValue blue{{0.0f, 0.0f, 1.0f, 1.0f}};
+            VkClearColorValue background{{0.18f, 0.24f, 0.30f, 1.0f}};
             VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdClearColorImage(cb, images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &blue, 1, &range);
+            vkCmdClearColorImage(cb, images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &background, 1, &range);
             barrier(images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         } else {
             barrier(images[index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -232,13 +318,18 @@ int main() {
 
     void* mapped;
     vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &mapped);
-    auto pixel = [&](uint32_t x, uint32_t y) {
-        const auto* p = static_cast<const uint8_t*>(mapped) + (VkDeviceSize(y) * extent.width + x) * 4;
-        std::printf("pixel %u,%u = B %u G %u R %u A %u\n", x, y, p[0], p[1], p[2], p[3]);
-    };
-    pixel(250, 250);
-    pixel(40, 40);
+    save_bmp(argv[2], mapped, extent.width, extent.height);
+    std::printf("saved %ux%u to %s\n", extent.width, extent.height, argv[2]);
+
+    HMODULE layer = GetModuleHandleW(L"shroudforge_overlay.dll");
+    if (layer) {
+        char status[256]{};
+        reinterpret_cast<GetStatusFn>(GetProcAddress(layer, "ShroudforgeOverlay_GetStatus"))(status, sizeof(status));
+        std::printf("status: %s\n", status);
+    }
     vkDeviceWaitIdle(device);
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+    vkDestroyDevice(device, nullptr);
     DestroyWindow(window);
     return 0;
 }
