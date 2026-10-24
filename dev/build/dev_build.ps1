@@ -22,4 +22,5 @@ if (-not $SkipTests) {
 }
 & (Join-Path $actions 'build_modloader.ps1') -CargoTargetDir $cargoTargetPath -UseInstalledDependencies -SkipUiBuild
 & (Join-Path $actions 'build_windows_bootstrap.ps1')
+& (Join-Path $actions 'build_game_overlay.ps1')
 & (Join-Path $actions 'package_release.ps1') -BuildNumber $BuildNumber -Version $version

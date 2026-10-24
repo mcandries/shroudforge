@@ -54,6 +54,29 @@ bool is_supported_game_process() {
         CompareStringOrdinal(name.data(), static_cast<int>(name.size()),
         L"enshrouded_server.exe", -1, TRUE) == CSTR_EQUAL;
 }
+
+void append_environment(const wchar_t* name, const std::wstring& value) {
+    std::wstring current(32767, L'\0');
+    const auto length = GetEnvironmentVariableW(name, current.data(), static_cast<DWORD>(current.size()));
+    current.resize(length < current.size() ? length : 0);
+    SetEnvironmentVariableW(name, current.empty() ? value.c_str() : (current + L";" + value).c_str());
+}
+
+// The game overlay is a Vulkan layer shipped in shroudforge\overlay. It must
+// be enabled before Enshrouded creates its Vulkan instance, so the loader is
+// pointed at it from here rather than from the runtime thread. It is an
+// implicit layer so that it sits above the other implicit layers: OBS and the
+// Steam overlay then see the square like the rest of the frame.
+void enable_game_overlay() {
+    const auto root = module_directory();
+    if (!ShroudforgeConfig::ModuleEnabled(root, "gameOverlay")) return;
+    const auto overlay = shroudforge_directory(root) / L"overlay";
+    if (GetFileAttributesW((overlay / L"shroudforge_overlay.json").c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    wchar_t flag[8]{};
+    if (GetEnvironmentVariableW(L"SHROUDFORGE_OVERLAY", flag, 8) && flag[0] == L'0') return;
+    append_environment(L"VK_ADD_IMPLICIT_LAYER_PATH", overlay.wstring());
+    SetEnvironmentVariableW(L"SHROUDFORGE_OVERLAY_ENABLE", L"1");
+}
 }
 
 extern "C" __declspec(dllexport) BOOL __cdecl ShroudforgeStop(DWORD timeout_milliseconds) {
@@ -70,6 +93,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         // The bundled ShroudForge UI also runs there, but must never bootstrap
         // another runtime or race Enshrouded's asset startup.
         if (!is_supported_game_process()) return TRUE;
+        if (!is_dedicated_server_process()) enable_game_overlay();
         stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!stop_event) return FALSE;
         if (!StartupGate::Install()) return FALSE;

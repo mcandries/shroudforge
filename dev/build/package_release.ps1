@@ -78,6 +78,8 @@ Copy-Item -LiteralPath (Join-Path $output 'shroudforge-runtime.dll'),(Join-Path 
 if (-not $WithoutUpdater) {
     Copy-Item -LiteralPath (Join-Path $output 'shroudforge-updater.exe') -Destination $dataPackage
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $dataPackage 'overlay') | Out-Null
+Copy-Item -LiteralPath (Join-Path $output 'overlay\shroudforge_overlay.dll'),(Join-Path $output 'overlay\shroudforge_overlay.json') -Destination (Join-Path $dataPackage 'overlay')
 New-Item -ItemType Directory -Force -Path (Join-Path $dataPackage 'runtime\profiles') | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $root 'modules\game-runtime\profiles') -Exclude 'dev' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dataPackage 'runtime\profiles') -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $root 'modules\modloader\mod-profiles') -Destination (Join-Path $dataPackage 'runtime\profiles\mod-profiles') -Recurse -Force
