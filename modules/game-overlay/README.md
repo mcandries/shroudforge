@@ -83,7 +83,7 @@ Items (a plain string is a text item):
 | `image` | `image` (path), `size` (`n`, `[w, h]`, one side 0 keeps the ratio; default: image size), `tint`, `uv` `[u0, v0, u1, v1]` for an icon in an atlas, `rounding`, `align`. |
 | `row` | `items` side by side, centered vertically, `spacing`, text style fields inherited by its items. A row holding a `grow` spans the zone width. |
 | `grow` | In a row: takes the width left, to push the next items to the right. |
-| `flow` | `items` (text, chip, icon, image, toggle) laid out like a sentence: texts are cut into words and every line wraps at the zone width. `spacing` between non-text items (default 5), `line_gap` between lines. Punctuation sticks to what precedes it. |
+| `flow` | `items` (text, chip, icon, image, toggle) laid out like a sentence: texts are cut into words and every line wraps at the zone width. `spacing` between non-text items (default 5), `line_gap` between lines. Punctuation sticks to what precedes it. Chinese and Japanese text, which has no spaces, may wrap between any two characters, never before closing punctuation, small kana or `ー`, nor after an opening bracket. |
 | `chip` | `text` on a rounded background, such as a key: text style fields (default dark text, no shadow), `background` (default `#F2EFE7`), `rounding` (3), `padding` (horizontal, 4), `box` `[min width, height]` (`[17, 17]`). |
 | `icon` | `path`: SVG path data stroked as lines (`M L H V A Z`, absolute or relative; curves are refused), `viewbox` (square side, 24), `size` (18), `stroke` (1.8, in viewbox units), `color` (default: the text color). |
 | `toggle` | `on`, `size` (`[26, 14]`), `color` (track off), `on_color` (track on, `#C9A24E`), `knob`. |
