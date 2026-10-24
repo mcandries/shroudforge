@@ -616,6 +616,10 @@ PFN_vkVoidFunction device_function(const char* requested) {
 OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetDeviceProcAddr(
         VkDevice device, const char* requested) {
     trace_request("GetDeviceProcAddr", device, requested, _ReturnAddress());
+    // Layers above us (Steam's fossilize) look this up once and route every
+    // later lookup through it: answering with the next layer's would skip us.
+    if (std::strcmp(requested, "vkGetDeviceProcAddr") == 0)
+        return reinterpret_cast<PFN_vkVoidFunction>(&ShroudforgeOverlay_GetDeviceProcAddr);
     if (PFN_vkVoidFunction own = device_function(requested)) return own;
     DeviceData* d = device_of(dispatch_key(device));
     return d ? d->next_gdpa(device, requested) : nullptr;
