@@ -138,6 +138,7 @@ pub(crate) fn save_setting(
             ) || key == "window.position"
         }
         "worldEditor" => matches!(key, "enabled" | "toggleKey" | "refreshMilliseconds"),
+        "gameOverlay" => matches!(key, "enabled" | "scale" | "opacity" | "hideKey"),
         "network" => matches!(key, "enabled" | "serverSteamId" | "allowedClientSteamIds"),
         "runtimeDiagnostics" => matches!(
             key,

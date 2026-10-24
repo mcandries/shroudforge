@@ -25,6 +25,7 @@ add_library(shroudforge_overlay SHARED
     src/scene.cpp
     src/draw_scene.cpp
     src/load_image.cpp
+    src/player_options.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

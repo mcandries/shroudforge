@@ -232,6 +232,12 @@
       "toggleKey": 113,
       "refreshMilliseconds": 400
     },
+    "gameOverlay": {
+      "enabled": true,
+      "scale": 100,
+      "opacity": 100,
+      "hideKey": 0
+    },
     "modloaderUi": {
       "enabled": true,
       "startPage": "news",
