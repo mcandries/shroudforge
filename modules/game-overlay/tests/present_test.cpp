@@ -2,7 +2,8 @@
 // few test zones through the layer's C API, presents frames through a real
 // swapchain, then reads back the last presented image and saves it as a BMP.
 //
-// Usage: enshrouded.exe <assets folder> <output.bmp>
+// Usage: enshrouded.exe <assets folder> <output.bmp> [zones.txt]
+// zones.txt replaces the built-in zones: one "id<TAB>zone json" per line.
 // Copy it beside the built layer as enshrouded.exe (the layer only draws in
 // the game process), then run it with VK_ADD_IMPLICIT_LAYER_PATH pointing at
 // that folder and SHROUDFORGE_OVERLAY_ENABLE=1.
@@ -32,13 +33,37 @@ std::string replace_all(std::string text, const std::string& from, const std::st
     return text;
 }
 
-bool publish_zones(const std::string& assets) {
+// Zones from a file: one zone per line, "id<TAB>json".
+bool publish_zone_file(SetZoneFn set_zone, const char* path) {
+    FILE* file = nullptr;
+    if (fopen_s(&file, path, "rb") != 0 || !file) {
+        std::printf("cannot open %s\n", path);
+        return false;
+    }
+    char line[65536];
+    while (fgets(line, sizeof(line), file)) {
+        char* tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        char error[256]{};
+        if (set_zone("test-mod", line, tab + 1, error, sizeof(error)) != 0) {
+            std::printf("zone %s refused: %s\n", line, error);
+            fclose(file);
+            return false;
+        }
+    }
+    fclose(file);
+    return true;
+}
+
+bool publish_zones(const std::string& assets, const char* zone_file) {
     HMODULE layer = GetModuleHandleW(L"shroudforge_overlay.dll");
     if (!layer) {
         std::printf("layer not loaded\n");
         return false;
     }
     auto set_zone = reinterpret_cast<SetZoneFn>(GetProcAddress(layer, "ShroudforgeOverlay_SetZone"));
+    if (zone_file) return publish_zone_file(set_zone, zone_file);
     const char* zones[][2] = {
         {"status", R"({
             "anchor": "top-right", "offset": [-24, 24], "size": [360, 0], "padding": [22, 18], "spacing": 6,
@@ -131,7 +156,7 @@ int main(int argc, char** argv) {
     instance_info.enabledExtensionCount = 2;
     instance_info.ppEnabledExtensionNames = instance_extensions;
     CHECK(vkCreateInstance(&instance_info, nullptr, &instance));
-    if (!publish_zones(argv[1])) return 1;
+    if (!publish_zones(argv[1], argc > 3 ? argv[3] : nullptr)) return 1;
 
     INSTANCE_FN(vkEnumeratePhysicalDevices);
     INSTANCE_FN(vkCreateWin32SurfaceKHR);
