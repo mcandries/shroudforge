@@ -14,3 +14,8 @@ target_link_libraries(shroudforge_overlay PRIVATE Vulkan::Headers)
 target_compile_features(shroudforge_overlay PRIVATE cxx_std_20)
 target_compile_definitions(shroudforge_overlay PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(shroudforge_overlay PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
+add_executable(overlay_present_test tests/present_test.cpp)
+target_link_libraries(overlay_present_test PRIVATE Vulkan::Headers)
+target_compile_features(overlay_present_test PRIVATE cxx_std_20)
+target_compile_definitions(overlay_present_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
