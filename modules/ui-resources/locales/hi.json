@@ -832,5 +832,11 @@
   "updater.required": "आवश्यक अद्यतन",
   "updater.verifying": "डाउनलोड सत्यापित करें",
   "updater.waiting": "अद्यतन Enshrouded बंद होने के बाद स्थापित होगा।.",
-  "updater.current": "ShroudForge तारीख तक है।."
+  "updater.current": "ShroudForge तारीख तक है।.",
+  "settings.modules.field.overlayScale": "Size (%)",
+  "settings.modules.field.overlayOpacity": "Opacity (%)",
+  "settings.modules.field.overlayHideKey": "Show/hide key",
+  "settings.modules.field.overlayHideInMenus": "Hide while a game menu is open (inventory, map, pause)",
+  "settings.modules.gameOverlay.title": "Game overlay",
+  "settings.modules.gameOverlay.description": "Draws the zones of mods (status panels, messages) over the game image. Changes apply at once; turning the module off or on applies at the next game start."
 }

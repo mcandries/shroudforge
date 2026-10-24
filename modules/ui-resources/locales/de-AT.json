@@ -832,5 +832,11 @@
   "updater.updateNow": "Jetzt aktualisiern",
   "updater.required": "Pflichtupdate",
   "updater.verifying": "Download wird überprüft …",
-  "updater.waiting": "Des Update wird installiert, wenn Enshrouded aus is."
+  "updater.waiting": "Des Update wird installiert, wenn Enshrouded aus is.",
+  "settings.modules.field.overlayScale": "Größe (%)",
+  "settings.modules.field.overlayOpacity": "Deckkraft (%)",
+  "settings.modules.field.overlayHideKey": "Taste zum Ein-/Ausblenden",
+  "settings.modules.field.overlayHideInMenus": "Ausblenden, solange ein Spielmenü offen ist (Inventar, Karte, Pause)",
+  "settings.modules.gameOverlay.title": "Spiel-Overlay",
+  "settings.modules.gameOverlay.description": "Zeichnet die Bereiche von Mods (Statusanzeigen, Meldungen) über das Spielbild. Änderungen gelten sofort; das Ein- oder Ausschalten des Moduls gilt ab dem nächsten Spielstart."
 }

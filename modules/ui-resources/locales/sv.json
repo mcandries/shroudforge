@@ -832,5 +832,11 @@
   "updater.required": "Krävd uppdatering",
   "updater.verifying": "Verifiera nedladdning..",
   "updater.waiting": "Uppdateringen installeras efter Enshrouded stängs.",
-  "updater.current": "ShroudForge är uppdaterad."
+  "updater.current": "ShroudForge är uppdaterad.",
+  "settings.modules.field.overlayScale": "Size (%)",
+  "settings.modules.field.overlayOpacity": "Opacity (%)",
+  "settings.modules.field.overlayHideKey": "Show/hide key",
+  "settings.modules.field.overlayHideInMenus": "Hide while a game menu is open (inventory, map, pause)",
+  "settings.modules.gameOverlay.title": "Game overlay",
+  "settings.modules.gameOverlay.description": "Draws the zones of mods (status panels, messages) over the game image. Changes apply at once; turning the module off or on applies at the next game start."
 }
