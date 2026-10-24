@@ -300,6 +300,22 @@ fn validate_channel(channel: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Each step of the Steam Networking Messages lookup, for the log when the
+/// transport is unavailable.
+pub fn diagnose() -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        type NetworkDiagnose = unsafe extern "C" fn(*mut u8, usize) -> usize;
+        let address = symbol(b"KfcRuntimeNetworkDiagnose\0")?;
+        let diagnose: NetworkDiagnose = std::mem::transmute(address);
+        let mut buffer = [0u8; 512];
+        let length = diagnose(buffer.as_mut_ptr(), buffer.len()).min(buffer.len() - 1);
+        return Some(String::from_utf8_lossy(&buffer[..length]).into_owned());
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 fn unavailable() -> Status {
     Status {
         available: false,

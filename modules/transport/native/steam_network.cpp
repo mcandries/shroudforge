@@ -337,6 +337,37 @@ KFC_RUNTIME_API int32_t __cdecl KfcRuntimeNetworkStatus(uint64_t* local_steam_id
     } catch (...) { return 0; }
 }
 
+// Describes each step of the Steam Networking Messages lookup, for the log
+// when the transport is unavailable: the steam_api module, the interface
+// accessor and its result, the Steam user and pipe handles, and whether Steam
+// runs. Returns the text length (truncated to capacity - 1).
+KFC_RUNTIME_API size_t __cdecl KfcRuntimeNetworkDiagnose(char* buffer, size_t capacity) {
+    if (!buffer || !capacity) return 0;
+    buffer[0] = '\0';
+    try {
+        using HandleFunction = int32_t (__cdecl*)();
+        using FlagFunction = bool (__cdecl*)();
+        std::string text = steam_api_module() ? "steam_api64=loaded" : "steam_api64=missing";
+        const auto accessor = steam_export<InterfaceAccessor>(is_dedicated_server()
+            ? "SteamAPI_SteamGameServerNetworkingMessages_SteamAPI_v002"
+            : "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
+        text += accessor ? (accessor() ? " messages=ok" : " messages=null") : " messages_accessor=missing";
+        const auto api = resolve();
+        text += std::string(" send=") + (api.send ? "1" : "0") + " receive=" + (api.receive ? "1" : "0") +
+            " accept=" + (api.accept ? "1" : "0") + " release=" + (api.release ? "1" : "0");
+        if (const auto user = steam_export<HandleFunction>("SteamAPI_GetHSteamUser")) text += " user=" + std::to_string(user());
+        if (const auto pipe = steam_export<HandleFunction>("SteamAPI_GetHSteamPipe")) text += " pipe=" + std::to_string(pipe());
+        if (const auto running = steam_export<FlagFunction>("SteamAPI_IsSteamRunning")) {
+            text += running() ? " steam=running" : " steam=not-running";
+        }
+        text += g_session_callback_registered.load(std::memory_order_acquire) ? " callback=registered" : " callback=none";
+        const auto length = std::min(text.size(), capacity - 1);
+        std::memcpy(buffer, text.data(), length);
+        buffer[length] = '\0';
+        return length;
+    } catch (...) { return 0; }
+}
+
 KFC_RUNTIME_API int32_t __cdecl KfcRuntimeNetworkServiceReady() {
     return g_session_callback_registered.load(std::memory_order_acquire) ? 1 : 0;
 }

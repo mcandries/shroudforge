@@ -38,6 +38,8 @@ KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeSelectedCharacterName(char* bu
 KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeMainMenuState(void);
 /* Optional Steam Networking Messages transport used by runtime.network. */
 KFC_RUNTIME_API int32_t KFC_RUNTIME_CALL KfcRuntimeNetworkStatus(uint64_t* local_steam_id);
+/* Describes each step of the Steam Networking Messages lookup, for logs. */
+KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeNetworkDiagnose(char* buffer, size_t capacity);
 /* Registers an ISteamNetworkingMessages session-request callback without
  * pumping Steam callbacks. The game continues to own SteamAPI_RunCallbacks. */
 KFC_RUNTIME_API int32_t KFC_RUNTIME_CALL KfcRuntimeNetworkServiceReady(void);
