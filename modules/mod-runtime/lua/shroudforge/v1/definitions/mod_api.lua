@@ -168,7 +168,8 @@ function shroudforge_overlay.status() end
 shroudforge = {}
 
 --- Language the player chose for ShroudForge in the Modloader, such as `"en"`,
---- `"de"` or `"fr"`; `"en"` when unknown. Reads the settings file: call it
---- when settings change, not at every update.
+--- `"de"`, `"fr"` or a regional variant such as `"de-AT"`; `"en"` when the
+--- setting cannot be read. Reads the settings file: call it when settings
+--- change, not at every update.
 --- @return string
 function shroudforge.locale() end
