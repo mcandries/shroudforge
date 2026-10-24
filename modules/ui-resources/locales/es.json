@@ -848,5 +848,11 @@
   "updater.required": "Actualización necesaria",
   "updater.verifying": "Verificando la descarga…",
   "updater.waiting": "La actualización se instalará cuando se cierre Enshrouded.",
-  "updater.current": "ShroudForge está actualizado."
+  "updater.current": "ShroudForge está actualizado.",
+  "settings.modules.gameOverlay.title": "Superposición del juego",
+  "settings.modules.gameOverlay.description": "Dibuja las zonas de los mods (paneles de estado, mensajes) sobre la imagen del juego. Los cambios se aplican al instante; activar o desactivar el módulo se aplica en el próximo inicio del juego.",
+  "settings.modules.field.overlayScale": "Tamaño (%)",
+  "settings.modules.field.overlayOpacity": "Opacidad (%)",
+  "settings.modules.field.overlayHideKey": "Tecla para mostrar/ocultar",
+  "settings.modules.field.overlayHideInMenus": "Ocultar mientras haya un menú del juego abierto (inventario, mapa, pausa)"
 }
