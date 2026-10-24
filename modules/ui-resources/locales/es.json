@@ -563,6 +563,7 @@
   "settings.modules.field.overlayOpacity": "Opacidad (%)",
   "settings.modules.field.overlayHideKey": "Tecla para mostrar/ocultar",
   "settings.modules.field.overlayHideKeyHint": "Haz clic y pulsa una tecla o una combinación como Shift+F12. Retroceso la borra.",
+  "settings.modules.field.overlayHideInMenus": "Ocultar mientras haya un menú del juego abierto (inventario, mapa, pausa)",
   "settings.modules.field.tail": "Tamaño del fragmento final del registro (bytes)",
   "settings.modules.field.startPage": "Página de inicio",
   "settings.modules.start": "Iniciar",

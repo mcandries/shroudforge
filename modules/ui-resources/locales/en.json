@@ -563,6 +563,7 @@
   "settings.modules.field.overlayOpacity": "Opacity (%)",
   "settings.modules.field.overlayHideKey": "Show/hide key",
   "settings.modules.field.overlayHideKeyHint": "Click, then press a key or a combination such as Shift+F12. Backspace clears it.",
+  "settings.modules.field.overlayHideInMenus": "Hide while a game menu is open (inventory, map, pause)",
   "settings.modules.field.tail": "Log tail (bytes)",
   "settings.modules.field.startPage": "Start page",
   "settings.modules.start": "Start",

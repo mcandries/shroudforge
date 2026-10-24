@@ -154,7 +154,8 @@ function shroudforge_input.normalize(key) end
 --- @field active boolean The game image is being drawn on.
 --- @field width? integer Game image size in pixels.
 --- @field height? integer
---- @field scale? number Screen pixels per reference pixel.
+--- @field scale? number Screen pixels per reference pixel (1080 reference, with the player's size option).
+--- @field menu? boolean A game menu is open (the game shows the mouse cursor).
 
 --- Zones drawn over the game image. Each mod only sees its own zones; they are
 --- removed when the mod stops. The player can hide the overlay.

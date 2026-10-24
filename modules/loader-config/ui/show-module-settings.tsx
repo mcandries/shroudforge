@@ -273,7 +273,7 @@ export function ModulePreferencesEditor({
                         </select>
                       ) : (
                         typeof prefs[module]?.[key] === 'boolean' ||
-                        ['autoScroll', 'onlyChanges'].includes(key)
+                        ['autoScroll', 'onlyChanges', 'hideInMenus'].includes(key)
                       ) ? (
                         <SettingSwitch
                           label={t(label)}

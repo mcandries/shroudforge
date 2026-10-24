@@ -563,6 +563,7 @@
   "settings.modules.field.overlayOpacity": "Deckkraft (%)",
   "settings.modules.field.overlayHideKey": "Taste zum Ein-/Ausblenden",
   "settings.modules.field.overlayHideKeyHint": "Klicken, dann eine Taste oder Kombination wie Shift+F12 drücken. Rücktaste löscht sie.",
+  "settings.modules.field.overlayHideInMenus": "Ausblenden, solange ein Spielmenü offen ist (Inventar, Karte, Pause)",
   "settings.modules.field.tail": "Protokollumfang (Bytes)",
   "settings.modules.field.startPage": "Startseite",
   "settings.modules.start": "Starten",

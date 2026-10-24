@@ -80,10 +80,12 @@ void read_options(const std::wstring& path) {
         const auto hide_key = section.value("hideKey", nlohmann::json(""));
         const std::string spec = hide_key.is_string() ? hide_key.get<std::string>() : "";
         options.hide_key = parse_key_combo(spec);
+        options.hide_in_menus = section.value("hideInMenus", true);
         set_options(options);
-        log_line("player options: %s, size %d%%, opacity %d%%, show/hide key '%s'%s", options.enabled ? "on" : "off",
-            static_cast<int>(options.scale * 100.0f + 0.5f), static_cast<int>(options.opacity * 100.0f + 0.5f),
-            spec.c_str(), !spec.empty() && !options.hide_key.key ? " (not recognized)" : "");
+        log_line("player options: %s, size %d%%, opacity %d%%, show/hide key '%s'%s, hidden in menus %s",
+            options.enabled ? "on" : "off", static_cast<int>(options.scale * 100.0f + 0.5f),
+            static_cast<int>(options.opacity * 100.0f + 0.5f), spec.c_str(),
+            !spec.empty() && !options.hide_key.key ? " (not recognized)" : "", options.hide_in_menus ? "yes" : "no");
     } catch (...) {
         // Being saved, or invalid: keep the previous options.
     }
@@ -95,20 +97,20 @@ bool game_has_focus() {
     return process == GetCurrentProcessId();
 }
 
-// Diagnostics, to find a signal for the game's menus: logs when the mouse
-// cursor is shown or hidden, or stops being confined.
-void log_cursor_changes() {
+// A game menu is open when the game window has the focus and shows the mouse
+// cursor: Enshrouded hides it while playing, including in its shape menu, and
+// shows it in the inventory, the map and the pause menu (tested 24/10/2026).
+void update_menu_state() {
     static int last = -1;
     CURSORINFO cursor{sizeof(cursor)};
-    RECT clip{};
-    if (!GetCursorInfo(&cursor) || !GetClipCursor(&clip)) return;
-    const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN), height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    const bool confined = clip.right - clip.left < width || clip.bottom - clip.top < height;
-    const int state = ((cursor.flags & CURSOR_SHOWING) ? 1 : 0) | (confined ? 2 : 0) | (game_has_focus() ? 4 : 0);
+    if (!GetCursorInfo(&cursor)) return;
+    const bool shown = (cursor.flags & CURSOR_SHOWING) != 0;
+    const bool focused = game_has_focus();
+    const int state = (shown ? 1 : 0) | (focused ? 2 : 0);
     if (state == last) return;
     last = state;
-    log_line("mouse cursor %s, %s, game %s", (state & 1) ? "shown" : "hidden", (state & 2) ? "confined" : "free",
-        (state & 4) ? "focused" : "not focused");
+    set_menu_open(shown && focused);
+    log_line("mouse cursor %s, game %s", shown ? "shown" : "hidden", focused ? "focused" : "not focused");
 }
 
 }  // namespace
@@ -125,7 +127,7 @@ void update_player_options() {
             read_options(path);
         }
     }
-    log_cursor_changes();
+    update_menu_state();
     const KeyCombo combo = current_options().hide_key;
     if (!combo.key) return;
     // Modifiers must match exactly, as for mod keys: F12 and Shift+F12 differ.

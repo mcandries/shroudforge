@@ -125,7 +125,13 @@ struct Options {
     float scale = 1.0f;
     float opacity = 1.0f;
     KeyCombo hide_key;  // Shows/hides every zone.
+    bool hide_in_menus = true;  // No zone while the game shows the mouse cursor.
 };
+
+// player_options.cpp: whether a game menu is open, from the mouse cursor (the
+// game hides it while playing and shows it in its menus).
+void set_menu_open(bool open);
+bool is_menu_open();
 
 // player_options.cpp: parses a key specification with the names mods use
 // (modules/mod-runtime/lua/shroudforge/v1/game_keys.rs); none when invalid.
