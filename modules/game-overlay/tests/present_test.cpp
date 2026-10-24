@@ -2,7 +2,7 @@
 // few test zones through the layer's C API, presents frames through a real
 // swapchain, then reads back the last presented image and saves it as a BMP.
 //
-// Usage: enshrouded.exe <assets folder> <output.bmp> [zones.txt]
+// Usage: enshrouded.exe <assets folder> <output.bmp> [zones.txt [width height]]
 // zones.txt replaces the built-in zones: one "id<TAB>zone json" per line.
 // Copy it beside the built layer as enshrouded.exe (the layer only draws in
 // the game process), then run it with VK_ADD_IMPLICIT_LAYER_PATH pointing at
@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -142,7 +143,9 @@ int main(int argc, char** argv) {
     window_class.hInstance = GetModuleHandleW(nullptr);
     window_class.lpszClassName = L"overlay_present_test";
     RegisterClassW(&window_class);
-    RECT rect{0, 0, 1280, 720};
+    const LONG width = argc > 5 ? std::atol(argv[4]) : 1280;
+    const LONG height = argc > 5 ? std::atol(argv[5]) : 720;
+    RECT rect{0, 0, width, height};
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
     HWND window = CreateWindowW(window_class.lpszClassName, L"overlay present test", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         50, 50, rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, window_class.hInstance, nullptr);

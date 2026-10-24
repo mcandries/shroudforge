@@ -119,6 +119,7 @@ void parse_text_style(const json& value, TextStyle& style) {
     if (value.contains("color")) style.color = parse_color(value["color"], "color");
     if (value.contains("shadow")) style.shadow = value["shadow"].is_boolean() ? value["shadow"].get<bool>() : true;
     if (value.contains("shadow_color")) style.shadow_color = parse_color(value["shadow_color"], "shadow_color");
+    if (value.contains("shadow_offset")) style.shadow_offset = parse_pair(value["shadow_offset"], "shadow_offset");
     if (value.contains("outline")) style.outline = std::clamp(parse_number(value["outline"], "outline"), 0.0f, 8.0f);
     if (value.contains("outline_color")) style.outline_color = parse_color(value["outline_color"], "outline_color");
 }
@@ -153,14 +154,62 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (!uv.is_array() || uv.size() != 4) fail("uv: expected {u0, v0, u1, v1}");
             item.uv = {uv[0].get<float>(), uv[1].get<float>(), uv[2].get<float>(), uv[3].get<float>()};
         }
-    } else if (type == "row") {
-        item.kind = ItemKind::Row;
+    } else if (type == "row" || type == "flow") {
+        item.kind = type == "row" ? ItemKind::Row : ItemKind::Flow;
         if (depth >= kMaxDepth) fail("rows nested too deeply");
-        if (!value.contains("items") || !value["items"].is_array()) fail("row: expected items");
+        if (!value.contains("items") || !value["items"].is_array()) fail(type + ": expected items");
+        item.spacing = type == "row" ? 6.0f : 5.0f;
         if (value.contains("spacing")) item.spacing = parse_number(value["spacing"], "spacing");
+        if (value.contains("line_gap")) item.line_gap = parse_number(value["line_gap"], "line_gap");
         TextStyle row_style = text_style;
         parse_text_style(value, row_style);
-        for (const json& child : value["items"]) item.children.push_back(parse_item(child, row_style, depth + 1, count));
+        for (const json& child : value["items"]) {
+            Item parsed = parse_item(child, row_style, depth + 1, count);
+            if (item.kind == ItemKind::Flow && (parsed.kind == ItemKind::Row || parsed.kind == ItemKind::Flow ||
+                    parsed.kind == ItemKind::Grow || parsed.kind == ItemKind::Separator))
+                fail("flow: only text, chip, icon, image and toggle items");
+            item.children.push_back(std::move(parsed));
+        }
+    } else if (type == "chip") {
+        item.kind = ItemKind::Chip;
+        if (!value.contains("text") || !value["text"].is_string()) fail("chip: expected text");
+        item.text = value["text"].get<std::string>();
+        if (item.text.size() > 64) fail("chip text longer than 64 bytes");
+        // Dark text on a light background unless the chip says otherwise.
+        item.style.color = IM_COL32(22, 23, 27, 255);
+        item.style.shadow = false;
+        item.style.outline = 0.0f;
+        parse_text_style(value, item.style);
+        item.background = IM_COL32(242, 239, 231, 255);
+        if (value.contains("background")) item.background = parse_color(value["background"], "background");
+        item.rounding = 3.0f;
+        if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
+        if (value.contains("padding")) item.padding = parse_number(value["padding"], "padding");
+        // `size` is the text size; `box` the minimum width and the height.
+        item.size = {17.0f, 17.0f};
+        if (value.contains("box")) item.size = parse_pair(value["box"], "box");
+    } else if (type == "icon") {
+        item.kind = ItemKind::Icon;
+        if (!value.contains("path") || !value["path"].is_string()) fail("icon: expected path (SVG path data)");
+        std::string error;
+        if (!parse_icon_path(value["path"].get<std::string>(), item.icon, error)) fail(error);
+        item.size = {18.0f, 18.0f};
+        if (value.contains("size")) item.size = parse_pair(value["size"], "size");
+        if (value.contains("viewbox")) item.viewbox = std::max(1.0f, parse_number(value["viewbox"], "viewbox"));
+        if (value.contains("stroke")) item.stroke = std::clamp(parse_number(value["stroke"], "stroke"), 0.1f, 16.0f);
+        item.color = item.style.color;
+        if (value.contains("color")) item.color = parse_color(value["color"], "color");
+    } else if (type == "toggle") {
+        item.kind = ItemKind::Toggle;
+        item.on = value.value("on", false);
+        item.size = {26.0f, 14.0f};
+        if (value.contains("size")) item.size = parse_pair(value["size"], "size");
+        item.color = IM_COL32(255, 255, 255, 71);
+        if (value.contains("color")) item.color = parse_color(value["color"], "color");
+        if (value.contains("on_color")) item.on_color = parse_color(value["on_color"], "on_color");
+        if (value.contains("knob")) item.knob = parse_color(value["knob"], "knob");
+    } else if (type == "grow") {
+        item.kind = ItemKind::Grow;
     } else if (type == "spacer") {
         item.kind = ItemKind::Spacer;
         item.size.y = value.contains("size") ? parse_number(value["size"], "size") : 8.0f;
@@ -192,6 +241,8 @@ std::shared_ptr<Zone> parse_zone(const std::string& owner, const std::string& id
     zone->pivot = value.contains("pivot") ? parse_point(value["pivot"], "pivot") : zone->anchor;
     if (value.contains("offset")) zone->offset = parse_pair(value["offset"], "offset");
     if (value.contains("size")) zone->size = parse_pair(value["size"], "size");
+    if (value.contains("reference"))
+        zone->reference = std::clamp(parse_number(value["reference"], "reference"), 240.0f, 4320.0f);
     if (value.contains("order")) zone->order = static_cast<int>(parse_number(value["order"], "order"));
     if (value.contains("visible")) zone->visible = value["visible"].is_boolean() && value["visible"].get<bool>();
     if (value.contains("background")) zone->background = parse_color(value["background"], "background");

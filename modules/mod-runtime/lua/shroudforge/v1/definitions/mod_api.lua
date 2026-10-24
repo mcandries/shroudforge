@@ -139,3 +139,9 @@ function shroudforge_overlay.status() end
 --- @field notifications ShroudForgeNotifications Publish notices in the local Modloader feed.
 --- @field overlay ShroudForgeOverlay Draw zones over the game image.
 shroudforge = {}
+
+--- Language the player chose for ShroudForge in the Modloader, such as `"en"`,
+--- `"de"` or `"fr"`; `"en"` when unknown. Reads the settings file: call it
+--- when settings change, not at every update.
+--- @return string
+function shroudforge.locale() end

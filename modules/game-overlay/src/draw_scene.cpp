@@ -1,12 +1,15 @@
 // Layout and drawing of the zones. Items are stacked vertically inside a
-// zone; a row places its items side by side, centered vertically. Sizes given
-// by mods are reference pixels (1080p) multiplied by the screen scale.
+// zone; a row places its items side by side, centered vertically, `grow`
+// items taking the width left; a flow wraps words, chips and icons like a
+// sentence. Sizes given by mods are reference pixels (the zone's reference
+// screen height, 1080 by default) multiplied by the screen scale.
 
 #include "draw_scene.h"
 
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 
 namespace overlay {
 
@@ -22,6 +25,10 @@ struct Context {
 ImU32 fade(const Context& c, ImU32 color) {
     const float alpha = ((color >> IM_COL32_A_SHIFT) & 0xFF) * c.opacity;
     return (color & ~IM_COL32_A_MASK) | (static_cast<ImU32>(alpha + 0.5f) << IM_COL32_A_SHIFT);
+}
+
+bool visible_color(ImU32 color) {
+    return ((color >> IM_COL32_A_SHIFT) & 0xFF) != 0;
 }
 
 ImVec2 snap(ImVec2 point) {
@@ -43,14 +50,135 @@ ImVec2 image_size(const Context& c, const Item& item) {
     return {w * c.scale, h * c.scale};
 }
 
+ImVec2 text_size(const Context& c, const TextStyle& style, const char* begin, const char* end, float wrap) {
+    ImFont* font = c.resources.font(style.font);
+    return font->CalcTextSizeA(style.size * c.scale, FLT_MAX, wrap, begin, end);
+}
+
+void draw_text_run(const Context& c, const TextStyle& style, ImVec2 position, const char* begin, const char* end, float wrap) {
+    ImFont* font = c.resources.font(style.font);
+    const float size = style.size * c.scale;
+    position = snap(position);
+    if (style.outline > 0.0f) {
+        const float o = std::max(1.0f, style.outline * c.scale);
+        const ImU32 color = fade(c, style.outline_color);
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                if (dx || dy) c.list.AddText(font, size, ImVec2(position.x + dx * o, position.y + dy * o), color, begin, end, wrap);
+    }
+    if (style.shadow) {
+        const ImVec2 o(style.shadow_offset.x * c.scale, style.shadow_offset.y * c.scale);
+        c.list.AddText(font, size, ImVec2(position.x + o.x, position.y + o.y), fade(c, style.shadow_color), begin, end, wrap);
+    }
+    c.list.AddText(font, size, position, fade(c, style.color), begin, end, wrap);
+}
+
+ImVec2 measure(const Context& c, const Item& item, float width);
+void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size, float content_width, float wrap_width);
+
+// ------------------------------------------------------------------ flow
+
+// A flow is cut into tokens (words of its texts, and each other item), then
+// broken into lines that fit the width.
+struct Token {
+    const Item* item;
+    const char* begin = nullptr;  // Word range for a text item.
+    const char* end = nullptr;
+    ImVec2 size;
+    bool word = false;
+};
+
+struct FlowLine {
+    size_t first = 0;
+    size_t count = 0;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+
+std::vector<Token> flow_tokens(const Context& c, const Item& flow) {
+    std::vector<Token> tokens;
+    for (const Item& child : flow.children) {
+        if (child.kind != ItemKind::Text) {
+            tokens.push_back({&child, nullptr, nullptr, measure(c, child, FLT_MAX), false});
+            continue;
+        }
+        const char* at = child.text.c_str();
+        while (*at) {
+            while (*at == ' ') ++at;
+            const char* begin = at;
+            while (*at && *at != ' ') ++at;
+            if (at > begin) tokens.push_back({&child, begin, at, text_size(c, child.style, begin, at, 0.0f), true});
+        }
+    }
+    return tokens;
+}
+
+// Gap before a token: none before punctuation, a space between two words,
+// the flow spacing otherwise.
+float flow_gap(const Context& c, const Item& flow, const Token& previous, const Token& token) {
+    if (token.word && std::strchr(",.;:!?)", token.begin[0])) return 0.0f;
+    if (previous.word && token.word)
+        return text_size(c, token.item->style, " ", nullptr, 0.0f).x;
+    return flow.spacing * c.scale;
+}
+
+std::vector<FlowLine> flow_lines(const Context& c, const Item& flow, const std::vector<Token>& tokens, float width) {
+    std::vector<FlowLine> lines;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const Token& token = tokens[i];
+        const float gap = (lines.empty() || lines.back().count == 0) ? 0.0f : flow_gap(c, flow, tokens[i - 1], token);
+        if (lines.empty() || (lines.back().count > 0 && lines.back().width + gap + token.size.x > width)) {
+            lines.push_back({i, 0, 0.0f, 0.0f});
+        }
+        FlowLine& line = lines.back();
+        line.width += (line.count ? gap : 0.0f) + token.size.x;
+        line.height = std::max(line.height, token.size.y);
+        ++line.count;
+    }
+    return lines;
+}
+
+ImVec2 measure_flow(const Context& c, const Item& flow, float width) {
+    const auto tokens = flow_tokens(c, flow);
+    const auto lines = flow_lines(c, flow, tokens, width);
+    ImVec2 size{0.0f, 0.0f};
+    for (const FlowLine& line : lines) {
+        size.x = std::max(size.x, line.width);
+        size.y += line.height;
+    }
+    if (lines.size() > 1) size.y += flow.line_gap * c.scale * (lines.size() - 1);
+    return size;
+}
+
+void draw_flow(const Context& c, const Item& flow, ImVec2 position, float width) {
+    const auto tokens = flow_tokens(c, flow);
+    const auto lines = flow_lines(c, flow, tokens, width);
+    float y = position.y;
+    for (const FlowLine& line : lines) {
+        float x = position.x;
+        for (size_t i = line.first; i < line.first + line.count; ++i) {
+            const Token& token = tokens[i];
+            if (i > line.first) x += flow_gap(c, flow, tokens[i - 1], token);
+            const ImVec2 at(x, y + (line.height - token.size.y) * 0.5f);
+            if (token.word)
+                draw_text_run(c, token.item->style, at, token.begin, token.end, 0.0f);
+            else
+                draw_item(c, *token.item, at, token.size, token.size.x, FLT_MAX);
+            x += token.size.x;
+        }
+        y += line.height + flow.line_gap * c.scale;
+    }
+}
+
+// ------------------------------------------------------------------ items
+
 // Size of an item; `width` is the available width, or FLT_MAX when the zone
 // fits its content (text then does not wrap).
 ImVec2 measure(const Context& c, const Item& item, float width) {
     switch (item.kind) {
     case ItemKind::Text: {
-        ImFont* font = c.resources.font(item.style.font);
         const float wrap = width < FLT_MAX ? width : 0.0f;
-        return font->CalcTextSizeA(item.style.size * c.scale, FLT_MAX, wrap, item.text.c_str());
+        return text_size(c, item.style, item.text.c_str(), nullptr, wrap);
     }
     case ItemKind::Image:
         return image_size(c, item);
@@ -64,6 +192,8 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
         if (item.children.size() > 1) size.x += item.spacing * c.scale * (item.children.size() - 1);
         return size;
     }
+    case ItemKind::Flow:
+        return measure_flow(c, item, width);
     case ItemKind::Spacer:
         return {0.0f, item.size.y * c.scale};
     case ItemKind::Separator:
@@ -72,36 +202,64 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
         const float w = item.size.x > 0.0f ? item.size.x * c.scale : (width < FLT_MAX ? width : 120.0f * c.scale);
         return {w, item.size.y * c.scale};
     }
+    case ItemKind::Chip: {
+        const ImVec2 text = text_size(c, item.style, item.text.c_str(), nullptr, 0.0f);
+        return {std::max(item.size.x * c.scale, text.x + item.padding * 2.0f * c.scale),
+            std::max(item.size.y * c.scale, text.y)};
+    }
+    case ItemKind::Icon:
+    case ItemKind::Toggle:
+        return {item.size.x * c.scale, item.size.y * c.scale};
+    case ItemKind::Grow:
+        return {0.0f, 0.0f};
     }
     return {0.0f, 0.0f};
 }
 
-void draw_text(const Context& c, const Item& item, ImVec2 position, float width) {
-    ImFont* font = c.resources.font(item.style.font);
-    const float size = item.style.size * c.scale;
-    const float wrap = width < FLT_MAX ? width : 0.0f;
-    const char* text = item.text.c_str();
-    position = snap(position);
-    if (item.style.outline > 0.0f) {
-        const float o = std::max(1.0f, item.style.outline * c.scale);
-        const ImU32 color = fade(c, item.style.outline_color);
-        for (int dx = -1; dx <= 1; ++dx)
-            for (int dy = -1; dy <= 1; ++dy)
-                if (dx || dy) c.list.AddText(font, size, ImVec2(position.x + dx * o, position.y + dy * o), color, text, nullptr, wrap);
+void draw_icon(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
+    const float k = std::min(size.x, size.y) / item.viewbox;
+    const ImVec2 origin(position.x + (size.x - item.viewbox * k) * 0.5f, position.y + (size.y - item.viewbox * k) * 0.5f);
+    const ImU32 color = fade(c, item.color);
+    const float thickness = std::max(1.0f, item.stroke * k);
+    std::vector<ImVec2> points;
+    for (const Polyline& line : item.icon) {
+        points.clear();
+        for (const ImVec2& point : line.points) points.emplace_back(origin.x + point.x * k, origin.y + point.y * k);
+        c.list.AddPolyline(points.data(), static_cast<int>(points.size()), color, thickness,
+            line.closed ? ImDrawFlags_Closed : ImDrawFlags_None);
+        // Round joins and caps, as the stroke-linecap/linejoin of the source icons.
+        for (const ImVec2& point : points) c.list.AddCircleFilled(point, thickness * 0.5f, color, 8);
     }
-    if (item.style.shadow) {
-        const float o = std::max(1.0f, 1.5f * c.scale);
-        c.list.AddText(font, size, ImVec2(position.x + o, position.y + o), fade(c, item.style.shadow_color), text, nullptr, wrap);
+}
+
+void draw_row(const Context& c, const Item& item, ImVec2 position, ImVec2 size, float content_width) {
+    std::vector<ImVec2> sizes;
+    float natural = 0.0f;
+    int grows = 0;
+    for (const Item& child : item.children) {
+        sizes.push_back(measure(c, child, FLT_MAX));
+        natural += sizes.back().x;
+        if (child.kind == ItemKind::Grow) ++grows;
     }
-    c.list.AddText(font, size, position, fade(c, item.style.color), text, nullptr, wrap);
+    if (item.children.size() > 1) natural += item.spacing * c.scale * (item.children.size() - 1);
+    // Grow items share the width the row has beyond its content.
+    const float extra = grows && content_width < FLT_MAX ? std::max(0.0f, content_width - natural) / grows : 0.0f;
+    float x = position.x;
+    for (size_t i = 0; i < item.children.size(); ++i) {
+        const Item& child = item.children[i];
+        ImVec2 child_size = sizes[i];
+        if (child.kind == ItemKind::Grow) child_size.x += extra;
+        draw_item(c, child, ImVec2(x, position.y + (size.y - child_size.y) * 0.5f), child_size, child_size.x, FLT_MAX);
+        x += child_size.x + item.spacing * c.scale;
+    }
 }
 
 // `wrap_width` is the zone's fixed content width, or FLT_MAX when the zone fits
-// its content; `content_width` is the width separators and bars span.
+// its content; `content_width` is the width separators, bars and rows span.
 void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size, float content_width, float wrap_width) {
     switch (item.kind) {
     case ItemKind::Text:
-        draw_text(c, item, position, wrap_width);
+        draw_text_run(c, item.style, position, item.text.c_str(), nullptr, wrap_width < FLT_MAX ? wrap_width : 0.0f);
         break;
     case ItemKind::Image: {
         const ImVec2 min = snap(position);
@@ -114,16 +272,14 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
             c.list.AddImage(texture, min, max, ImVec2(item.uv.x, item.uv.y), ImVec2(item.uv.z, item.uv.w), fade(c, item.tint));
         break;
     }
-    case ItemKind::Row: {
-        float x = position.x;
-        for (const Item& child : item.children) {
-            const ImVec2 child_size = measure(c, child, FLT_MAX);
-            draw_item(c, child, ImVec2(x, position.y + (size.y - child_size.y) * 0.5f), child_size, child_size.x, FLT_MAX);
-            x += child_size.x + item.spacing * c.scale;
-        }
+    case ItemKind::Row:
+        draw_row(c, item, position, size, content_width);
         break;
-    }
+    case ItemKind::Flow:
+        draw_flow(c, item, position, wrap_width);
+        break;
     case ItemKind::Spacer:
+    case ItemKind::Grow:
         break;
     case ItemKind::Separator: {
         const float y = std::floor(position.y + size.y * 0.5f);
@@ -137,6 +293,28 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
         c.list.AddRectFilled(min, max, fade(c, item.background), rounding);
         if (item.value > 0.0f)
             c.list.AddRectFilled(min, ImVec2(min.x + size.x * item.value, max.y), fade(c, item.color), rounding);
+        break;
+    }
+    case ItemKind::Chip: {
+        const ImVec2 min = snap(position);
+        const ImVec2 max(min.x + size.x, min.y + size.y);
+        c.list.AddRectFilled(min, max, fade(c, item.background), item.rounding * c.scale);
+        const ImVec2 text = text_size(c, item.style, item.text.c_str(), nullptr, 0.0f);
+        draw_text_run(c, item.style, ImVec2(min.x + (size.x - text.x) * 0.5f, min.y + (size.y - text.y) * 0.5f),
+            item.text.c_str(), nullptr, 0.0f);
+        break;
+    }
+    case ItemKind::Icon:
+        draw_icon(c, item, position, size);
+        break;
+    case ItemKind::Toggle: {
+        const ImVec2 min = snap(position);
+        const ImVec2 max(min.x + size.x, min.y + size.y);
+        const float radius = size.y * 0.5f;
+        c.list.AddRectFilled(min, max, fade(c, item.on ? item.on_color : item.color), radius);
+        const float knob = radius - 2.0f * c.scale;
+        const float x = item.on ? max.x - radius : min.x + radius;
+        c.list.AddCircleFilled(ImVec2(x, min.y + radius), std::max(1.0f, knob), fade(c, item.knob), 16);
         break;
     }
     }
@@ -185,9 +363,9 @@ void draw_zone(const Context& c, const Zone& zone, ImVec2 screen) {
         zone.anchor.y * screen.y - zone.pivot.y * size.y + zone.offset.y * c.scale));
     const ImVec2 max(min.x + size.x, min.y + size.y);
     const float rounding = zone.rounding * c.scale;
-    if ((zone.background >> IM_COL32_A_SHIFT) & 0xFF) c.list.AddRectFilled(min, max, fade(c, zone.background), rounding);
+    if (visible_color(zone.background)) c.list.AddRectFilled(min, max, fade(c, zone.background), rounding);
     if (zone.frame.image) draw_frame(c, zone.frame, min, max);
-    if (zone.border_width > 0.0f && ((zone.border >> IM_COL32_A_SHIFT) & 0xFF))
+    if (zone.border_width > 0.0f && visible_color(zone.border))
         c.list.AddRect(min, max, fade(c, zone.border), rounding, std::max(1.0f, zone.border_width * c.scale));
 
     c.list.PushClipRect(min, max, true);
@@ -195,7 +373,11 @@ void draw_zone(const Context& c, const Zone& zone, ImVec2 screen) {
     const float x = min.x + padding.x;
     for (size_t i = 0; i < zone.items.size(); ++i) {
         const Item& item = zone.items[i];
-        const ImVec2 item_size = sizes[i];
+        ImVec2 item_size = sizes[i];
+        // A row with grow items spans the content width.
+        if (item.kind == ItemKind::Row &&
+                std::any_of(item.children.begin(), item.children.end(), [](const Item& child) { return child.kind == ItemKind::Grow; }))
+            item_size.x = content_width;
         float item_x = x;
         if (item.align == Align::Center) item_x += (content_width - item_size.x) * 0.5f;
         if (item.align == Align::End) item_x += content_width - item_size.x;
@@ -208,8 +390,10 @@ void draw_zone(const Context& c, const Zone& zone, ImVec2 screen) {
 }  // namespace
 
 void draw_scene(ImDrawList& list, const SceneSnapshot& scene, ImVec2 screen, const DrawResources& resources) {
-    const Context c{list, resources, screen.y / kReferenceHeight * scene.options.scale, scene.options.opacity};
-    for (const auto& zone : scene.zones) draw_zone(c, *zone, screen);
+    for (const auto& zone : scene.zones) {
+        const Context c{list, resources, screen.y / zone->reference * scene.options.scale, scene.options.opacity};
+        draw_zone(c, *zone, screen);
+    }
 }
 
 }  // namespace overlay

@@ -28,6 +28,7 @@ pub(crate) mod shroudforge {
         mod dispatch_mod_ui_actions;
         pub(crate) mod game_overlay;
         pub(crate) mod read_runtime_operations;
+        mod read_ui_locale;
         mod resolve_overlay_paths;
         mod set_mod_settings;
         pub(crate) use create_mod_api::create;
