@@ -74,7 +74,7 @@ Items (a plain string is a text item):
 
 Build with `dev/build/build_game_overlay.ps1`. Copy `build/game-overlay/Release/overlay_present_test.exe` beside the built layer as `enshrouded.exe`. Then run it with `VK_ADD_IMPLICIT_LAYER_PATH` set to that folder and `SHROUDFORGE_OVERLAY_ENABLE=1`:
 
-```
+```powershell
 enshrouded.exe modules/game-overlay/tests/assets capture.bmp
 ```
 
