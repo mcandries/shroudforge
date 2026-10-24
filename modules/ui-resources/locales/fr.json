@@ -474,6 +474,7 @@
   "settings.modules.field.overlayOpacity": "Opacité (%)",
   "settings.modules.field.overlayHideKey": "Touche afficher/masquer",
   "settings.modules.field.overlayHideKeyHint": "Clique, puis appuie sur une touche ou une combinaison comme Shift+F12. Retour arrière l’efface.",
+  "settings.modules.field.overlayHideInMenus": "Masquer quand un menu du jeu est ouvert (inventaire, carte, pause)",
   "settings.modules.field.source": "Source du journal",
   "settings.modules.field.startPage": "Page de démarrage",
   "settings.modules.field.tail": "Taille de l’extrait final du journal (octets)",

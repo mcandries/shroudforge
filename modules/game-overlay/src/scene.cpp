@@ -28,6 +28,7 @@ std::mutex scene_mutex;
 std::map<std::pair<std::string, std::string>, std::shared_ptr<const Zone>> zones;
 Options options;
 bool hidden = false;
+bool menu_open = false;
 std::map<std::string, std::shared_ptr<Image>> images;  // Kept for the session: textures are never released mid-game.
 
 std::mutex output_mutex;
@@ -309,6 +310,7 @@ SceneSnapshot snapshot_scene() {
 bool scene_has_visible_zones() {
     std::lock_guard lock(scene_mutex);
     if (!options.enabled || hidden || options.opacity <= 0.0f) return false;
+    if (options.hide_in_menus && menu_open) return false;
     for (auto& [key, zone] : zones) {
         if (zone->visible) return true;
     }
@@ -323,6 +325,16 @@ void set_options(const Options& value) {
 Options current_options() {
     std::lock_guard lock(scene_mutex);
     return options;
+}
+
+void set_menu_open(bool value) {
+    std::lock_guard lock(scene_mutex);
+    menu_open = value;
+}
+
+bool is_menu_open() {
+    std::lock_guard lock(scene_mutex);
+    return menu_open;
 }
 
 void set_hidden(bool value) {
@@ -400,6 +412,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     {
         std::lock_guard lock(scene_mutex);
         status["scale"] = (status["height"].get<int>() / kReferenceHeight) * options.scale;
+        status["menu"] = menu_open;
     }
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;

@@ -5,4 +5,5 @@ export const gameOverlaySettingsFields: Array<
 > = [
   ['gameOverlay', 'scale', 'settings.modules.field.overlayScale'],
   ['gameOverlay', 'opacity', 'settings.modules.field.overlayOpacity'],
+  ['gameOverlay', 'hideInMenus', 'settings.modules.field.overlayHideInMenus'],
 ]

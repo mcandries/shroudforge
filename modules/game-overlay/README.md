@@ -38,8 +38,7 @@ The player edits them in the Modloader (F9, Settings, Modules, Game overlay). Th
 | `scale` | `100` | Size of every zone, in percent (25 to 400), on top of the screen scale. |
 | `opacity` | `100` | Opacity of every zone, in percent. |
 | `hideKey` | `""` | Key or combination that shows or hides every zone while the game has focus, such as `Shift+F12`, in the names mods use (`game_keys.rs`); empty for none. Captured by pressing it in F9 (`ui/edit-key-combo.tsx`). |
-
-The layer also logs when the mouse cursor is shown, hidden or confined, to find a signal for the game's menus (the zones are drawn over them for now).
+| `hideInMenus` | `true` | No zone while a game menu is open. A menu is open when the game window has the focus and shows the mouse cursor: Enshrouded hides it while playing, its shape menu included, and shows it in the inventory, the map and the pause menu. Mods read it as `status().menu`. |
 
 The layer rereads the file at most once per second, only when its modification time changed, so changes apply while the game runs.
 

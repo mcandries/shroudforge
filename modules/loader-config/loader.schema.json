@@ -729,6 +729,9 @@
                 "integer"
               ],
               "maxLength": 40
+            },
+            "hideInMenus": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false
