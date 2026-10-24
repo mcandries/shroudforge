@@ -31,8 +31,8 @@
 
 namespace {
 
-constexpr uint32_t kSquareSize = 64;
-constexpr int32_t kSquareOffset = 32;
+constexpr uint32_t kSquareSize = 300;
+constexpr int32_t kSquareOffset = 100;
 
 // The environment that enables the layer is inherited by the processes the
 // game starts (the ShroudForge UI and its WebView2 helpers, which probe
@@ -99,6 +99,7 @@ struct InstanceData {
     PFN_vkGetInstanceProcAddr next_gipa{};
     PFN_vkDestroyInstance destroy_instance{};
     PFN_vkGetPhysicalDeviceMemoryProperties get_memory_properties{};
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_surface_capabilities{};
 };
 
 struct SwapchainData {
@@ -386,6 +387,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* info,
     data->destroy_instance = reinterpret_cast<PFN_vkDestroyInstance>(next_gipa(*instance, "vkDestroyInstance"));
     data->get_memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
         next_gipa(*instance, "vkGetPhysicalDeviceMemoryProperties"));
+    data->get_surface_capabilities = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+        next_gipa(*instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
     {
         std::lock_guard lock(state_mutex);
         instances[dispatch_key(*instance)] = data;
@@ -529,7 +532,21 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue2(VkDevice device, const VkDeviceQueueI
 VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* info,
         const VkAllocationCallbacks* allocator, VkSwapchainKHR* swapchain) {
     DeviceData* d = device_of(dispatch_key(device));
-    VkResult result = d->create_swapchain(device, info, allocator, swapchain);
+    // The square is copied into the swapchain images, which needs the transfer
+    // destination usage. Add it when the game did not ask for it and the
+    // surface allows it.
+    VkSwapchainCreateInfoKHR patched = *info;
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (!(patched.imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) && d->instance->get_surface_capabilities &&
+            d->instance->get_surface_capabilities(d->physical_device, info->surface, &capabilities) == VK_SUCCESS &&
+            (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        patched.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VkResult result = d->create_swapchain(device, &patched, allocator, swapchain);
+    if (result != VK_SUCCESS && patched.imageUsage != info->imageUsage) {
+        log_line("overlay: swapchain with transfer usage refused (%d), created as requested", static_cast<int>(result));
+        patched.imageUsage = info->imageUsage;
+        result = d->create_swapchain(device, info, allocator, swapchain);
+    }
     if (result != VK_SUCCESS) return result;
     SwapchainData data;
     data.format = info->imageFormat;
@@ -538,7 +555,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapc
     d->get_swapchain_images(device, *swapchain, &count, nullptr);
     data.images.resize(count);
     d->get_swapchain_images(device, *swapchain, &count, data.images.data());
-    const bool transfer = (info->imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
+    log_line("overlay: swapchain usage requested 0x%x, used 0x%x", info->imageUsage, patched.imageUsage);
+    const bool transfer = (patched.imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
     const bool format_ok = is_rgba(info->imageFormat) || is_bgra(info->imageFormat);
     const bool fits = info->imageExtent.width >= kSquareSize + kSquareOffset &&
         info->imageExtent.height >= kSquareSize + kSquareOffset;
