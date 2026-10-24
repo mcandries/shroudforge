@@ -39,7 +39,11 @@ void log_line(const char* format, ...) {
         return opened;
     }();
     if (!file) return;
-    fprintf(file, "[%lu %llu] ", GetCurrentProcessId(), GetTickCount64());
+    // UTC wall-clock time, like the ShroudForge log, so both can be read together.
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    fprintf(file, "[%lu %04u-%02u-%02u %02u:%02u:%02u,%03u UTC] ", GetCurrentProcessId(), now.wYear, now.wMonth, now.wDay,
+        now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
     va_list arguments;
     va_start(arguments, format);
     vfprintf(file, format, arguments);
