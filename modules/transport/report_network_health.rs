@@ -8,6 +8,7 @@ static NETWORK_PROBE_OUTAGE_REPORTED: AtomicBool = AtomicBool::new(false);
 static NETWORK_ACKNOWLEDGED_PEER: AtomicU64 = AtomicU64::new(0);
 static NETWORK_PROBE_LAST_FAILURE: std::sync::Mutex<Option<std::time::Instant>> =
     std::sync::Mutex::new(None);
+static NETWORK_LAST_DIAGNOSIS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 fn network_probe_failure_started() -> bool {
     let mut last_failure = NETWORK_PROBE_LAST_FAILURE
@@ -55,6 +56,18 @@ pub fn report_network_health(
             }
         } else {
             tracing::warn!(target: "shroudforge::network", available = network.available, service_ready = network.service_ready, "Network service is waiting for Steam Networking Messages");
+        }
+    }
+    // While waiting, log which lookup step fails, each time it changes.
+    if network_state != 1 {
+        if let Some(detail) = crate::diagnose() {
+            let mut last = NETWORK_LAST_DIAGNOSIS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.as_deref() != Some(detail.as_str()) {
+                tracing::warn!(target: "shroudforge::network", detail = %detail, "Steam Networking Messages lookup");
+                *last = Some(detail);
+            }
         }
     }
     let stats = crate::service_stats();
