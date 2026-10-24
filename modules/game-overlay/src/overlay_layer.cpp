@@ -1,9 +1,10 @@
 // ShroudForge game overlay: an implicit Vulkan layer.
 //
 // The Vulkan loader inserts this layer between Enshrouded and the driver
-// when the game process lists it in VK_INSTANCE_LAYERS (the ShroudForge
-// bootstrap points the loader at it and enables it). At each vkQueuePresentKHR the layer records a few
-// transfer commands that draw into the swapchain image, then presents.
+// when SHROUDFORGE_OVERLAY_ENABLE=1 is set and VK_ADD_IMPLICIT_LAYER_PATH
+// names its folder (the ShroudForge bootstrap sets both in the game process).
+// At each vkQueuePresentKHR the layer records a few transfer commands that
+// draw into the swapchain image, then presents.
 //
 // First step: a solid square in the top-left corner, to validate that the
 // layer loads and draws without cost. Anything unexpected (unsupported
@@ -16,9 +17,12 @@
 
 #include <windows.h>
 
+#include <intrin.h>
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -70,6 +74,17 @@ void log_line(const char* format, ...) {
     va_end(arguments);
     fputc('\n', file);
     fflush(file);
+}
+
+// Diagnostics: the DLL that holds an address (a caller, or the next layer).
+std::string module_name(const void* address) {
+    HMODULE module{};
+    if (!address || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCSTR>(address), &module)) return "?";
+    char path[MAX_PATH]{};
+    GetModuleFileNameA(module, path, MAX_PATH);
+    const char* separator = strrchr(path, '\\');
+    return separator ? separator + 1 : path;
 }
 
 // ------------------------------------------------------- dispatch tables
@@ -356,6 +371,11 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* info,
         chain = static_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(chain->pNext));
     if (!chain) return VK_ERROR_INITIALIZATION_FAILED;
     PFN_vkGetInstanceProcAddr next_gipa = chain->u.pLayerInfo->pfnNextGetInstanceProcAddr;
+    std::string below;
+    for (auto* link = chain->u.pLayerInfo; link; link = link->pNext)
+        below += module_name(reinterpret_cast<const void*>(link->pfnNextGetInstanceProcAddr)) + " ";
+    log_line("overlay: CreateInstance called from %s; layers below: %s",
+        module_name(_ReturnAddress()).c_str(), below.c_str());
     chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
     auto next_create = reinterpret_cast<PFN_vkCreateInstance>(next_gipa(VK_NULL_HANDLE, "vkCreateInstance"));
     VkResult result = next_create(info, allocator, instance);
@@ -399,6 +419,11 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
     if (!chain) return VK_ERROR_INITIALIZATION_FAILED;
     PFN_vkGetInstanceProcAddr next_gipa = chain->u.pLayerInfo->pfnNextGetInstanceProcAddr;
     PFN_vkGetDeviceProcAddr next_gdpa = chain->u.pLayerInfo->pfnNextGetDeviceProcAddr;
+    std::string below;
+    for (auto* link = chain->u.pLayerInfo; link; link = link->pNext)
+        below += module_name(reinterpret_cast<const void*>(link->pfnNextGetDeviceProcAddr)) + " ";
+    log_line("overlay: CreateDevice called from %s; layers below: %s",
+        module_name(_ReturnAddress()).c_str(), below.c_str());
     chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
     PFN_vkSetDeviceLoaderData set_loader_data{};
     for (auto* link = static_cast<const VkLayerDeviceCreateInfo*>(info->pNext); link;
@@ -552,9 +577,9 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
 
 #define INTERCEPT(name) if (std::strcmp(requested, "vk" #name) == 0) return reinterpret_cast<PFN_vkVoidFunction>(&name)
 
-void trace_request(const char* where, const void* handle, const char* requested) {
+void trace_request(const char* where, const void* handle, const char* requested, const void* caller) {
     if (std::strstr(requested, "Swapchain") || std::strstr(requested, "Present"))
-        log_line("overlay: %s(%p, %s)", where, handle, requested);
+        log_line("overlay: %s(%p, %s) from %s", where, handle, requested, module_name(caller).c_str());
 }
 
 PFN_vkVoidFunction device_function(const char* requested) {
@@ -572,7 +597,7 @@ PFN_vkVoidFunction device_function(const char* requested) {
 
 OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetDeviceProcAddr(
         VkDevice device, const char* requested) {
-    trace_request("GetDeviceProcAddr", device, requested);
+    trace_request("GetDeviceProcAddr", device, requested, _ReturnAddress());
     if (PFN_vkVoidFunction own = device_function(requested)) return own;
     DeviceData* d = device_of(dispatch_key(device));
     return d ? d->next_gdpa(device, requested) : nullptr;
@@ -580,7 +605,7 @@ OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetDe
 
 OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetInstanceProcAddr(
         VkInstance instance, const char* requested) {
-    trace_request("GetInstanceProcAddr", instance, requested);
+    trace_request("GetInstanceProcAddr", instance, requested, _ReturnAddress());
     INTERCEPT(CreateInstance);
     INTERCEPT(DestroyInstance);
     INTERCEPT(CreateDevice);

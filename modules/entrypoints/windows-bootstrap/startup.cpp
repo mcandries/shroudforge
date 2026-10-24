@@ -64,14 +64,16 @@ void append_environment(const wchar_t* name, const std::wstring& value) {
 
 // The game overlay is a Vulkan layer shipped in shroudforge\overlay. It must
 // be enabled before Enshrouded creates its Vulkan instance, so the loader is
-// pointed at it from here rather than from the runtime thread.
+// pointed at it from here rather than from the runtime thread. It is an
+// implicit layer so that it sits above the other implicit layers (Steam's
+// fossilize layer does not pass swapchain functions down to explicit ones).
 void enable_game_overlay() {
     const auto overlay = shroudforge_directory(module_directory()) / L"overlay";
     if (GetFileAttributesW((overlay / L"shroudforge_overlay.json").c_str()) == INVALID_FILE_ATTRIBUTES) return;
     wchar_t flag[8]{};
     if (GetEnvironmentVariableW(L"SHROUDFORGE_OVERLAY", flag, 8) && flag[0] == L'0') return;
-    append_environment(L"VK_ADD_LAYER_PATH", overlay.wstring());
-    append_environment(L"VK_INSTANCE_LAYERS", L"VK_LAYER_SHROUDFORGE_overlay");
+    append_environment(L"VK_ADD_IMPLICIT_LAYER_PATH", overlay.wstring());
+    SetEnvironmentVariableW(L"SHROUDFORGE_OVERLAY_ENABLE", L"1");
 }
 }
 
