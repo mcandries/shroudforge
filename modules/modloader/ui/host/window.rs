@@ -369,8 +369,10 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let mut next_refresh = Instant::now();
     // The background work of each refresh (status logging, news, player
     // name) always runs. Only its UI snapshot is skipped while the window is
-    // hidden, and an unchanged snapshot is not pushed to the page again.
+    // hidden, and an unchanged snapshot is not pushed to the page again. The
+    // same goes for the window state: each push re-renders the whole page.
     let mut last_snapshot = String::new();
+    let mut last_window_state = String::new();
     let mut webview_visible = window.is_visible();
     let mut next_announcement_retry = Instant::now() + Duration::from_secs(30);
     let mut next_visibility_poll = Instant::now();
@@ -383,11 +385,13 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let mut loaded_settings_revision = live_settings_revision(&arguments.root);
     let mut keybind_layout_revision = shroudforge_hotkeys::layout_revision();
     let mut pending_window_geometry_save: Option<Instant> = None;
+    let mut timing = RefreshTiming::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. })
             | Event::NewEvents(StartCause::Init) => {
+                let tick_started = Instant::now();
                 if pending_window_geometry_save
                     .is_some_and(|deadline| Instant::now() >= deadline)
                 {
@@ -1025,10 +1029,14 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                 }
                 if Instant::now() >= next_window_state_refresh {
                     let windows = shroudforge_loader_config::config::window_state(&arguments.root);
-                    if let Ok(payload) = serde_json::to_string(&windows) {
-                        let _ = webview.evaluate_script(&format!(
-                            "window.__shroudforgeWindowState({payload});"
-                        ));
+                    if let Ok(payload) = serde_json::to_string(&windows)
+                        && payload != last_window_state
+                        && webview
+                            .evaluate_script(&format!("window.__shroudforgeWindowState({payload});"))
+                            .is_ok()
+                    {
+                        last_window_state = payload;
+                        timing.window_states += 1;
                     }
                     next_window_state_refresh = Instant::now() + Duration::from_millis(250);
                 }
@@ -1083,12 +1091,14 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                     }
                     next_refresh = Instant::now()
                         + Duration::from_millis(module_config.refresh_milliseconds.clamp(250, 10_000));
+                    let mut part = Instant::now();
                     let central = read_central_config(&arguments.root);
                     let mods = read_mods(&arguments.root);
                     let notification_mods: Vec<_> = mods.iter().map(|item| shroudforge_news::ModNotification {
                         id: &item.id, name: &item.name, version: &item.version, ecosystem: item.ecosystem, changelog: &item.changelog,
                     }).collect();
                     shroudforge_news::sync_mod_events(&arguments.root, &notification_mods);
+                    timing.add_part(0, &mut part);
                     let game_process_id =
                         (!arguments.desktop && !arguments.server).then_some(arguments.game_pid);
                     let player_name_detection =
@@ -1096,6 +1106,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             &arguments.root,
                             game_process_id,
                         );
+                    timing.add_part(1, &mut part);
                     let (snapshot, resolved_player_name) = read_ui_snapshot(
                         &arguments,
                         &active_provider,
@@ -1106,6 +1117,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         mods,
                         &player_name_detection,
                     );
+                    timing.add_part(2, &mut part);
                     log_player_name_detection(
                         &arguments.root,
                         &player_name_detection,
@@ -1120,6 +1132,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         &mut previous_mod_statuses,
                     );
                     log_configuration_errors(&arguments.root, &snapshot, &mut previous_configuration_errors);
+                    timing.add_part(3, &mut part);
                     if visible
                         && let Ok(payload) = serde_json::to_string(&snapshot)
                         && payload != last_snapshot
@@ -1128,8 +1141,12 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             .is_ok()
                     {
                         last_snapshot = payload;
+                        timing.pushes += 1;
                     }
+                    timing.add_part(4, &mut part);
+                    timing.end_refresh();
                 }
+                timing.end_tick(&arguments.root, tick_started, visible);
             }
             Event::MainEventsCleared => {
                 let current_layout_revision = shroudforge_hotkeys::layout_revision();
@@ -1281,4 +1298,77 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
             _ => {}
         }
     });
+}
+
+/// Diagnostic of our builds (not proposed upstream): how long the window's
+/// own thread is busy, since WebView2 input and scrolling wait for it.
+/// Logged every 30 seconds.
+#[derive(Default)]
+struct RefreshTiming {
+    since: Option<Instant>,
+    ticks: u32,
+    tick_total: Duration,
+    tick_max: Duration,
+    refreshes: u32,
+    refresh_total: Duration,
+    refresh_max: Duration,
+    refresh_current: Duration,
+    // Config and mods, player name, snapshot, logs, push.
+    parts: [Duration; 5],
+    pushes: u32,
+    window_states: u32,
+    visible_ticks: u32,
+}
+
+impl RefreshTiming {
+    fn add_part(&mut self, index: usize, started: &mut Instant) {
+        let elapsed = started.elapsed();
+        self.parts[index] += elapsed;
+        self.refresh_current += elapsed;
+        *started = Instant::now();
+    }
+
+    fn end_refresh(&mut self) {
+        self.refreshes += 1;
+        self.refresh_total += self.refresh_current;
+        self.refresh_max = self.refresh_max.max(self.refresh_current);
+        self.refresh_current = Duration::ZERO;
+    }
+
+    fn end_tick(&mut self, root: &std::path::Path, started: Instant, visible: bool) {
+        let elapsed = started.elapsed();
+        self.ticks += 1;
+        self.tick_total += elapsed;
+        self.tick_max = self.tick_max.max(elapsed);
+        if visible {
+            self.visible_ticks += 1;
+        }
+        let since = *self.since.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        let ms = |value: Duration| value.as_secs_f64() * 1000.0;
+        let average = |total: Duration, count: u32| if count == 0 { 0.0 } else { ms(total) / f64::from(count) };
+        let details = format!(
+            "busy {:.0} ms in {:.0} s: {} ticks avg {:.1} ms max {:.0} ms ({} visible); {} refreshes avg {:.0} ms max {:.0} ms (config+mods {:.0}, player name {:.0}, snapshot {:.0}, logs {:.0}, push {:.0} avg ms); {} snapshot and {} window state pushes",
+            ms(self.tick_total),
+            since.elapsed().as_secs_f64(),
+            self.ticks,
+            average(self.tick_total, self.ticks),
+            ms(self.tick_max),
+            self.visible_ticks,
+            self.refreshes,
+            average(self.refresh_total, self.refreshes),
+            ms(self.refresh_max),
+            average(self.parts[0], self.refreshes),
+            average(self.parts[1], self.refreshes),
+            average(self.parts[2], self.refreshes),
+            average(self.parts[3], self.refreshes),
+            average(self.parts[4], self.refreshes),
+            self.pushes,
+            self.window_states,
+        );
+        write_activity(root, "modloader-ui", "Thread timing", "Measured", Some(&details), "info");
+        *self = Self { since: Some(Instant::now()), ..Self::default() };
+    }
 }
