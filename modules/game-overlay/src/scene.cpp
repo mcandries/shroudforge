@@ -27,6 +27,7 @@ constexpr int kMaxDepth = 3;
 std::mutex scene_mutex;
 std::map<std::pair<std::string, std::string>, std::shared_ptr<const Zone>> zones;
 Options options;
+bool hidden = false;
 std::map<std::string, std::shared_ptr<Image>> images;  // Kept for the session: textures are never released mid-game.
 
 std::mutex output_mutex;
@@ -247,10 +248,7 @@ SceneSnapshot snapshot_scene() {
     std::lock_guard lock(scene_mutex);
     snapshot.options = options;
     for (auto& [key, zone] : zones) {
-        if (!zone->visible) continue;
-        if (std::find(options.hidden_owners.begin(), options.hidden_owners.end(), zone->owner) != options.hidden_owners.end())
-            continue;
-        snapshot.zones.push_back(zone);
+        if (zone->visible) snapshot.zones.push_back(zone);
     }
     std::stable_sort(snapshot.zones.begin(), snapshot.zones.end(),
         [](const auto& a, const auto& b) { return a->order < b->order; });
@@ -259,11 +257,31 @@ SceneSnapshot snapshot_scene() {
 
 bool scene_has_visible_zones() {
     std::lock_guard lock(scene_mutex);
-    if (!options.enabled || options.opacity <= 0.0f) return false;
+    if (!options.enabled || hidden || options.opacity <= 0.0f) return false;
     for (auto& [key, zone] : zones) {
         if (zone->visible) return true;
     }
     return false;
+}
+
+void set_options(const Options& value) {
+    std::lock_guard lock(scene_mutex);
+    options = value;
+}
+
+Options current_options() {
+    std::lock_guard lock(scene_mutex);
+    return options;
+}
+
+void set_hidden(bool value) {
+    std::lock_guard lock(scene_mutex);
+    hidden = value;
+}
+
+bool is_hidden() {
+    std::lock_guard lock(scene_mutex);
+    return hidden;
 }
 
 void forget_textures() {
@@ -319,24 +337,6 @@ OVERLAY_EXPORT void ShroudforgeOverlay_ClearOwner(const char* owner) {
     if (!owner) return;
     std::lock_guard lock(scene_mutex);
     std::erase_if(zones, [&](auto& entry) { return entry.first.first == owner; });
-}
-
-// Player options: {enabled, scale, opacity, hidden = {mod ids}}.
-OVERLAY_EXPORT int ShroudforgeOverlay_SetOptions(const char* options_json, char* error, uint32_t error_size) {
-    try {
-        const json value = json::parse(options_json ? options_json : "{}");
-        Options parsed;
-        if (value.contains("enabled")) parsed.enabled = value["enabled"].get<bool>();
-        if (value.contains("scale")) parsed.scale = std::clamp(parse_number(value["scale"], "scale"), 0.25f, 4.0f);
-        if (value.contains("opacity")) parsed.opacity = std::clamp(parse_number(value["opacity"], "opacity"), 0.0f, 1.0f);
-        if (value.contains("hidden")) parsed.hidden_owners = value["hidden"].get<std::vector<std::string>>();
-        std::lock_guard lock(scene_mutex);
-        options = std::move(parsed);
-        return 0;
-    } catch (const std::exception& exception) {
-        write_error(exception.what(), error, error_size);
-        return -1;
-    }
 }
 
 // Writes {"active": bool, "width": n, "height": n, "scale": n} into `out`.

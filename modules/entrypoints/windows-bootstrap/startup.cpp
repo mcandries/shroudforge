@@ -68,7 +68,9 @@ void append_environment(const wchar_t* name, const std::wstring& value) {
 // implicit layer so that it sits above the other implicit layers: OBS and the
 // Steam overlay then see the square like the rest of the frame.
 void enable_game_overlay() {
-    const auto overlay = shroudforge_directory(module_directory()) / L"overlay";
+    const auto root = module_directory();
+    if (!ShroudforgeConfig::ModuleEnabled(root, "gameOverlay")) return;
+    const auto overlay = shroudforge_directory(root) / L"overlay";
     if (GetFileAttributesW((overlay / L"shroudforge_overlay.json").c_str()) == INVALID_FILE_ATTRIBUTES) return;
     wchar_t flag[8]{};
     if (GetEnvironmentVariableW(L"SHROUDFORGE_OVERLAY", flag, 8) && flag[0] == L'0') return;

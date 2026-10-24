@@ -92,11 +92,12 @@ struct Zone {
     std::vector<Item> items;
 };
 
+// Player options: modules.gameOverlay in modloader-config.json (F9).
 struct Options {
     bool enabled = true;
     float scale = 1.0f;
     float opacity = 1.0f;
-    std::vector<std::string> hidden_owners;
+    int hide_key = 0;  // Windows virtual-key code that shows/hides the overlay, 0 for none.
 };
 
 // The coordinates mods use are reference pixels of a 1920x1080 screen: they
@@ -118,6 +119,16 @@ void set_output(bool active, int width, int height);
 
 // Drops the GPU textures of cached images (their renderer was destroyed).
 void forget_textures();
+
+void set_options(const Options& options);
+Options current_options();
+// Hidden by the player's show/hide key.
+void set_hidden(bool hidden);
+bool is_hidden();
+
+// player_options.cpp: rereads the player options when the config file changed
+// (at most once per second) and handles the show/hide key. Called at each present.
+void update_player_options();
 
 // load_image.cpp: decodes a PNG or JPEG file, or returns null with a reason.
 std::shared_ptr<Image> load_image(const std::string& path, std::string& error);

@@ -16,6 +16,7 @@ import {
 } from '../../runtime-diagnostics/ui/show-diagnostics'
 import { debugConsoleSettingsFields } from '../../debug-console/ui/settings'
 import { worldEditorSettingsFields } from '../../world-editor/ui/settings'
+import { gameOverlaySettingsFields } from '../../game-overlay/ui/settings'
 import { NetworkSettings } from '../../transport/ui/settings'
 import { UpdatePreferences } from '../../updater/ui/edit-update-preferences'
 
@@ -142,6 +143,7 @@ export function ModulePreferencesEditor({
     ...diagnosticSettingsFields,
     ...debugConsoleSettingsFields,
     ...worldEditorSettingsFields,
+    ...gameOverlaySettingsFields,
     ['modloaderUi', 'toggleKey', 'settings.modules.field.hotkey'],
     ['modloaderUi', 'refreshMilliseconds', 'settings.modules.field.refresh'],
   ]
@@ -161,6 +163,9 @@ export function ModulePreferencesEditor({
     toggleKey: [1, 255],
     refreshMilliseconds: [100, 10000],
     tailBytes: [1024, 1048576],
+    scale: [25, 400],
+    opacity: [0, 100],
+    hideKey: [0, 255],
   }
   return (
     <>
@@ -193,6 +198,7 @@ export function ModulePreferencesEditor({
           [
             'debugConsole',
             'worldEditor',
+            'gameOverlay',
             'modloaderUi',
             'runtimeDiagnostics',
           ] as const
@@ -278,7 +284,11 @@ export function ModulePreferencesEditor({
                         <SettingsNumber
                           value={
                             prefs[module]?.[key] ??
-                            (key === 'popupCooldownSeconds' ? 30 : 0)
+                            (key === 'popupCooldownSeconds'
+                              ? 30
+                              : key === 'scale' || key === 'opacity'
+                                ? 100
+                                : 0)
                           }
                           minimum={ranges[key]?.[0]}
                           maximum={

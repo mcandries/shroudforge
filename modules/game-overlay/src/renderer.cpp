@@ -260,6 +260,7 @@ void wait_frames(DeviceData& d, Renderer& r) {
 
 VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& present) {
     if (!is_game_process() || !d.instance || !d.set_loader_data) return VK_NULL_HANDLE;
+    update_player_options();
     SwapchainData* target = nullptr;
     uint32_t image_index = 0;
     uint32_t family = UINT32_MAX;

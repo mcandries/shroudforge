@@ -2,7 +2,7 @@
 
 This module draws mod-defined zones (text, images, frames) over the game image. It is an implicit Vulkan layer, `shroudforge_overlay.dll`, shipped in `shroudforge/overlay` with its manifest `shroudforge_overlay.json`.
 
-The bootstrap (`modules/entrypoints/windows-bootstrap/startup.cpp`) enables it in the game client only. It adds the folder to `VK_ADD_IMPLICIT_LAYER_PATH` and sets `SHROUDFORGE_OVERLAY_ENABLE=1` before Enshrouded creates its Vulkan instance. `SHROUDFORGE_OVERLAY=0` turns it off. Processes started by the game inherit these variables, but the layer does nothing outside `enshrouded.exe`.
+The bootstrap (`modules/entrypoints/windows-bootstrap/startup.cpp`) enables it in the game client only. It adds the folder to `VK_ADD_IMPLICIT_LAYER_PATH` and sets `SHROUDFORGE_OVERLAY_ENABLE=1` before Enshrouded creates its Vulkan instance. It skips this when `modules.gameOverlay.enabled` is false in `modloader-config.json`, or when `SHROUDFORGE_OVERLAY=0`. Processes started by the game inherit these variables, but the layer does nothing outside `enshrouded.exe`.
 
 | Action | Implementation |
 | --- | --- |
@@ -11,6 +11,8 @@ The bootstrap (`modules/entrypoints/windows-bootstrap/startup.cpp`) enables it i
 | Lay out and draw zones and items | `src/draw_scene.cpp` |
 | Store zones and options, C API for the runtime | `src/scene.cpp` |
 | Decode PNG and JPEG images | `src/load_image.cpp` |
+| Read the player options, handle the show/hide key | `src/player_options.cpp` |
+| Player options in the Modloader (F9) | `ui/settings.ts`, `modules/loader-config/ui/show-module-settings.tsx` |
 | Log to `shroudforge_overlay.log` beside the DLL | `src/log.cpp` |
 | Present test with a readback | `tests/present_test.cpp` |
 
@@ -26,6 +28,19 @@ Without a visible zone, the present is passed through untouched and the layer do
 
 Fonts are TrueType or OpenType files rasterized on demand by Dear ImGui 1.92. The default font is Segoe UI, or the ImGui default if it is missing. Images and fonts stay loaded for the session (at most 100 images).
 
+## Player options
+
+The player edits them in the Modloader (F9, Settings, Modules, Game overlay). They are saved in `modules.gameOverlay` of `modloader-config.json`:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `enabled` | `true` | Read by the bootstrap at game start: the layer is not loaded at all when false. Also read live by the layer, which stops drawing. |
+| `scale` | `100` | Size of every zone, in percent (25 to 400), on top of the screen scale. |
+| `opacity` | `100` | Opacity of every zone, in percent. |
+| `hideKey` | `0` | Windows virtual-key code that shows or hides every zone while the game has focus; 0 for none. |
+
+The layer rereads the file at most once per second, only when its modification time changed, so changes apply while the game runs.
+
 ## C API
 
 The runtime (same process) finds the layer with `GetModuleHandleW(L"shroudforge_overlay.dll")` and calls these exports. All strings are UTF-8.
@@ -36,7 +51,6 @@ The runtime (same process) finds the layer with `GetModuleHandleW(L"shroudforge_
 | `int ShroudforgeOverlay_SetZone(owner, id, json, error, error_size)` | Create or replace zone `id` of mod `owner`. Returns 0, or -1 with a message. |
 | `void ShroudforgeOverlay_RemoveZone(owner, id)` | Remove one zone. |
 | `void ShroudforgeOverlay_ClearOwner(owner)` | Remove every zone of a mod. |
-| `int ShroudforgeOverlay_SetOptions(json, error, error_size)` | Player options: `enabled`, `scale`, `opacity`, `hidden` (mod ids). |
 | `int ShroudforgeOverlay_GetStatus(out, out_size)` | `{"active", "width", "height", "scale"}` of the current output. |
 
 Paths in zones must be absolute. Mods use the Lua API `shroudforge.overlay` (`set`, `remove`, `clear`, `status`, documented in `modules/mod-runtime/lua/shroudforge/v1/definitions/mod_api.lua`). The runtime resolves the `image` and `font` fields inside the mod's folder (`resolve_overlay_paths.rs`; zip packages are refused) and calls the layer (`game_overlay.rs`). A mod's zones are removed when it stops running (`session/record_runtime_state.rs`). Limits: 32 zones per mod, 256 items per zone, 4096 bytes per text, rows nested 3 deep.

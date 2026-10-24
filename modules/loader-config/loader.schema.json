@@ -707,6 +707,30 @@
           },
           "additionalProperties": false
         },
+        "gameOverlay": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "scale": {
+              "type": "integer",
+              "minimum": 25,
+              "maximum": 400
+            },
+            "opacity": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "hideKey": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          },
+          "additionalProperties": false
+        },
         "network": {
           "type": "object",
           "properties": {
