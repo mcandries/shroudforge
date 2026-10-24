@@ -848,5 +848,11 @@
   "updater.required": "所需更新",
   "updater.verifying": "正在验证下载…",
   "updater.waiting": "更新将在 Enshrouded 关闭后安装。",
-  "updater.current": "ShroudForge 已更新。"
+  "updater.current": "ShroudForge 已更新。",
+  "settings.modules.field.overlayScale": "Size (%)",
+  "settings.modules.field.overlayOpacity": "Opacity (%)",
+  "settings.modules.field.overlayHideKey": "Show/hide key",
+  "settings.modules.field.overlayHideInMenus": "Hide while a game menu is open (inventory, map, pause)",
+  "settings.modules.gameOverlay.title": "Game overlay",
+  "settings.modules.gameOverlay.description": "Draws the zones of mods (status panels, messages) over the game image. Changes apply at once; turning the module off or on applies at the next game start."
 }
