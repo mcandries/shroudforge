@@ -2,6 +2,7 @@ import type { SettingDefinition } from './mod-types'
 import type React from 'react'
 
 import { SettingSwitch, SettingsRow } from '../../ui-resources/edit-setting'
+import { clearsKeyCombo, keyComboFromEvent } from './format-key-combo'
 
 export function ModSetting({
   definition,
@@ -150,9 +151,15 @@ export function ModSetting({
         readOnly
         disabled={disabled}
         aria-label={definition.label}
+        title="Click, then press a key or a combination such as Shift+F4. Backspace clears it."
         onKeyDown={(event) => {
           event.preventDefault()
-          onChange(event.key)
+          if (clearsKeyCombo(event)) {
+            onChange('')
+            return
+          }
+          const combo = keyComboFromEvent(event)
+          if (combo) onChange(combo)
         }}
         onClick={(event) => event.currentTarget.focus()}
       />
