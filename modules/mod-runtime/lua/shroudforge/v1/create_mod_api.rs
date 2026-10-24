@@ -5,7 +5,10 @@ use mod_loader::Mod;
 use serde_json::json;
 
 use super::game_keys;
+use super::game_overlay;
+use super::resolve_overlay_paths::resolve_overlay_paths;
 use super::set_mod_settings::set_settings;
+use crate::lua::convert_json::{json_to_lua, lua_to_json};
 use crate::lua::LuaValue;
 
 pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
@@ -141,6 +144,46 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
         })?,
     )?;
     table.raw_set("ui", ui)?;
+
+    // Zones drawn over the game image; see modules/game-overlay/README.md.
+    let overlay = lua.create_table()?;
+    let overlay_mod = r#mod.clone();
+    overlay.raw_set(
+        "set",
+        lua.create_function(move |_, (id, zone): (String, LuaValue)| {
+            if !valid_identifier(&id) {
+                return Ok((None, Some("invalid zone id".to_owned())));
+            }
+            let mut zone = lua_to_json(zone)?;
+            let result = resolve_overlay_paths(&mut zone, &overlay_mod)
+                .and_then(|()| game_overlay::set_zone(&overlay_mod.info().id, &id, &zone));
+            Ok(match result {
+                Ok(()) => (Some(true), None),
+                Err(reason) => (None, Some(reason)),
+            })
+        })?,
+    )?;
+    let remove_mod_id = mod_id.clone();
+    overlay.raw_set(
+        "remove",
+        lua.create_function(move |_, id: String| {
+            game_overlay::remove_zone(&remove_mod_id, &id);
+            Ok(())
+        })?,
+    )?;
+    let clear_mod_id = mod_id.clone();
+    overlay.raw_set(
+        "clear",
+        lua.create_function(move |_, ()| {
+            game_overlay::clear_owner(&clear_mod_id);
+            Ok(())
+        })?,
+    )?;
+    overlay.raw_set(
+        "status",
+        lua.create_function(|lua, ()| json_to_lua(lua, &game_overlay::status()))?,
+    )?;
+    table.raw_set("overlay", overlay)?;
 
     let notifications = lua.create_table()?;
     notifications.raw_set(
