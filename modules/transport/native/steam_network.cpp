@@ -353,6 +353,8 @@ KFC_RUNTIME_API size_t __cdecl KfcRuntimeNetworkDiagnose(char* buffer, size_t ca
             : "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
         text += accessor ? (accessor() ? " messages=ok" : " messages=null") : " messages_accessor=missing";
         const auto api = resolve();
+        // After the direct lookup of find_interface.
+        text += api.messages ? " lookup=ok" : " lookup=null";
         text += std::string(" send=") + (api.send ? "1" : "0") + " receive=" + (api.receive ? "1" : "0") +
             " accept=" + (api.accept ? "1" : "0") + " release=" + (api.release ? "1" : "0");
         if (const auto user = steam_export<HandleFunction>("SteamAPI_GetHSteamUser")) text += " user=" + std::to_string(user());
