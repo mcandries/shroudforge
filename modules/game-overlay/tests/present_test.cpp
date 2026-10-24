@@ -2,8 +2,9 @@
 // frames through a real swapchain, then reads back the last presented image
 // and prints the pixel inside the square and one outside it.
 //
-// Run with VK_ADD_LAYER_PATH pointing at the built layer and
-// VK_INSTANCE_LAYERS=VK_LAYER_SHROUDFORGE_overlay.
+// Copy it beside the built layer as enshrouded.exe (the layer only draws in
+// the game process), then run it with VK_ADD_IMPLICIT_LAYER_PATH pointing at
+// that folder and SHROUDFORGE_OVERLAY_ENABLE=1.
 
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR

@@ -9,6 +9,12 @@
         "description": "ShroudForge game overlay",
         "functions": {
             "vkNegotiateLoaderLayerInterfaceVersion": "ShroudforgeOverlay_NegotiateLoaderLayerInterfaceVersion"
+        },
+        "enable_environment": {
+            "SHROUDFORGE_OVERLAY_ENABLE": "1"
+        },
+        "disable_environment": {
+            "SHROUDFORGE_OVERLAY_DISABLE": "1"
         }
     }
 }
