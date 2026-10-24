@@ -30,11 +30,25 @@ namespace {
 constexpr uint32_t kSquareSize = 64;
 constexpr int32_t kSquareOffset = 32;
 
+// The environment that enables the layer is inherited by the processes the
+// game starts (the ShroudForge UI and its WebView2 helpers, which probe
+// Vulkan). The layer only draws and logs in the game itself.
+bool is_game_process() {
+    static const bool game = [] {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        const wchar_t* separator = wcsrchr(path, L'\\');
+        return _wcsicmp(separator ? separator + 1 : path, L"enshrouded.exe") == 0;
+    }();
+    return game;
+}
+
 // ---------------------------------------------------------------- logging
 
 std::mutex log_mutex;
 
 void log_line(const char* format, ...) {
+    if (!is_game_process()) return;
     std::lock_guard lock(log_mutex);
     static FILE* file = [] {
         wchar_t path[MAX_PATH]{};
@@ -92,6 +106,8 @@ struct DeviceData {
     PFN_vkGetDeviceProcAddr next_gdpa{};
     PFN_vkSetDeviceLoaderData set_loader_data{};
     bool broken = false;
+    bool drawn_once = false;
+    bool unknown_present_logged = false;
 
     PFN_vkDestroyDevice destroy_device{};
     PFN_vkGetDeviceQueue get_device_queue{};
@@ -260,6 +276,12 @@ void image_barrier(DeviceData& d, VkCommandBuffer cb, VkImage image, VkImageLayo
 VkSemaphore draw(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& present) {
     if (d.broken) return VK_NULL_HANDLE;
     auto family = d.queue_families.find(queue);
+    const bool known_swapchain = present.swapchainCount > 0 && d.swapchains.count(present.pSwapchains[0]) > 0;
+    if ((family == d.queue_families.end() || !known_swapchain) && !d.unknown_present_logged) {
+        d.unknown_present_logged = true;
+        log_line("overlay: present with queue known %d, swapchain known %d",
+            family != d.queue_families.end() ? 1 : 0, known_swapchain ? 1 : 0);
+    }
     if (family == d.queue_families.end()) return VK_NULL_HANDLE;
     if (!d.pixel_memory && !create_pixels(d)) {
         log_line("overlay: pixel buffer unavailable, drawing disabled");
@@ -317,6 +339,10 @@ VkSemaphore draw(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& present) 
         return VK_NULL_HANDLE;
     }
     frame->submitted = true;
+    if (!d.drawn_once) {
+        d.drawn_once = true;
+        log_line("overlay: first square drawn");
+    }
     return frame->done;
 }
 
@@ -519,6 +545,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
 
 PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(DestroyDevice);
+    if (!is_game_process()) return nullptr;
     INTERCEPT(GetDeviceQueue);
     INTERCEPT(GetDeviceQueue2);
     INTERCEPT(CreateSwapchainKHR);
