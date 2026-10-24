@@ -59,7 +59,7 @@ Paths in zones must be absolute. Mods use the Lua API `shroudforge.overlay` (`se
 
 ## Zone format
 
-Sizes and offsets are reference pixels of a 1920x1080 screen. They are multiplied by `screen height / 1080 × scale option`. Colors are `"#RRGGBB"`, `"#RRGGBBAA"` or `[r, g, b, a]`.
+Sizes and offsets are reference pixels of a screen 1080 pixels high, or `reference` pixels high when the zone sets it (900 for a design made at 1600x900). They are multiplied by `screen height / reference × scale option`, the same factor in both directions: nothing is distorted, and on a wider screen only the anchors move. Colors are `"#RRGGBB"`, `"#RRGGBBAA"` or `[r, g, b, a]`.
 
 | Field | Meaning |
 | --- | --- |
@@ -67,12 +67,13 @@ Sizes and offsets are reference pixels of a 1920x1080 screen. They are multiplie
 | `pivot` | Point of the zone placed on the anchor, same values as fractions of the zone. Default: same as `anchor`. |
 | `offset` | `[x, y]` moved from that position. |
 | `size` | `[width, height]`; 0 fits the content. With a width, text wraps. |
+| `reference` | Screen height the zone's pixel values are designed for (240 to 4320). Default 1080. |
 | `order` | Drawing order, lower first. |
 | `visible` | `false` hides the zone without removing it. |
 | `background`, `border`, `border_width`, `rounding` | Plain background and border. |
 | `frame` | Nine-slice image: `{image, slice = n or [left, top, right, bottom] (image pixels), scale, tint}`. |
 | `padding`, `spacing` | Inner margin (`n` or `[x, y]`) and space between items. |
-| `text` | Default text style of the zone: `font` (TTF path), `size`, `color`, `shadow`, `shadow_color`, `outline`, `outline_color`. |
+| `text` | Default text style of the zone: `font` (TTF path), `size`, `color`, `shadow`, `shadow_color`, `shadow_offset` (`[x, y]`, default `[1.5, 1.5]`), `outline`, `outline_color`. |
 | `items` | List, drawn top to bottom. |
 
 Items (a plain string is a text item):
@@ -81,7 +82,12 @@ Items (a plain string is a text item):
 | --- | --- |
 | `text` | `text`, the text style fields, `align` (`left`, `center`, `right`). |
 | `image` | `image` (path), `size` (`n`, `[w, h]`, one side 0 keeps the ratio; default: image size), `tint`, `uv` `[u0, v0, u1, v1]` for an icon in an atlas, `rounding`, `align`. |
-| `row` | `items` side by side, centered vertically, `spacing`, text style fields inherited by its items. |
+| `row` | `items` side by side, centered vertically, `spacing`, text style fields inherited by its items. A row holding a `grow` spans the zone width. |
+| `grow` | In a row: takes the width left, to push the next items to the right. |
+| `flow` | `items` (text, chip, icon, image, toggle) laid out like a sentence: texts are cut into words and every line wraps at the zone width. `spacing` between non-text items (default 5), `line_gap` between lines. Punctuation sticks to what precedes it. |
+| `chip` | `text` on a rounded background, such as a key: text style fields (default dark text, no shadow), `background` (default `#F2EFE7`), `rounding` (3), `padding` (horizontal, 4), `box` `[min width, height]` (`[17, 17]`). |
+| `icon` | `path`: SVG path data stroked as lines (`M L H V A Z`, absolute or relative; curves are refused), `viewbox` (square side, 24), `size` (18), `stroke` (1.8, in viewbox units), `color` (default: the text color). |
+| `toggle` | `on`, `size` (`[26, 14]`), `color` (track off), `on_color` (track on, `#C9A24E`), `knob`. |
 | `spacer` | `size`: height. |
 | `separator` | `color`, `thickness`: a line across the zone. |
 | `progress` | `value` 0 to 1, `size`, `color`, `background`, `rounding`. |

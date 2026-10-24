@@ -61,33 +61,44 @@ function shroudforge_input.is_key_down(key) end
 --- @field color? ShroudForgeOverlayColor
 --- @field shadow? boolean
 --- @field shadow_color? ShroudForgeOverlayColor
+--- @field shadow_offset? number[] `{x, y}` in reference pixels. Default `{1.5, 1.5}`.
 --- @field outline? number Outline width in reference pixels.
 --- @field outline_color? ShroudForgeOverlayColor
 
 --- One line of a zone. A plain string is a text item.
 --- @class ShroudForgeOverlayItem: ShroudForgeOverlayTextStyle
---- @field type? 'text'|'image'|'row'|'spacer'|'separator'|'progress' Default: `text`.
---- @field text? string Text item content.
+--- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress' Default: `text`.
+--- @field text? string Text or chip content.
 --- @field align? 'left'|'center'|'right'
 --- @field image? string PNG or JPEG file, relative to the mod folder.
---- @field size? number|number[] Image or bar size, spacer height (reference pixels).
+--- @field size? number|number[] Text size for text and chips; size of an image, icon, toggle or bar; spacer height.
 --- @field tint? ShroudForgeOverlayColor Image color multiplier.
 --- @field uv? number[] `{u0, v0, u1, v1}` part of the image, for icons in an atlas.
 --- @field rounding? number
---- @field items? (ShroudForgeOverlayItem|string)[] Row content, side by side.
---- @field spacing? number Space between the items of a row.
---- @field color? ShroudForgeOverlayColor Separator or bar color.
---- @field background? ShroudForgeOverlayColor Bar background.
+--- @field items? (ShroudForgeOverlayItem|string)[] Row content side by side, or flow content wrapped like a sentence.
+--- @field spacing? number Space between the items of a row or the non-text items of a flow.
+--- @field line_gap? number Flow: space between wrapped lines.
+--- @field color? ShroudForgeOverlayColor Separator, bar or icon color; toggle track when off.
+--- @field background? ShroudForgeOverlayColor Bar or chip background.
 --- @field thickness? number Separator thickness.
 --- @field value? number Bar fill, 0 to 1.
+--- @field box? number[] Chip `{min width, height}`. Default `{17, 17}`.
+--- @field padding? number Chip horizontal padding. Default 4.
+--- @field path? string Icon: SVG path data (M L H V A Z), stroked.
+--- @field viewbox? number Icon box side. Default 24.
+--- @field stroke? number Icon line width, in viewbox units. Default 1.8.
+--- @field on? boolean Toggle state.
+--- @field on_color? ShroudForgeOverlayColor Toggle track when on.
+--- @field knob? ShroudForgeOverlayColor Toggle knob.
 
 --- A zone drawn over the game image. Sizes and offsets are reference pixels of a
---- 1920x1080 screen, scaled to the real resolution.
+--- screen 1080 pixels high (or `reference`), scaled by the real screen height.
 --- @class ShroudForgeOverlayZone
 --- @field anchor? ShroudForgeOverlayPoint Screen point the zone is attached to. Default: `top-left`.
 --- @field pivot? ShroudForgeOverlayPoint Point of the zone placed on the anchor. Default: same as `anchor`.
 --- @field offset? number[] `{x, y}` added to that position.
 --- @field size? number[] `{width, height}`; 0 fits the content. A width wraps text.
+--- @field reference? number Screen height the values are designed for. Default 1080.
 --- @field order? integer Drawing order, lower first.
 --- @field visible? boolean
 --- @field background? ShroudForgeOverlayColor
