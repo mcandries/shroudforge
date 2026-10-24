@@ -1,0 +1,14 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_SHROUDFORGE_overlay",
+        "type": "GLOBAL",
+        "library_path": ".\\shroudforge_overlay.dll",
+        "api_version": "1.4.304",
+        "implementation_version": "1",
+        "description": "ShroudForge game overlay",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "ShroudforgeOverlay_NegotiateLoaderLayerInterfaceVersion"
+        }
+    }
+}
