@@ -33,6 +33,10 @@ struct LocalInputState {
     EntityView candidate, published;
     std::vector<std::pair<EntityView, std::size_t>> candidates;
     std::vector<std::pair<ComponentType, std::string>> components;
+    // The last decision among several candidates: their (id, generation), and
+    // the index chosen.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> decided_identities;
+    std::size_t decided{};
     std::uint64_t session{}, registry_ms{}, completed_ms{};
     bool configured{}, complete{}, ambiguous{};
 };
@@ -144,6 +148,74 @@ bool choose_local_input(LocalInputState& state, const ResolvedLayout& layout){
         return true;
     };
     std::vector<std::size_t> found;
+    // The same candidates as the last decision: keep it (a scan completes
+    // every second, and reading every component is not free).
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> identities;
+    for (const auto& [entity, slot] : state.candidates) identities.emplace_back(entity.id, entity.generation);
+    if (identities == state.decided_identities && state.decided < state.candidates.size()) {
+        state.candidate = state.candidates[state.decided].first;
+        state.candidate_slot = state.candidates[state.decided].second;
+        return true;
+    }
+    const auto decide = [&](std::size_t index, std::string reason){
+        state.candidate = state.candidates[index].first;
+        state.candidate_slot = state.candidates[index].second;
+        state.decided_identities = identities;
+        state.decided = index;
+        publish_detail(std::to_string(state.candidates.size()) + " player inputs, the local one is id" +
+            std::to_string(state.candidates[index].first.id) + ": " + reason);
+        return true;
+    };
+    // Read every component a candidate holds, up to 4 KiB each.
+    const auto contents = [&](std::size_t index, auto&& visit){
+        for (const auto& [type, name] : state.components) {
+            if (!type.size || type.size > 4096) continue;
+            bool present{};
+            if (!component_presence(state.candidates[index].first, layout, type, present) || !present) continue;
+            std::uintptr_t address{};
+            std::vector<std::uint8_t> bytes(type.size);
+            if (!component_address(state.candidates[index].first, layout, type, address) ||
+                !read_bytes(address, bytes.data(), bytes.size())) continue;
+            if (visit(name, bytes)) return;
+        }
+    };
+    // 1. The local player's Steam ID, found in the components of exactly one
+    //    candidate.
+    std::uint64_t steam_id{};
+    KfcRuntimeNetworkStatus(&steam_id);
+    std::string steam_where;
+    if (steam_id) {
+        std::uint8_t needle[sizeof(steam_id)];
+        std::memcpy(needle, &steam_id, sizeof(steam_id));
+        std::vector<std::size_t> owners;
+        for (std::size_t i = 0; i < state.candidates.size(); ++i) {
+            contents(i, [&](const std::string& name, const std::vector<std::uint8_t>& bytes){
+                if (std::search(bytes.begin(), bytes.end(), std::begin(needle), std::end(needle)) == bytes.end()) return false;
+                owners.push_back(i);
+                steam_where += " " + std::to_string(i) + ":" + short_name(name);
+                return true;
+            });
+        }
+        if (owners.size() == 1) return decide(owners[0], "its components hold the local Steam ID (" + steam_where.substr(1) + ")");
+    }
+    // 2. The hammer's stock cycling state: client-only, set for the local
+    //    player only once the building hammer was used (seen in game on both
+    //    the host and a guest, 24/10/2026).
+    const auto stock = std::find_if(state.components.begin(), state.components.end(),
+        [](const auto& entry){ return entry.second == "keen::ecs::ClientCycleInventoryStock"; });
+    if (stock != state.components.end() && stock->first.size && stock->first.size <= 64) {
+        std::vector<std::size_t> set;
+        for (std::size_t i = 0; i < state.candidates.size(); ++i) {
+            std::uintptr_t address{};
+            std::vector<std::uint8_t> bytes(stock->first.size);
+            bool present{};
+            if (!component_presence(state.candidates[i].first, layout, stock->first, present) || !present ||
+                !component_address(state.candidates[i].first, layout, stock->first, address) ||
+                !read_bytes(address, bytes.data(), bytes.size())) continue;
+            if (std::any_of(bytes.begin(), bytes.end(), [](auto byte){ return byte != 0; })) set.push_back(i);
+        }
+        if (set.size() == 1) return decide(set[0], "only its hammer stock cycling is set");
+    }
     for (const char* marker : LocalInputMarkers) {
         const auto type = std::find_if(state.components.begin(), state.components.end(),
             [&](const auto& entry){ return entry.second == marker; });
@@ -211,6 +283,8 @@ bool choose_local_input(LocalInputState& state, const ResolvedLayout& layout){
     detail += "; " + std::to_string(checked) + " components checked, " + std::to_string(unreadable) + " unreadable";
     detail += "; on some only:" + (some_only.empty() ? std::string(" none") : some_only);
     detail += "; different content:" + (differing.empty() ? std::string(" none") : differing);
+    detail += "; local Steam ID " + (steam_id ? std::to_string(steam_id) + (steam_where.empty() ? " in no component" :
+        " in" + steam_where) : std::string("unknown"));
     publish_detail(std::move(detail));
     return false;
 }
