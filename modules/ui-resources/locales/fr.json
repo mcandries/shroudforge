@@ -848,5 +848,11 @@
   "updater.title": "Mise à jour ShroudForge",
   "updater.updateNow": "Mettre à jour maintenant",
   "updater.verifying": "Vérification du téléchargement…",
-  "updater.waiting": "La mise à jour sera installée après la fermeture d’Enshrouded."
+  "updater.waiting": "La mise à jour sera installée après la fermeture d’Enshrouded.",
+  "settings.modules.field.overlayScale": "Taille (%)",
+  "settings.modules.field.overlayOpacity": "Opacité (%)",
+  "settings.modules.field.overlayHideKey": "Touche afficher/masquer",
+  "settings.modules.field.overlayHideInMenus": "Masquer quand un menu du jeu est ouvert (inventaire, carte, pause)",
+  "settings.modules.gameOverlay.title": "Overlay du jeu",
+  "settings.modules.gameOverlay.description": "Dessine les zones des mods (panneaux d’état, messages) par-dessus l’image du jeu. Les changements s’appliquent tout de suite ; activer ou désactiver le module prend effet au prochain lancement du jeu."
 }
