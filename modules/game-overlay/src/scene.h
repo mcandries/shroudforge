@@ -33,11 +33,18 @@ struct TextStyle {
     ImU32 color = IM_COL32_WHITE;
     bool shadow = false;
     ImU32 shadow_color = IM_COL32(0, 0, 0, 200);
+    ImVec2 shadow_offset{1.5f, 1.5f};  // Reference pixels.
     float outline = 0.0f;
     ImU32 outline_color = IM_COL32(0, 0, 0, 255);
 };
 
-enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress };
+// One stroked subpath of an icon, in viewbox units.
+struct Polyline {
+    std::vector<ImVec2> points;
+    bool closed = false;
+};
+
+enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow };
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -52,14 +59,25 @@ struct Item {
     ImU32 tint = IM_COL32_WHITE;
     ImVec4 uv{0.0f, 0.0f, 1.0f, 1.0f};
     float rounding = 0.0f;
-    // Row
+    // Row, flow
     std::vector<Item> children;
     float spacing = 6.0f;
-    // Separator, progress
+    float line_gap = 2.0f;  // Flow: space between wrapped lines.
+    // Separator, progress, toggle track (off)
     ImU32 color = IM_COL32(255, 255, 255, 120);
     ImU32 background = IM_COL32(0, 0, 0, 120);
     float thickness = 1.0f;
     float value = 0.0f;
+    // Chip: text on a rounded background; padding is horizontal.
+    float padding = 4.0f;
+    // Icon: stroked paths in a square viewbox.
+    std::vector<Polyline> icon;
+    float viewbox = 24.0f;
+    float stroke = 1.8f;
+    // Toggle
+    bool on = false;
+    ImU32 on_color = IM_COL32(201, 162, 78, 255);
+    ImU32 knob = IM_COL32(233, 230, 223, 255);
 };
 
 // Nine-slice frame drawn behind the zone content.
@@ -80,6 +98,7 @@ struct Zone {
     ImVec2 pivot{0.0f, 0.0f};
     ImVec2 offset{0.0f, 0.0f};
     ImVec2 size{0.0f, 0.0f};  // Reference pixels, 0 = fit the content.
+    float reference = 1080.0f;  // Screen height the zone's pixel values are designed for.
     int order = 0;
     bool visible = true;
     ImU32 background = IM_COL32(0, 0, 0, 0);
@@ -92,13 +111,25 @@ struct Zone {
     std::vector<Item> items;
 };
 
+// A key with exact modifiers, from a specification such as "Shift+F12".
+struct KeyCombo {
+    int key = 0;  // Windows virtual-key code, 0 for none.
+    bool ctrl = false;
+    bool alt = false;
+    bool shift = false;
+};
+
 // Player options: modules.gameOverlay in modloader-config.json (F9).
 struct Options {
     bool enabled = true;
     float scale = 1.0f;
     float opacity = 1.0f;
-    int hide_key = 0;  // Windows virtual-key code that shows/hides the overlay, 0 for none.
+    KeyCombo hide_key;  // Shows/hides every zone.
 };
+
+// player_options.cpp: parses a key specification with the names mods use
+// (modules/mod-runtime/lua/shroudforge/v1/game_keys.rs); none when invalid.
+KeyCombo parse_key_combo(const std::string& spec);
 
 // The coordinates mods use are reference pixels of a 1920x1080 screen: they
 // are scaled by the screen height.
@@ -132,5 +163,9 @@ void update_player_options();
 
 // load_image.cpp: decodes a PNG or JPEG file, or returns null with a reason.
 std::shared_ptr<Image> load_image(const std::string& path, std::string& error);
+
+// parse_icon_path.cpp: the stroked subpaths of an SVG path (M L H V A Z,
+// absolute or relative), or false with a reason.
+bool parse_icon_path(const std::string& path, std::vector<Polyline>& out, std::string& error);
 
 }  // namespace overlay

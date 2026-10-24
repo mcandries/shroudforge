@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::game_keys;
 use super::game_overlay;
+use super::read_ui_locale::read_ui_locale;
 use super::resolve_overlay_paths::resolve_overlay_paths;
 use super::set_mod_settings::set_settings;
 use crate::lua::convert_json::{json_to_lua, lua_to_json};
@@ -184,6 +185,13 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
         lua.create_function(|lua, ()| json_to_lua(lua, &game_overlay::status()))?,
     )?;
     table.raw_set("overlay", overlay)?;
+
+    // Reads the config file at each call: call it when settings change, not every update.
+    let locale_dir = game_dir.clone();
+    table.raw_set(
+        "locale",
+        lua.create_function(move |_, ()| Ok(read_ui_locale(&locale_dir)))?,
+    )?;
 
     let notifications = lua.create_table()?;
     notifications.raw_set(

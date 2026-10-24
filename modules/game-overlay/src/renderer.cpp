@@ -205,8 +205,8 @@ ImFont* font_for(Renderer& r, const std::string& path) {
 
 void collect_fonts(Renderer& r, const std::vector<Item>& items) {
     for (const Item& item : items) {
-        if (item.kind == ItemKind::Text) font_for(r, item.style.font);
-        if (item.kind == ItemKind::Row) collect_fonts(r, item.children);
+        if (item.kind == ItemKind::Text || item.kind == ItemKind::Chip) font_for(r, item.style.font);
+        if (item.kind == ItemKind::Row || item.kind == ItemKind::Flow) collect_fonts(r, item.children);
     }
 }
 

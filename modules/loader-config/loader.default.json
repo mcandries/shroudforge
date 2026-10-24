@@ -236,7 +236,7 @@
       "enabled": true,
       "scale": 100,
       "opacity": 100,
-      "hideKey": 0
+      "hideKey": ""
     },
     "modloaderUi": {
       "enabled": true,
