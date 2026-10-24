@@ -7,8 +7,6 @@ use super::change_notice_read_state::change_notice_read_state;
 use super::change_storage_folder::change_storage_folder;
 use super::copy_activity_log::copy_activity_log;
 use super::invoke_updater_request::{UpdaterRequestResult, spawn as spawn_updater_request};
-use super::log_configuration_changes::log_configuration_check_transitions;
-use super::log_player_name_detection::log_player_name_detection;
 use super::open_requested_folder::open_requested_folder;
 use super::open_requested_link::open_requested_link;
 use super::parse_ui_command::Command;
@@ -17,7 +15,6 @@ use super::parse_ui_command::parse_ui_command;
 use super::handoff_to_client::handoff_to_client;
 use super::read_host_arguments::Arguments;
 use super::read_host_arguments::arguments;
-use super::read_installed_mods::read_mods;
 use super::read_missing_updater_announcement;
 use super::read_release_status::idle_release_status;
 use super::read_ui_configuration::default_refresh;
@@ -28,7 +25,7 @@ use super::read_ui_configuration::load_module_config;
 use super::read_ui_configuration::load_user_config;
 use super::read_ui_configuration::read_central_config;
 use super::read_ui_snapshot::default_catalog_state;
-use super::read_ui_snapshot::read_ui_snapshot;
+use super::refresh_ui_snapshot::SnapshotRefresher;
 use super::read_window_focus::foreground_is_shroudforge_window;
 use super::read_window_focus::foreground_process;
 use super::read_window_focus::open_event;
@@ -41,10 +38,7 @@ use super::request_diagnostics::request_diagnostics;
 use super::request_mod_action::request_mod_action;
 use super::request_module_visibility::request_module_visibility;
 use super::ui_snapshot_types::ModuleConfig;
-use super::{
-    dispatch_control_actions::dispatch_control_actions,
-    log_configuration_errors::log_configuration_errors, watch_toggle_key::watch_toggle_key,
-};
+use super::{dispatch_control_actions::dispatch_control_actions, watch_toggle_key::watch_toggle_key};
 use shroudforge_logging::write_activity;
 use shroudforge_window_management::WindowDefaults;
 use shroudforge_window_management::apply_window_geometry;
@@ -331,12 +325,8 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
 
     let mut shown = arguments.desktop;
     let mut window_topmost = false;
-    let mut previous_configuration_errors = std::collections::HashSet::<String>::new();
-    let mut previous_player_name_detection = None;
-    let mut previous_configuration_checks =
-        std::collections::BTreeMap::<String, (String, String)>::new();
-    let mut previous_asset_status = std::collections::BTreeMap::<String, (String, String)>::new();
-    let mut previous_mod_statuses = std::collections::BTreeMap::<String, (String, String)>::new();
+    let mut refresher =
+        SnapshotRefresher::start(&arguments, &release_state, &release_announcement, &catalog_state);
     let initial_window_state = shroudforge_loader_config::config::window_state(&arguments.root);
     let mut visibility_request_id = initial_window_state["modloaderUi"]["requestId"]
         .as_u64()
@@ -368,9 +358,11 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     }
     let mut next_refresh = Instant::now();
     // The background work of each refresh (status logging, news, player
-    // name) always runs. Only its UI snapshot is skipped while the window is
-    // hidden, and an unchanged snapshot is not pushed to the page again. The
-    // same goes for the window state: each push re-renders the whole page.
+    // name) always runs, on the refresher's thread. Only its UI snapshot is
+    // not pushed while the window is hidden, and an unchanged snapshot is not
+    // pushed to the page again. The same goes for the window state: each push
+    // re-renders the whole page.
+    let mut latest_snapshot = String::new();
     let mut last_snapshot = String::new();
     let mut last_window_state = String::new();
     let mut webview_visible = window.is_visible();
@@ -386,6 +378,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let mut keybind_layout_revision = shroudforge_hotkeys::layout_revision();
     let mut pending_window_geometry_save: Option<Instant> = None;
     let mut timing = RefreshTiming::default();
+    let mut refresh_asked: Option<Instant> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
@@ -1076,9 +1069,17 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         }
                         next_announcement_retry = Instant::now() + Duration::from_secs(30);
                     }
-                    let next_position = read_central_config(&arguments.root)["modules"]
-                        [window_config_module]["window"]["position"]
-                        .clone();
+                    next_refresh = Instant::now()
+                        + Duration::from_millis(module_config.refresh_milliseconds.clamp(250, 10_000));
+                    refresher.request(&active_provider);
+                    refresh_asked.get_or_insert_with(Instant::now);
+                }
+                if let Some(refreshed) = refresher.take() {
+                    if let Some(asked) = refresh_asked.take() {
+                        timing.add_refresh(asked.elapsed());
+                    }
+                    let next_position =
+                        refreshed.central["modules"][window_config_module]["window"]["position"].clone();
                     if next_position != saved_position {
                         pending_window_geometry_save = None;
                         effective_window_geometry = apply_window_geometry(
@@ -1089,62 +1090,19 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         );
                         saved_position = next_position;
                     }
-                    next_refresh = Instant::now()
-                        + Duration::from_millis(module_config.refresh_milliseconds.clamp(250, 10_000));
-                    let mut part = Instant::now();
-                    let central = read_central_config(&arguments.root);
-                    let mods = read_mods(&arguments.root);
-                    let notification_mods: Vec<_> = mods.iter().map(|item| shroudforge_news::ModNotification {
-                        id: &item.id, name: &item.name, version: &item.version, ecosystem: item.ecosystem, changelog: &item.changelog,
-                    }).collect();
-                    shroudforge_news::sync_mod_events(&arguments.root, &notification_mods);
-                    timing.add_part(0, &mut part);
-                    let game_process_id =
-                        (!arguments.desktop && !arguments.server).then_some(arguments.game_pid);
-                    let player_name_detection =
-                        shroudforge_player_name::detect_active_character_for_process(
-                            &arguments.root,
-                            game_process_id,
-                        );
-                    timing.add_part(1, &mut part);
-                    let (snapshot, resolved_player_name) = read_ui_snapshot(
-                        &arguments,
-                        &active_provider,
-                        &release_state,
-                        &release_announcement,
-                        &catalog_state,
-                        central,
-                        mods,
-                        &player_name_detection,
-                    );
-                    timing.add_part(2, &mut part);
-                    log_player_name_detection(
-                        &arguments.root,
-                        &player_name_detection,
-                        &resolved_player_name,
-                        &mut previous_player_name_detection,
-                    );
-                    log_configuration_check_transitions(
-                        &arguments.root,
-                        &snapshot.configuration,
-                        &mut previous_configuration_checks,
-                        &mut previous_asset_status,
-                        &mut previous_mod_statuses,
-                    );
-                    log_configuration_errors(&arguments.root, &snapshot, &mut previous_configuration_errors);
-                    timing.add_part(3, &mut part);
-                    if visible
-                        && let Ok(payload) = serde_json::to_string(&snapshot)
-                        && payload != last_snapshot
-                        && webview
-                            .evaluate_script(&format!("window.__shroudforgeUpdate({payload});"))
-                            .is_ok()
-                    {
-                        last_snapshot = payload;
-                        timing.pushes += 1;
+                    if let Some(payload) = refreshed.payload {
+                        latest_snapshot = payload;
                     }
-                    timing.add_part(4, &mut part);
-                    timing.end_refresh();
+                }
+                if visible
+                    && !latest_snapshot.is_empty()
+                    && latest_snapshot != last_snapshot
+                    && webview
+                        .evaluate_script(&format!("window.__shroudforgeUpdate({latest_snapshot});"))
+                        .is_ok()
+                {
+                    last_snapshot = latest_snapshot.clone();
+                    timing.pushes += 1;
                 }
                 timing.end_tick(&arguments.root, tick_started, visible);
             }
@@ -1301,38 +1259,27 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
 }
 
 /// Diagnostic of our builds (not proposed upstream): how long the window's
-/// own thread is busy, since WebView2 input and scrolling wait for it.
-/// Logged every 30 seconds.
+/// own thread is busy, since WebView2 input and scrolling wait for it, and
+/// how long a refresh takes on the refresher's thread. Logged every 30 s.
 #[derive(Default)]
 struct RefreshTiming {
     since: Option<Instant>,
     ticks: u32,
     tick_total: Duration,
     tick_max: Duration,
+    visible_ticks: u32,
     refreshes: u32,
     refresh_total: Duration,
     refresh_max: Duration,
-    refresh_current: Duration,
-    // Config and mods, player name, snapshot, logs, push.
-    parts: [Duration; 5],
     pushes: u32,
     window_states: u32,
-    visible_ticks: u32,
 }
 
 impl RefreshTiming {
-    fn add_part(&mut self, index: usize, started: &mut Instant) {
-        let elapsed = started.elapsed();
-        self.parts[index] += elapsed;
-        self.refresh_current += elapsed;
-        *started = Instant::now();
-    }
-
-    fn end_refresh(&mut self) {
+    fn add_refresh(&mut self, elapsed: Duration) {
         self.refreshes += 1;
-        self.refresh_total += self.refresh_current;
-        self.refresh_max = self.refresh_max.max(self.refresh_current);
-        self.refresh_current = Duration::ZERO;
+        self.refresh_total += elapsed;
+        self.refresh_max = self.refresh_max.max(elapsed);
     }
 
     fn end_tick(&mut self, root: &std::path::Path, started: Instant, visible: bool) {
@@ -1350,7 +1297,7 @@ impl RefreshTiming {
         let ms = |value: Duration| value.as_secs_f64() * 1000.0;
         let average = |total: Duration, count: u32| if count == 0 { 0.0 } else { ms(total) / f64::from(count) };
         let details = format!(
-            "busy {:.0} ms in {:.0} s: {} ticks avg {:.1} ms max {:.0} ms ({} visible); {} refreshes avg {:.0} ms max {:.0} ms (config+mods {:.0}, player name {:.0}, snapshot {:.0}, logs {:.0}, push {:.0} avg ms); {} snapshot and {} window state pushes",
+            "window thread busy {:.0} ms in {:.0} s: {} ticks avg {:.1} ms max {:.0} ms ({} visible); {} refreshes on the refresher thread avg {:.0} ms max {:.0} ms; {} snapshot and {} window state pushes",
             ms(self.tick_total),
             since.elapsed().as_secs_f64(),
             self.ticks,
@@ -1360,11 +1307,6 @@ impl RefreshTiming {
             self.refreshes,
             average(self.refresh_total, self.refreshes),
             ms(self.refresh_max),
-            average(self.parts[0], self.refreshes),
-            average(self.parts[1], self.refreshes),
-            average(self.parts[2], self.refreshes),
-            average(self.parts[3], self.refreshes),
-            average(self.parts[4], self.refreshes),
             self.pushes,
             self.window_states,
         );
