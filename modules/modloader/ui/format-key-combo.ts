@@ -61,12 +61,13 @@ function keyName(event: KeyEventLike): string | null {
   return CODE_NAMES[event.code] ?? null
 }
 
-// The combination of a keydown event, or null while only modifiers are held
-// or for a key the runtime does not know.
+// The combination of a keydown event, or null while only modifiers are held,
+// for a key the runtime does not know, or for Escape, which the game keeps
+// for its pause menu and for closing its windows.
 export function keyComboFromEvent(event: KeyEventLike): string | null {
   if (MODIFIER_KEYS.has(event.key)) return null
   const name = keyName(event)
-  if (!name) return null
+  if (!name || name === 'Escape') return null
   return [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', name]
     .filter(Boolean)
     .join('+')
