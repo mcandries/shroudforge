@@ -39,7 +39,7 @@ The runtime (same process) finds the layer with `GetModuleHandleW(L"shroudforge_
 | `int ShroudforgeOverlay_SetOptions(json, error, error_size)` | Player options: `enabled`, `scale`, `opacity`, `hidden` (mod ids). |
 | `int ShroudforgeOverlay_GetStatus(out, out_size)` | `{"active", "width", "height", "scale"}` of the current output. |
 
-Paths in zones must be absolute: the runtime resolves them inside the mod's folder. Limits: 32 zones per mod, 256 items per zone, 4096 bytes per text, rows nested 3 deep.
+Paths in zones must be absolute. Mods use the Lua API `shroudforge.overlay` (`set`, `remove`, `clear`, `status`, documented in `modules/mod-runtime/lua/shroudforge/v1/definitions/mod_api.lua`). The runtime resolves the `image` and `font` fields inside the mod's folder (`resolve_overlay_paths.rs`; zip packages are refused) and calls the layer (`game_overlay.rs`). A mod's zones are removed when it stops running (`session/record_runtime_state.rs`). Limits: 32 zones per mod, 256 items per zone, 4096 bytes per text, rows nested 3 deep.
 
 ## Zone format
 
