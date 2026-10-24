@@ -59,10 +59,11 @@ void log_line(const char* format, ...) {
         wchar_t* dot = wcsrchr(path, L'.');
         if (dot) wcscpy_s(dot, MAX_PATH - (dot - path), L".log");
         FILE* opened = nullptr;
-        _wfopen_s(&opened, path, L"w");
+        _wfopen_s(&opened, path, L"a");
         return opened;
     }();
     if (!file) return;
+    fprintf(file, "[%lu %llu] ", GetCurrentProcessId(), GetTickCount64());
     va_list arguments;
     va_start(arguments, format);
     vfprintf(file, format, arguments);
@@ -369,7 +370,9 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo* info,
         std::lock_guard lock(state_mutex);
         instances[dispatch_key(*instance)] = data;
     }
-    log_line("overlay: instance created");
+    log_line("overlay: instance %p created for '%s', %u layers, %u extensions", static_cast<void*>(*instance),
+        info->pApplicationInfo && info->pApplicationInfo->pApplicationName ? info->pApplicationInfo->pApplicationName : "",
+        info->enabledLayerCount, info->enabledExtensionCount);
     return VK_SUCCESS;
 }
 
@@ -377,6 +380,7 @@ VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance instance, const VkAllocati
     InstanceData* data = instance_of(dispatch_key(instance));
     if (!data) return;
     data->destroy_instance(instance, allocator);
+    log_line("overlay: instance %p destroyed", static_cast<void*>(instance));
     std::lock_guard lock(state_mutex);
     instances.erase(dispatch_key(instance));
     delete data;
@@ -448,6 +452,11 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
         std::lock_guard lock(state_mutex);
         devices[dispatch_key(*device)] = d;
     }
+    bool swapchain_extension = false;
+    for (uint32_t i = 0; i < info->enabledExtensionCount; ++i)
+        swapchain_extension |= std::strcmp(info->ppEnabledExtensionNames[i], VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0;
+    log_line("overlay: device %p created, %u extensions, swapchain extension %d", static_cast<void*>(*device),
+        info->enabledExtensionCount, swapchain_extension ? 1 : 0);
     log_line("overlay: device created, loader callback %d, swapchain functions %d%s", d->set_loader_data ? 1 : 0,
         d->create_swapchain && d->queue_present ? 1 : 0, d->broken ? " (drawing disabled)" : "");
     return VK_SUCCESS;
@@ -543,6 +552,11 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
 
 #define INTERCEPT(name) if (std::strcmp(requested, "vk" #name) == 0) return reinterpret_cast<PFN_vkVoidFunction>(&name)
 
+void trace_request(const char* where, const void* handle, const char* requested) {
+    if (std::strstr(requested, "Swapchain") || std::strstr(requested, "Present"))
+        log_line("overlay: %s(%p, %s)", where, handle, requested);
+}
+
 PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(DestroyDevice);
     if (!is_game_process()) return nullptr;
@@ -558,6 +572,7 @@ PFN_vkVoidFunction device_function(const char* requested) {
 
 OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetDeviceProcAddr(
         VkDevice device, const char* requested) {
+    trace_request("GetDeviceProcAddr", device, requested);
     if (PFN_vkVoidFunction own = device_function(requested)) return own;
     DeviceData* d = device_of(dispatch_key(device));
     return d ? d->next_gdpa(device, requested) : nullptr;
@@ -565,6 +580,7 @@ OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetDe
 
 OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ShroudforgeOverlay_GetInstanceProcAddr(
         VkInstance instance, const char* requested) {
+    trace_request("GetInstanceProcAddr", instance, requested);
     INTERCEPT(CreateInstance);
     INTERCEPT(DestroyInstance);
     INTERCEPT(CreateDevice);
@@ -587,5 +603,12 @@ OVERLAY_EXPORT VKAPI_ATTR VkResult VKAPI_CALL ShroudforgeOverlay_NegotiateLoader
         version->pfnGetDeviceProcAddr = &ShroudforgeOverlay_GetDeviceProcAddr;
         version->pfnGetPhysicalDeviceProcAddr = nullptr;
     }
+    log_line("overlay: loader interface version %u", version->loaderLayerInterfaceVersion);
     return VK_SUCCESS;
+}
+
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) log_line("overlay: layer loaded");
+    if (reason == DLL_PROCESS_DETACH) log_line("overlay: layer unloaded");
+    return TRUE;
 }
