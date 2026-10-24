@@ -236,8 +236,8 @@ int main() {
         const auto* p = static_cast<const uint8_t*>(mapped) + (VkDeviceSize(y) * extent.width + x) * 4;
         std::printf("pixel %u,%u = B %u G %u R %u A %u\n", x, y, p[0], p[1], p[2], p[3]);
     };
+    pixel(250, 250);
     pixel(40, 40);
-    pixel(200, 200);
     vkDeviceWaitIdle(device);
     DestroyWindow(window);
     return 0;
