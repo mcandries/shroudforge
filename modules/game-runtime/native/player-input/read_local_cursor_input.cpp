@@ -154,14 +154,63 @@ bool choose_local_input(LocalInputState& state, const ResolvedLayout& layout){
             short_name(marker));
         return true;
     }
-    std::string detail = std::to_string(state.candidates.size()) + " player inputs; components on some only:";
-    for (const auto& [type, name] : state.components) {
-        if (!holders(type, found) || found.empty() || found.size() == state.candidates.size()) continue;
-        detail += " " + short_name(name) + "[";
-        for (std::size_t i = 0; i < found.size(); ++i) detail += (i ? "," : "") + std::to_string(found[i]);
-        detail += "]";
-        if (detail.size() > 1500) { detail += " ..."; break; }
+    // Not decided: describe the candidates, the markers, the components only
+    // some of them hold, and the components whose content differs (with both
+    // contents for the small ones), to find what tells the local player.
+    const auto count = state.candidates.size();
+    std::string detail = std::to_string(count) + " player inputs:";
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& entity = state.candidates[i].first;
+        detail += " " + std::to_string(i) + "=id" + std::to_string(entity.id) + "/gen" + std::to_string(entity.generation) +
+            "/slot" + std::to_string(state.candidates[i].second);
     }
+    detail += "; markers:";
+    for (const char* marker : LocalInputMarkers) {
+        const auto type = std::find_if(state.components.begin(), state.components.end(),
+            [&](const auto& entry){ return entry.second == marker; });
+        detail += " " + short_name(marker) + "=";
+        if (type == state.components.end()) detail += "unregistered";
+        else if (!holders(type->first, found)) detail += "unreadable";
+        else detail += std::to_string(found.size()) + "/" + std::to_string(count);
+    }
+    std::size_t unreadable{}, checked{};
+    std::string some_only, differing;
+    const auto hex = [](const std::vector<std::uint8_t>& bytes){
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string text;
+        for (const auto byte : bytes) { text += digits[byte >> 4]; text += digits[byte & 15]; }
+        return text;
+    };
+    for (const auto& [type, name] : state.components) {
+        if (!holders(type, found)) { ++unreadable; continue; }
+        ++checked;
+        if (found.empty()) continue;
+        if (found.size() != count) {
+            if (some_only.size() < 400) {
+                some_only += " " + short_name(name) + "[";
+                for (std::size_t i = 0; i < found.size(); ++i) some_only += (i ? "," : "") + std::to_string(found[i]);
+                some_only += "]";
+            }
+            continue;
+        }
+        if (!type.size || type.size > 4096 || differing.size() > 1100) continue;
+        std::vector<std::vector<std::uint8_t>> contents(count, std::vector<std::uint8_t>(type.size));
+        bool read_all = true;
+        for (std::size_t i = 0; i < count && read_all; ++i) {
+            std::uintptr_t address{};
+            read_all = component_address(state.candidates[i].first, layout, type, address) &&
+                read_bytes(address, contents[i].data(), contents[i].size());
+        }
+        if (!read_all || std::all_of(contents.begin(), contents.end(), [&](const auto& c){ return c == contents[0]; })) continue;
+        differing += " " + short_name(name) + "(" + std::to_string(type.size) + ")";
+        if (type.size <= 24) {
+            differing += "=";
+            for (std::size_t i = 0; i < count; ++i) differing += (i ? "|" : "") + hex(contents[i]);
+        }
+    }
+    detail += "; " + std::to_string(checked) + " components checked, " + std::to_string(unreadable) + " unreadable";
+    detail += "; on some only:" + (some_only.empty() ? std::string(" none") : some_only);
+    detail += "; different content:" + (differing.empty() ? std::string(" none") : differing);
     publish_detail(std::move(detail));
     return false;
 }
