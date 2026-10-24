@@ -4,6 +4,7 @@ use mlua::{Function, Table, Value, Variadic};
 use mod_loader::Mod;
 use serde_json::json;
 
+use super::game_keys;
 use super::set_mod_settings::set_settings;
 use crate::lua::LuaValue;
 
@@ -89,7 +90,42 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     let input = lua.create_table()?;
     input.raw_set(
         "is_key_down",
-        lua.create_function(|_, key: String| Ok(is_game_key_down(&key)))?,
+        lua.create_function(|_, key: String| {
+            // Unknown names read as not held, as before.
+            Ok(game_keys::parse(&key).is_ok_and(|combo| game_keys::is_down_now(&combo)))
+        })?,
+    )?;
+    let watch_mod_id = mod_id.clone();
+    input.raw_set(
+        "watch",
+        lua.create_function(move |lua, specs: Vec<String>| {
+            let combos = specs
+                .iter()
+                .map(|spec| game_keys::parse(spec))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mlua::Error::runtime)?;
+            let names = lua.create_sequence_from(combos.iter().map(game_keys::Combo::canonical))?;
+            game_keys::watch(&watch_mod_id, combos);
+            Ok(names)
+        })?,
+    )?;
+    let take_mod_id = mod_id.clone();
+    input.raw_set(
+        "take_presses",
+        lua.create_function(move |lua, ()| {
+            lua.create_sequence_from(
+                game_keys::take_presses(&take_mod_id)
+                    .iter()
+                    .map(game_keys::Combo::canonical),
+            )
+        })?,
+    )?;
+    input.raw_set(
+        "normalize",
+        lua.create_function(|_, spec: String| match game_keys::parse(&spec) {
+            Ok(combo) => Ok((Some(combo.canonical()), None)),
+            Err(reason) => Ok((None, Some(reason))),
+        })?,
     )?;
     table.raw_set("input", input)?;
 
@@ -145,46 +181,6 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     table.raw_set("notifications", notifications)?;
 
     Ok(table)
-}
-
-fn is_game_key_down(key: &str) -> bool {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::{
-            System::Threading::GetCurrentProcessId,
-            UI::{
-                Input::KeyboardAndMouse::GetAsyncKeyState,
-                WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
-            },
-        };
-
-        let virtual_key = match key {
-            "F1" => 0x70,
-            "F2" => 0x71,
-            "F3" => 0x72,
-            "F4" => 0x73,
-            "F5" => 0x74,
-            "F6" => 0x75,
-            "F7" => 0x76,
-            "F8" => 0x77,
-            _ => return false,
-        };
-        let foreground = unsafe { GetForegroundWindow() };
-        if foreground.is_null() {
-            return false;
-        }
-        let mut process_id = 0;
-        unsafe { GetWindowThreadProcessId(foreground, &mut process_id) };
-        if process_id != unsafe { GetCurrentProcessId() } {
-            return false;
-        }
-        return unsafe { GetAsyncKeyState(virtual_key) } < 0;
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = key;
-        false
-    }
 }
 
 pub(super) fn action_registry_key(mod_id: &str, action: &str) -> String {
