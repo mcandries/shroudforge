@@ -65,8 +65,8 @@ void append_environment(const wchar_t* name, const std::wstring& value) {
 // The game overlay is a Vulkan layer shipped in shroudforge\overlay. It must
 // be enabled before Enshrouded creates its Vulkan instance, so the loader is
 // pointed at it from here rather than from the runtime thread. It is an
-// implicit layer so that it sits above the other implicit layers (Steam's
-// fossilize layer does not pass swapchain functions down to explicit ones).
+// implicit layer so that it sits above the other implicit layers: OBS and the
+// Steam overlay then see the square like the rest of the frame.
 void enable_game_overlay() {
     const auto overlay = shroudforge_directory(module_directory()) / L"overlay";
     if (GetFileAttributesW((overlay / L"shroudforge_overlay.json").c_str()) == INVALID_FILE_ATTRIBUTES) return;
