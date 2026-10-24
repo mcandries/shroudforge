@@ -100,17 +100,30 @@ bool game_has_focus() {
 // A game menu is open when the game window has the focus and shows the mouse
 // cursor: Enshrouded hides it while playing, including in its shape menu, and
 // shows it in the inventory, the map and the pause menu (tested 24/10/2026).
+// While playing, the game also shows the cursor for one or two frames now and
+// then, in bursts: a menu only counts once the cursor stayed shown for
+// kMenuMilliseconds, else the zones blink. Closing is immediate.
+constexpr ULONGLONG kMenuMilliseconds = 250;
+
 void update_menu_state() {
     static int last = -1;
+    static ULONGLONG shown_since = 0;
     CURSORINFO cursor{sizeof(cursor)};
     if (!GetCursorInfo(&cursor)) return;
     const bool shown = (cursor.flags & CURSOR_SHOWING) != 0;
     const bool focused = game_has_focus();
-    const int state = (shown ? 1 : 0) | (focused ? 2 : 0);
+    const ULONGLONG now = GetTickCount64();
+    if (!(shown && focused)) {
+        shown_since = 0;
+    } else if (!shown_since) {
+        shown_since = now;
+    }
+    const bool open = shown_since && now - shown_since >= kMenuMilliseconds;
+    const int state = (open ? 1 : 0) | (focused ? 2 : 0);
     if (state == last) return;
     last = state;
-    set_menu_open(shown && focused);
-    log_line("mouse cursor %s, game %s", shown ? "shown" : "hidden", focused ? "focused" : "not focused");
+    set_menu_open(open);
+    log_line("game menu %s, game %s", open ? "open" : "closed", focused ? "focused" : "not focused");
 }
 
 }  // namespace
