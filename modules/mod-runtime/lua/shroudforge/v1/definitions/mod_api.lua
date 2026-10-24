@@ -42,11 +42,49 @@ function shroudforge_notifications.publish(notice) end
 --- @class ShroudForgeInput
 shroudforge_input = {}
 
---- Returns true while F1 through F8 is held and the game window is focused.
---- Poll from a runtime `on_update` callback and detect rising edges.
---- @param key 'F1'|'F2'|'F3'|'F4'|'F5'|'F6'|'F7'|'F8'
+--- A key specification: one key, optionally with Ctrl, Alt and Shift, joined
+--- by `+` and case-insensitive. Keys: `A`-`Z`, `0`-`9`, `F1`-`F24`, `Space`,
+--- `Enter`, `Tab`, `Escape`, `Backspace`, `Insert`, `Delete`, `Home`, `End`,
+--- `PageUp`, `PageDown`, `Left`, `Right`, `Up`, `Down`, `CapsLock`, `Pause`,
+--- `Numpad0`-`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`,
+--- `NumpadDivide`, `NumpadDecimal`, `Minus`, `Equals`, `Comma`, `Period`,
+--- `Semicolon`, `Slash`, `Backslash`, `LeftBracket`, `RightBracket`, `Quote`,
+--- `Backquote`, `MouseMiddle`, `Mouse4`, `Mouse5`. Examples: `F4`, `Shift+R`,
+--- `Ctrl+Alt+Delete`. A lone `Shift`, `Ctrl` or `Alt` names the modifier itself.
+--- Letters and symbols follow the active keyboard layout's virtual keys.
+--- @alias ShroudForgeKeySpec string
+
+--- Returns true while the named keys are held and the game window is focused.
+--- Modifiers the specification does not name are ignored: `F4` is also held
+--- while Shift is down. Unknown names return false. Samples the current state:
+--- a short tap between two updates can be missed; prefer `watch` and
+--- `take_presses` for actions.
+--- @param key ShroudForgeKeySpec
 --- @return boolean
 function shroudforge_input.is_key_down(key) end
+
+--- Replaces the key combinations this mod watches. From now on every press
+--- of one of them is latched by a sampler thread (a few milliseconds apart)
+--- and delivered by `take_presses`, even if it happens between two updates.
+--- Modifiers must match exactly: `F6` and `Shift+F6` are distinct presses.
+--- Raises an error naming the first invalid specification. An empty list
+--- stops watching. Presses are only latched while the game window is focused.
+--- @param keys ShroudForgeKeySpec[]
+--- @return string[] canonical The specifications in canonical spelling, such as `Ctrl+Alt+Shift+F4`.
+function shroudforge_input.watch(keys) end
+
+--- Returns the presses of watched combinations since the previous call, in
+--- order, in canonical spelling, and empties the queue. At most 64 presses
+--- are kept between two calls. Call it from `on_update`.
+--- @return string[] presses
+function shroudforge_input.take_presses() end
+
+--- Returns the canonical spelling of a key specification, or nil and the
+--- reason it is invalid. Useful to validate player settings.
+--- @param key ShroudForgeKeySpec
+--- @return string? canonical
+--- @return string? reason
+function shroudforge_input.normalize(key) end
 
 --- @class ShroudForge
 --- @field version string Version of the ShroudForge Lua API.
