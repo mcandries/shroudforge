@@ -17,6 +17,7 @@ import {
 import { debugConsoleSettingsFields } from '../../debug-console/ui/settings'
 import { worldEditorSettingsFields } from '../../world-editor/ui/settings'
 import { gameOverlaySettingsFields } from '../../game-overlay/ui/settings'
+import { KeyComboInput } from '../../game-overlay/ui/edit-key-combo'
 import { NetworkSettings } from '../../transport/ui/settings'
 import { UpdatePreferences } from '../../updater/ui/edit-update-preferences'
 
@@ -165,7 +166,6 @@ export function ModulePreferencesEditor({
     tailBytes: [1024, 1048576],
     scale: [25, 400],
     opacity: [0, 100],
-    hideKey: [0, 255],
   }
   return (
     <>
@@ -303,6 +303,19 @@ export function ModulePreferencesEditor({
                     }
                   />
                 ))}
+              {module === 'gameOverlay' && (
+                <SettingsRow
+                  label={t('settings.modules.field.overlayHideKey')}
+                  control={
+                    <KeyComboInput
+                      value={String(prefs.gameOverlay?.hideKey ?? '')}
+                      label={t('settings.modules.field.overlayHideKey')}
+                      hint={t('settings.modules.field.overlayHideKeyHint')}
+                      onChange={(value) => change('gameOverlay', 'hideKey', value)}
+                    />
+                  }
+                />
+              )}
               {(module === 'debugConsole' ||
                 module === 'modloaderUi' ||
                 module === 'worldEditor') && (

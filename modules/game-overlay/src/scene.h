@@ -111,13 +111,25 @@ struct Zone {
     std::vector<Item> items;
 };
 
+// A key with exact modifiers, from a specification such as "Shift+F12".
+struct KeyCombo {
+    int key = 0;  // Windows virtual-key code, 0 for none.
+    bool ctrl = false;
+    bool alt = false;
+    bool shift = false;
+};
+
 // Player options: modules.gameOverlay in modloader-config.json (F9).
 struct Options {
     bool enabled = true;
     float scale = 1.0f;
     float opacity = 1.0f;
-    int hide_key = 0;  // Windows virtual-key code that shows/hides the overlay, 0 for none.
+    KeyCombo hide_key;  // Shows/hides every zone.
 };
+
+// player_options.cpp: parses a key specification with the names mods use
+// (modules/mod-runtime/lua/shroudforge/v1/game_keys.rs); none when invalid.
+KeyCombo parse_key_combo(const std::string& spec);
 
 // The coordinates mods use are reference pixels of a 1920x1080 screen: they
 // are scaled by the screen height.

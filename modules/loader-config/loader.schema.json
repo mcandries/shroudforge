@@ -724,9 +724,8 @@
               "maximum": 100
             },
             "hideKey": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 255
+              "type": "string",
+              "maxLength": 40
             }
           },
           "additionalProperties": false

@@ -37,7 +37,9 @@ The player edits them in the Modloader (F9, Settings, Modules, Game overlay). Th
 | `enabled` | `true` | Read by the bootstrap at game start: the layer is not loaded at all when false. Also read live by the layer, which stops drawing. |
 | `scale` | `100` | Size of every zone, in percent (25 to 400), on top of the screen scale. |
 | `opacity` | `100` | Opacity of every zone, in percent. |
-| `hideKey` | `0` | Windows virtual-key code that shows or hides every zone while the game has focus; 0 for none. |
+| `hideKey` | `""` | Key or combination that shows or hides every zone while the game has focus, such as `Shift+F12`, in the names mods use (`game_keys.rs`); empty for none. Captured by pressing it in F9 (`ui/edit-key-combo.tsx`). |
+
+The layer also logs when the mouse cursor is shown, hidden or confined, to find a signal for the game's menus (the zones are drawn over them for now).
 
 The layer rereads the file at most once per second, only when its modification time changed, so changes apply while the game runs.
 
