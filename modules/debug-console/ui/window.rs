@@ -6,7 +6,7 @@ use super::parse_console_message::parse_console_message;
 use super::position_console_window::position_window;
 use super::read_console_arguments::arguments;
 use super::read_console_settings::Config;
-use super::read_console_snapshot::read_console_snapshot;
+use super::read_console_snapshot::{read_console_snapshot, ConsoleFollowers};
 use super::read_window_events::foreground_process;
 use super::read_window_events::open_event;
 use super::refresh_console_settings::refresh_console_settings;
@@ -111,6 +111,12 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut next_refresh = Instant::now();
     let mut last_config_error: Option<String> = None;
     let mut pending_window_geometry_save: Option<Instant> = None;
+    // A hidden console neither reads the logs nor renders. A visible one
+    // sends the page only new complete log lines, and its settings when they
+    // change; showing it again resends both log tails.
+    let mut followers = ConsoleFollowers::default();
+    let mut last_settings = String::new();
+    let mut webview_visible = window.is_visible();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
@@ -353,16 +359,40 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else if shown && (game_focused || console_focused) && !window.is_visible() {
                     window.set_visible(true);
                 }
+                let visible = window.is_visible();
+                if visible != webview_visible {
+                    // Lets WebView2 suspend rendering while the console is hidden.
+                    let _ = webview.set_visible(visible);
+                    webview_visible = visible;
+                    if visible {
+                        // The logs grew while hidden: resend both tails.
+                        followers.reset();
+                        next_refresh = Instant::now();
+                    }
+                }
                 if Instant::now() >= next_refresh {
                     let Some(minimum_level) = refresh_console_settings(&arguments, &window, &mut preferences, &mut effective_window_geometry, &mut config, &mut user_enabled, &mut last_config_error, control_flow) else { return; };
                     next_refresh =
                         Instant::now() + Duration::from_millis(config.refresh_milliseconds);
-                    let payload = read_console_snapshot(&arguments, &config, &preferences, minimum_level, auto_open_alert);
-                    if webview
-                        .evaluate_script(&format!("window.__shroudforgeUpdate({});", payload))
-                        .is_ok()
-                    {
-                        auto_open_alert = false;
+                    if visible {
+                        let (settings, logs) = read_console_snapshot(&arguments, &config, &preferences, minimum_level, auto_open_alert, &mut followers);
+                        let settings_text = settings.to_string();
+                        let has_logs = !logs["game"].is_null() || !logs["loader"].is_null();
+                        if has_logs || settings_text != last_settings {
+                            let mut payload = settings;
+                            payload["game"] = logs["game"].clone();
+                            payload["loader"] = logs["loader"].clone();
+                            if webview
+                                .evaluate_script(&format!("window.__shroudforgeUpdate({payload});"))
+                                .is_ok()
+                            {
+                                auto_open_alert = false;
+                                last_settings = settings_text;
+                            } else {
+                                // The page missed these lines: resend the tails next time.
+                                followers.reset();
+                            }
+                        }
                     }
                 }
             }
