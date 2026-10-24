@@ -16,6 +16,7 @@ import {
 } from '../../runtime-diagnostics/ui/show-diagnostics'
 import { debugConsoleSettingsFields } from '../../debug-console/ui/settings'
 import { worldEditorSettingsFields } from '../../world-editor/ui/settings'
+import { gameOverlaySettingsFields } from '../../game-overlay/ui/settings'
 import { NetworkSettings } from '../../transport/ui/settings'
 import { UpdatePreferences } from '../../updater/ui/edit-update-preferences'
 import { KeybindInput } from '../../hotkeys/ui/edit-keybind'
@@ -143,6 +144,7 @@ export function ModulePreferencesEditor({
     ...diagnosticSettingsFields,
     ...debugConsoleSettingsFields,
     ...worldEditorSettingsFields,
+    ...gameOverlaySettingsFields,
     ['modloaderUi', 'toggleKey', 'settings.modules.field.hotkey'],
     ['modloaderUi', 'refreshMilliseconds', 'settings.modules.field.refresh'],
   ]
@@ -161,6 +163,8 @@ export function ModulePreferencesEditor({
     popupCooldownSeconds: [0, 3600],
     refreshMilliseconds: [100, 10000],
     tailBytes: [1024, 1048576],
+    scale: [25, 400],
+    opacity: [0, 100],
   }
   return (
     <>
@@ -193,6 +197,7 @@ export function ModulePreferencesEditor({
           [
             'debugConsole',
             'worldEditor',
+            'gameOverlay',
             'modloaderUi',
             'runtimeDiagnostics',
           ] as const
@@ -274,7 +279,7 @@ export function ModulePreferencesEditor({
                         </select>
                       ) : (
                         typeof prefs[module]?.[key] === 'boolean' ||
-                        ['autoScroll', 'onlyChanges'].includes(key)
+                        ['autoScroll', 'onlyChanges', 'hideInMenus'].includes(key)
                       ) ? (
                         <SettingSwitch
                           label={t(label)}
@@ -285,7 +290,11 @@ export function ModulePreferencesEditor({
                         <SettingsNumber
                           value={
                             prefs[module]?.[key] ??
-                            (key === 'popupCooldownSeconds' ? 30 : 0)
+                            (key === 'popupCooldownSeconds'
+                              ? 30
+                              : key === 'scale' || key === 'opacity'
+                                ? 100
+                                : 0)
                           }
                           minimum={ranges[key]?.[0]}
                           maximum={
@@ -300,6 +309,19 @@ export function ModulePreferencesEditor({
                     }
                   />
                 ))}
+              {module === 'gameOverlay' && (
+                <SettingsRow
+                  label={t('settings.modules.field.overlayHideKey')}
+                  control={
+                    <KeybindInput
+                      label={t('settings.modules.field.overlayHideKey')}
+                      value={prefs.gameOverlay?.hideKey}
+                      onChange={(value) => change('gameOverlay', 'hideKey', value)}
+                      onReset={() => change('gameOverlay', 'hideKey', '')}
+                    />
+                  }
+                />
+              )}
               {(module === 'debugConsole' ||
                 module === 'modloaderUi' ||
                 module === 'worldEditor') && (

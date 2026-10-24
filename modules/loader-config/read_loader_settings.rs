@@ -196,4 +196,25 @@ mod tests {
             assert_eq!(config["modules"][module]["enabled"], true, "{module}");
         }
     }
+
+    #[test]
+    fn game_overlay_defaults_and_a_legacy_numeric_hide_key_still_load() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = crate::paths::loader_config(root.path());
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, br#"{"schemaVersion":1}"#).unwrap();
+        let config = read_loader(root.path()).unwrap();
+        assert_eq!(config["modules"]["gameOverlay"]["enabled"], true);
+        assert_eq!(config["modules"]["gameOverlay"]["hideKey"], "");
+
+        // Builds before the key was captured as text saved a key code, later
+        // ones a key name; 1.7.6 captures an SDL binding. All of them load.
+        for hide_key in [r#"0"#, r#""Shift+F12""#, r#""Shift+SDL:69|Mouse:4""#] {
+            let document = format!(
+                r#"{{"schemaVersion":1,"modules":{{"gameOverlay":{{"hideKey":{hide_key}}}}}}}"#
+            );
+            fs::write(&config_path, document).unwrap();
+            assert!(read_loader(root.path()).is_ok(), "{hide_key}");
+        }
+    }
 }

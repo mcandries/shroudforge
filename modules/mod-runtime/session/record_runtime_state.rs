@@ -11,6 +11,7 @@ impl AppState {
         drop(active_mods);
         if !active {
             self.loaded_resource_indexes.borrow_mut().remove_owner(id);
+            crate::lua::shroudforge::v1::game_overlay::clear_owner(id);
         }
         if let Some(status) = native_dll_state {
             self.report_native_dll_effect(&status);

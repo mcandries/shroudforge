@@ -242,6 +242,13 @@
       "toggleKey": "SDL:59",
       "refreshMilliseconds": 400
     },
+    "gameOverlay": {
+      "enabled": true,
+      "scale": 100,
+      "opacity": 100,
+      "hideKey": "",
+      "hideInMenus": true
+    },
     "modloaderUi": {
       "enabled": true,
       "startPage": "news",
