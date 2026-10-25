@@ -72,3 +72,8 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field input ShroudForgeInput Read declared keyboard and mouse shortcuts using SDL.
 --- @field notifications ShroudForgeNotifications Publish notices in the local Modloader feed.
 shroudforge = {}
+
+--- Seconds from a monotonic clock (0 at the first call in the game process), to measure how
+--- long a mod's own work takes: the Lua sandbox has no `os` library.
+--- @return number
+function shroudforge.clock() end

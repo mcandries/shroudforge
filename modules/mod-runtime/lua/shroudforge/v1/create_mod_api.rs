@@ -4,12 +4,14 @@ use mlua::{Function, Table, Value, Variadic};
 use mod_loader::Mod;
 use serde_json::json;
 
+use super::read_monotonic_clock::read_monotonic_clock;
 use super::set_mod_settings::set_settings;
 use crate::lua::LuaValue;
 
 pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.raw_set("version", env!("CARGO_PKG_VERSION"))?;
+    table.raw_set("clock", lua.create_function(|_, ()| Ok(read_monotonic_clock()))?)?;
     table.raw_set("mod_id", r#mod.info().id.as_str())?;
 
     let log = lua.create_table()?;
