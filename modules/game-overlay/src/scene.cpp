@@ -228,6 +228,14 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 fail("grid: color keys are single ASCII characters");
             item.cell_colors[static_cast<unsigned char>(key[0])] = parse_color(color, "colors");
         }
+        if (value.contains("marks")) {
+            if (!value["marks"].is_object()) fail("grid: marks: expected character -> color");
+            for (const auto& [key, color] : value["marks"].items()) {
+                if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128)
+                    fail("grid: mark keys are single ASCII characters");
+                item.cell_marks[static_cast<unsigned char>(key[0])] = parse_color(color, "marks");
+            }
+        }
         if (value.contains("cell")) item.cell = std::clamp(parse_number(value["cell"], "cell"), 1.0f, 64.0f);
         if (value.contains("gap")) item.gap = std::clamp(parse_number(value["gap"], "gap"), 0.0f, 16.0f);
         if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
