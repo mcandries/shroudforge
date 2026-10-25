@@ -7,6 +7,7 @@
 
 #include <imgui.h>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -44,7 +45,7 @@ struct Polyline {
     bool closed = false;
 };
 
-enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow };
+enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid };
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -78,6 +79,12 @@ struct Item {
     bool on = false;
     ImU32 on_color = IM_COL32(201, 162, 78, 255);
     ImU32 knob = IM_COL32(233, 230, 223, 255);
+    // Grid: rows of ASCII characters, each one cell painted with the color of
+    // its character (none: the cell stays empty). Sizes in reference pixels.
+    std::vector<std::string> cells;
+    std::array<ImU32, 128> cell_colors{};
+    float cell = 8.0f;
+    float gap = 1.0f;
 };
 
 // Nine-slice frame drawn behind the zone content.
