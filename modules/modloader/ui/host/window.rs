@@ -384,6 +384,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let mut keybind_layout_revision = shroudforge_hotkeys::layout_revision();
     let mut pending_window_geometry_save: Option<Instant> = None;
     let mut timing = RefreshTiming::default();
+    let mut window_probes: Vec<(Instant, &'static str)> = Vec::new();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
@@ -1029,6 +1030,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             "modloaderUi",
                             shown,
                         );
+                        log_window_probe(&arguments.root, "visibility request", shown, &window, window_topmost);
                     }
                     next_visibility_poll = Instant::now() + Duration::from_millis(100);
                 }
@@ -1133,6 +1135,12 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                     last_snapshot = latest_snapshot.clone();
                     timing.pushes += 1;
                 }
+                while let Some(&(due, label)) = window_probes.first()
+                    && Instant::now() >= due
+                {
+                    window_probes.remove(0);
+                    log_window_probe(&arguments.root, label, shown, &window, window_topmost);
+                }
                 timing.end_tick(&arguments.root, tick_started, visible);
             }
             Event::MainEventsCleared => {
@@ -1221,8 +1229,13 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         next_refresh = Instant::now();
                         window.set_focus();
                         shown_at = Instant::now();
+                        window_probes = vec![
+                            (shown_at + Duration::from_millis(100), "100 ms after the toggle"),
+                            (shown_at + Duration::from_millis(700), "700 ms after the toggle"),
+                        ];
                     }
                 }
+                log_window_probe(&arguments.root, "toggle", shown, &window, window_topmost);
             }
             Event::WindowEvent {
                 event: WindowEvent::Focused(false),
@@ -1286,6 +1299,20 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
             _ => {}
         }
     });
+}
+
+/// Diagnostic of our builds: the Modloader window's state at a toggle and
+/// shortly after, to see why the first open in game flashes and vanishes.
+fn log_window_probe(root: &std::path::Path, label: &str, shown: bool, window: &tao::window::Window, topmost: bool) {
+    let details = format!(
+        "{label}: shown={shown} visible={} minimized={} topmost={topmost} focused={} foreground process {} window \"{}\"",
+        window.is_visible(),
+        window.is_minimized(),
+        window.is_focused(),
+        foreground_process(),
+        foreground_title(),
+    );
+    write_activity(root, "modloader-ui", "Window probe", "Measured", Some(&details), "info");
 }
 
 /// Diagnostic of our builds (not proposed upstream): how long the window's
