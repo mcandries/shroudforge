@@ -42,6 +42,8 @@ VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, con
     mesh.sx = sx;
     mesh.sy = sy;
     mesh.sz = sz;
+    mesh.drawn.resize(total);
+    for (size_t i = 0; i < total; ++i) mesh.drawn[i] = drawn(colors, grid[i]) ? 1 : 0;
     static constexpr int kSteps[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
     const auto at = [&](int x, int y, int z) -> int {
         if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) return -1;
