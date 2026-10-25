@@ -7,6 +7,7 @@ use serde_json::json;
 use super::game_overlay;
 use super::read_ui_locale::read_ui_locale;
 use super::resolve_overlay_paths::resolve_overlay_paths;
+use super::read_monotonic_clock::read_monotonic_clock;
 use super::set_mod_settings::set_settings;
 use crate::lua::convert_json::{json_to_lua, lua_to_json};
 use crate::lua::LuaValue;
@@ -14,6 +15,7 @@ use crate::lua::LuaValue;
 pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.raw_set("version", env!("CARGO_PKG_VERSION"))?;
+    table.raw_set("clock", lua.create_function(|_, ()| Ok(read_monotonic_clock()))?)?;
     table.raw_set("mod_id", r#mod.info().id.as_str())?;
 
     let log = lua.create_table()?;
