@@ -272,6 +272,8 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
         };
         return {span(columns), span(item.cells.size())};
     }
+    case ItemKind::Voxels:
+        return {item.size.x * c.scale, item.size.y * c.scale};
     }
     return {0.0f, 0.0f};
 }
@@ -301,6 +303,93 @@ void draw_grid(const Context& c, const Item& item, ImVec2 position) {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ voxels
+
+ImU32 shade(ImU32 color, float light, float alpha_factor) {
+    const auto channel = [&](int shift) {
+        return static_cast<ImU32>(std::min(255.0f, ((color >> shift) & 0xFF) * light + 0.5f)) << shift;
+    };
+    const float alpha = ((color >> IM_COL32_A_SHIFT) & 0xFF) * alpha_factor;
+    return channel(IM_COL32_R_SHIFT) | channel(IM_COL32_G_SHIFT) | channel(IM_COL32_B_SHIFT) |
+        (static_cast<ImU32>(alpha + 0.5f) << IM_COL32_A_SHIFT);
+}
+
+// Orthographic view of the box from a camera turning around its centre: yaw
+// 0 looks along +z with +x on the right and +y up (the game's axes), pitch
+// looks down. Faces are drawn from the farthest, lit by their direction; in
+// solid view the faces turned away and the inner ones are skipped.
+void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
+    const VoxelMesh& mesh = *item.voxels;
+    constexpr float kRadians = 3.14159265f / 180.0f;
+    const float yaw = (item.yaw + item.spin * static_cast<float>(ImGui::GetTime())) * kRadians;
+    const float pitch = item.pitch * kRadians;
+    const float fx = std::sin(yaw), fz = std::cos(yaw);
+    // Right, view direction and up of the camera.
+    const float r[3] = {fz, 0.0f, -fx};
+    const float f[3] = {fx * std::cos(pitch), -std::sin(pitch), fz * std::cos(pitch)};
+    const float u[3] = {fx * std::sin(pitch), std::cos(pitch), fz * std::sin(pitch)};
+    const float diagonal = std::sqrt(static_cast<float>(mesh.sx * mesh.sx + mesh.sy * mesh.sy + mesh.sz * mesh.sz));
+    const float k = item.zoom * std::min(size.x, size.y) / std::max(1.0f, diagonal);
+    const ImVec2 centre(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
+    const float half[3] = {mesh.sx * 0.5f, mesh.sy * 0.5f, mesh.sz * 0.5f};
+    const auto project = [&](float x, float y, float z) {
+        x -= half[0];
+        y -= half[1];
+        z -= half[2];
+        return ImVec2(centre.x + (x * r[0] + y * r[1] + z * r[2]) * k, centre.y - (x * u[0] + y * u[1] + z * u[2]) * k);
+    };
+    const auto depth = [&](float x, float y, float z) {
+        return (x - half[0]) * f[0] + (y - half[1]) * f[1] + (z - half[2]) * f[2];
+    };
+
+    c.list.PushClipRect(position, ImVec2(position.x + size.x, position.y + size.y), true);
+    if (item.floor_grid > 0 && visible_color(item.grid_color)) {
+        const ImU32 color = fade(c, item.grid_color);
+        for (int x = 0; x <= mesh.sx; x += item.floor_grid)
+            c.list.AddLine(project(x, 0, 0), project(x, 0, mesh.sz), color);
+        for (int z = 0; z <= mesh.sz; z += item.floor_grid)
+            c.list.AddLine(project(0, 0, z), project(mesh.sx, 0, z), color);
+    }
+
+    static constexpr float kNormals[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    // Corners of each face of the unit cube, in order around it.
+    static constexpr float kCorners[6][4][3] = {
+        {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}, {{1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}},
+        {{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}, {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}},
+        {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {{0, 0, 1}, {0, 1, 1}, {1, 1, 1}, {1, 0, 1}}};
+    static constexpr float kLight[6] = {0.82f, 0.82f, 0.55f, 1.0f, 0.68f, 0.68f};
+    std::vector<std::pair<float, std::uint32_t>> order;
+    order.reserve(mesh.faces.size());
+    for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+        const VoxelFace& face = mesh.faces[i];
+        const float* n = kNormals[face.direction];
+        if (!item.xray && (face.inner || n[0] * f[0] + n[1] * f[1] + n[2] * f[2] >= 0.0f)) continue;
+        order.emplace_back(depth(face.x + 0.5f + n[0] * 0.5f, face.y + 0.5f + n[1] * 0.5f, face.z + 0.5f + n[2] * 0.5f), i);
+    }
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    const bool edges = visible_color(item.edge) && k >= 3.0f;
+    for (const auto& [unused, i] : order) {
+        const VoxelFace& face = mesh.faces[i];
+        const bool ghost = item.xray && item.ghost.find(static_cast<char>(face.ch)) != std::string::npos;
+        const float alpha = ghost ? 0.18f : (item.xray ? 0.8f : 1.0f);
+        ImVec2 points[4];
+        for (int corner = 0; corner < 4; ++corner) {
+            const float* p = kCorners[face.direction][corner];
+            points[corner] = project(face.x + p[0], face.y + p[1], face.z + p[2]);
+        }
+        c.list.AddQuadFilled(points[0], points[1], points[2], points[3],
+            fade(c, shade(item.cell_colors[face.ch], kLight[face.direction], alpha)));
+        if (edges)
+            c.list.AddQuad(points[0], points[1], points[2], points[3], fade(c, shade(item.edge, 1.0f, ghost ? 0.3f : 1.0f)));
+    }
+    // Marks on top: a dot at the centre of their cell.
+    const float radius = std::max(2.0f, k * 0.35f);
+    for (const VoxelMark& mark : mesh.marks)
+        c.list.AddCircleFilled(project(mark.x + 0.5f, mark.y + 0.5f, mark.z + 0.5f), radius,
+            fade(c, item.cell_marks[mark.ch]), 12);
+    c.list.PopClipRect();
 }
 
 void draw_icon(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
@@ -406,6 +495,9 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
     }
     case ItemKind::Grid:
         draw_grid(c, item, position);
+        break;
+    case ItemKind::Voxels:
+        draw_voxels(c, item, position, size);
         break;
     }
 }
