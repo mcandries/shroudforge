@@ -7,6 +7,8 @@
 
 #include <imgui.h>
 
+#include "voxel_mesh.h"
+
 #include <array>
 #include <map>
 #include <memory>
@@ -45,7 +47,7 @@ struct Polyline {
     bool closed = false;
 };
 
-enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid };
+enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid, Voxels };
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -87,6 +89,21 @@ struct Item {
     std::array<ImU32, 128> cell_marks{};
     float cell = 8.0f;
     float gap = 1.0f;
+    // Voxels: a box of cells seen in 3D in a view of `size` reference pixels;
+    // colors and marks by character as for a grid (cell_colors, cell_marks).
+    // The camera turns around the box: yaw (0 looks along +z) plus `spin`
+    // degrees per second, pitch looking down, zoom (1 = the box fits).
+    // X-ray: inner faces too, and the faces of `ghost` characters see-through.
+    std::shared_ptr<const VoxelMesh> voxels;
+    float yaw = 0.0f;
+    float pitch = 30.0f;
+    float zoom = 1.0f;
+    float spin = 0.0f;
+    bool xray = false;
+    std::string ghost;
+    ImU32 edge = IM_COL32(0, 0, 0, 110);
+    int floor_grid = 0;  // Lines on the floor of the box every this many cells, 0 = none.
+    ImU32 grid_color = IM_COL32(255, 255, 255, 40);
 };
 
 // Nine-slice frame drawn behind the zone content.

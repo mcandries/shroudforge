@@ -239,6 +239,51 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cell")) item.cell = std::clamp(parse_number(value["cell"], "cell"), 1.0f, 64.0f);
         if (value.contains("gap")) item.gap = std::clamp(parse_number(value["gap"], "gap"), 0.0f, 16.0f);
         if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
+    } else if (type == "voxels") {
+        item.kind = ItemKind::Voxels;
+        if (!value.contains("box") || !value["box"].is_array() || value["box"].size() != 3)
+            fail("voxels: expected box = {x, y, z} cells");
+        int box[3];
+        for (int i = 0; i < 3; ++i) {
+            if (!value["box"][i].is_number_integer()) fail("voxels: box sides are integers");
+            box[i] = value["box"][i].get<int>();
+        }
+        if (!value.contains("cells") || !value["cells"].is_string()) fail("voxels: expected cells (text)");
+        if (!value.contains("colors") || !value["colors"].is_object()) fail("voxels: expected colors (character -> color)");
+        for (const auto& [key, color] : value["colors"].items()) {
+            if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128 || (key[0] >= '0' && key[0] <= '9'))
+                fail("voxels: color keys are single ASCII characters, not digits");
+            item.cell_colors[static_cast<unsigned char>(key[0])] = parse_color(color, "colors");
+        }
+        if (value.contains("marks")) {
+            if (!value["marks"].is_object()) fail("voxels: marks: expected character -> color");
+            for (const auto& [key, color] : value["marks"].items()) {
+                if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128)
+                    fail("voxels: mark keys are single ASCII characters");
+                item.cell_marks[static_cast<unsigned char>(key[0])] = parse_color(color, "marks");
+            }
+        }
+        try {
+            item.voxels = std::make_shared<const VoxelMesh>(build_voxel_mesh(box[0], box[1], box[2],
+                value["cells"].get<std::string>(), item.cell_colors, item.cell_marks));
+        } catch (const std::runtime_error& error) {
+            fail(error.what());
+        }
+        item.size = {240.0f, 180.0f};
+        if (value.contains("size")) item.size = parse_pair(value["size"], "size");
+        if (value.contains("yaw")) item.yaw = parse_number(value["yaw"], "yaw");
+        if (value.contains("pitch")) item.pitch = std::clamp(parse_number(value["pitch"], "pitch"), -89.0f, 89.0f);
+        if (value.contains("zoom")) item.zoom = std::clamp(parse_number(value["zoom"], "zoom"), 0.1f, 16.0f);
+        if (value.contains("spin")) item.spin = std::clamp(parse_number(value["spin"], "spin"), -360.0f, 360.0f);
+        item.xray = value.value("xray", false);
+        if (value.contains("ghost")) {
+            if (!value["ghost"].is_string()) fail("voxels: ghost: expected characters");
+            item.ghost = value["ghost"].get<std::string>();
+        }
+        if (value.contains("edge")) item.edge = parse_color(value["edge"], "edge");
+        if (value.contains("grid"))
+            item.floor_grid = std::clamp(static_cast<int>(parse_number(value["grid"], "grid")), 0, kMaxVoxelSide);
+        if (value.contains("grid_color")) item.grid_color = parse_color(value["grid_color"], "grid_color");
     } else if (type == "grow") {
         item.kind = ItemKind::Grow;
     } else if (type == "spacer") {
