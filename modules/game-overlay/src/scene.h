@@ -80,9 +80,11 @@ struct Item {
     ImU32 on_color = IM_COL32(201, 162, 78, 255);
     ImU32 knob = IM_COL32(233, 230, 223, 255);
     // Grid: rows of ASCII characters, each one cell painted with the color of
-    // its character (none: the cell stays empty). Sizes in reference pixels.
+    // its character (none: the cell stays empty), and a smaller centred square
+    // in the mark color of its character, if any. Sizes in reference pixels.
     std::vector<std::string> cells;
     std::array<ImU32, 128> cell_colors{};
+    std::array<ImU32, 128> cell_marks{};
     float cell = 8.0f;
     float gap = 1.0f;
 };
