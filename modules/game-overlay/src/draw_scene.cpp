@@ -443,7 +443,12 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         for (const std::uint32_t i : seen.faces) add(i);
     }
     std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-    const bool edges = visible_color(item.edge) && k >= 3.0f;
+    // Plain solid view: neither outlines nor anti-aliased borders, whose
+    // overlaps would draw the seams between faces when see-through.
+    const bool plain = item.plain && !item.xray;
+    const bool edges = !plain && visible_color(item.edge) && k >= 3.0f;
+    const ImDrawListFlags flags = c.list.Flags;
+    if (plain) c.list.Flags &= ~ImDrawListFlags_AntiAliasedFill;
     for (const auto& [unused, i] : order) {
         const VoxelFace& face = mesh.faces[i];
         const bool ghost = item.xray && item.ghost.find(static_cast<char>(face.ch)) != std::string::npos;
@@ -458,6 +463,7 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         if (edges)
             c.list.AddQuad(points[0], points[1], points[2], points[3], fade(c, shade(item.edge, 1.0f, alpha)));
     }
+    c.list.Flags = flags;
     // Marks on top: a dot at the centre of their cell.
     const float radius = std::max(2.0f, k * 0.35f);
     for (const VoxelMark& mark : mesh.marks)
