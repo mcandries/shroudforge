@@ -82,7 +82,7 @@ function shroudforge_input.keybind_label(setting_key) end
 
 --- One line of a zone. A plain string is a text item.
 --- @class ShroudForgeOverlayItem: ShroudForgeOverlayTextStyle
---- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid' Default: `text`.
+--- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid'|'voxels' Default: `text`.
 --- @field text? string Text or chip content.
 --- @field align? 'left'|'center'|'right'
 --- @field image? string PNG or JPEG file, relative to the mod folder.
@@ -97,7 +97,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field background? ShroudForgeOverlayColor Bar or chip background.
 --- @field thickness? number Separator thickness.
 --- @field value? number Bar fill, 0 to 1.
---- @field box? number[] Chip `{min width, height}`. Default `{17, 17}`.
+--- @field box? number[] Chip `{min width, height}`, default `{17, 17}`; voxels: `{x, y, z}` cells (1 to 128 each).
 --- @field padding? number Chip horizontal padding. Default 4.
 --- @field path? string Icon: SVG path data (M L H V A Z), stroked.
 --- @field viewbox? number Icon box side. Default 24.
@@ -106,10 +106,20 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field on_color? ShroudForgeOverlayColor Toggle track when on.
 --- @field knob? ShroudForgeOverlayColor Toggle knob.
 --- @field rows? string[] Grid: one string per row, one cell per ASCII character (64 x 64 at most).
---- @field colors? table<string, ShroudForgeOverlayColor> Grid: color of each character; others leave their cell empty.
---- @field marks? table<string, ShroudForgeOverlayColor> Grid: a centred square over the cells of these characters.
+--- @field colors? table<string, ShroudForgeOverlayColor> Grid or voxels: color of each character; others leave their cell empty.
+--- @field marks? table<string, ShroudForgeOverlayColor> Grid: a centred square over the cells of these characters; voxels: a dot drawn on top.
 --- @field cell? number Grid: cell side. Default 8.
 --- @field gap? number Grid: space between cells. Default 1.
+--- @field cells? string Voxels: run-length text of the box's cells, x fastest, then y, then z; each ASCII character is a cell, a count before it repeats it (`"40.3#"`).
+--- @field yaw? number Voxels: camera turn in degrees, 0 looks along +z with +x on the right. Default 0.
+--- @field pitch? number Voxels: camera tilt in degrees, looking down when positive. Default 30.
+--- @field zoom? number Voxels: 1 fits the box in the view. Default 1.
+--- @field spin? number Voxels: degrees per second added to the yaw, turned by the overlay itself. Default 0.
+--- @field xray? boolean Voxels: also draw the faces between cells of different characters, and see through `ghost`.
+--- @field ghost? string Voxels: characters drawn see-through in X-ray.
+--- @field edge? ShroudForgeOverlayColor Voxels: outline of each face (when cells are 3 pixels or more).
+--- @field grid? number Voxels: lines on the floor of the box every this many cells. Default 0 (none).
+--- @field grid_color? ShroudForgeOverlayColor Voxels: floor lines.
 
 --- A zone drawn over the game image. Sizes and offsets are reference pixels of a
 --- screen 1080 pixels high (or `reference`), scaled by the real screen height.
