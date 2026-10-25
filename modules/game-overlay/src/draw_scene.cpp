@@ -316,10 +316,59 @@ ImU32 shade(ImU32 color, float light, float alpha_factor) {
         (static_cast<ImU32>(alpha + 0.5f) << IM_COL32_A_SHIFT);
 }
 
+constexpr float kNormals[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+
+// Whether a point of a face is seen from the camera: a ray from it towards
+// the camera (`towards`, unit) crosses no drawn cell before it leaves the box
+// (a grid walk, cell by cell). `a` and `b` move the point across the face.
+bool point_seen(const VoxelMesh& mesh, const VoxelFace& face, const float towards[3], float a, float b) {
+    const float* n = kNormals[face.direction];
+    const int axis_n = face.direction / 2, axis_a = (axis_n + 1) % 3, axis_b = (axis_n + 2) % 3;
+    float start[3] = {face.x + 0.5f + n[0] * 0.501f, face.y + 0.5f + n[1] * 0.501f, face.z + 0.5f + n[2] * 0.501f};
+    start[axis_a] += a;
+    start[axis_b] += b;
+    const int size[3] = {mesh.sx, mesh.sy, mesh.sz};
+    int cell[3], step[3];
+    float next[3], delta[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        cell[axis] = static_cast<int>(std::floor(start[axis]));
+        const float d = towards[axis];
+        if (std::fabs(d) < 1e-6f) {
+            step[axis] = 0;
+            next[axis] = delta[axis] = FLT_MAX;
+        } else {
+            step[axis] = d > 0.0f ? 1 : -1;
+            const float border = d > 0.0f ? cell[axis] + 1.0f : static_cast<float>(cell[axis]);
+            next[axis] = (border - start[axis]) / d;
+            delta[axis] = std::fabs(1.0f / d);
+        }
+    }
+    while (true) {
+        if (cell[0] < 0 || cell[1] < 0 || cell[2] < 0 || cell[0] >= size[0] || cell[1] >= size[1] || cell[2] >= size[2])
+            return true;
+        if (mesh.drawn[(static_cast<size_t>(cell[2]) * size[1] + cell[1]) * size[0] + cell[0]]) return false;
+        const int axis = next[0] < next[1] ? (next[0] < next[2] ? 0 : 2) : (next[1] < next[2] ? 1 : 2);
+        cell[axis] += step[axis];
+        next[axis] += delta[axis];
+    }
+}
+
+// Whether any of five points of a face (its centre and four towards its
+// corners) is seen: a face half hidden is drawn whole.
+bool seen_from_camera(const VoxelMesh& mesh, const VoxelFace& face, const float towards[3]) {
+    static constexpr float kSamples[5][2] = {{0, 0}, {-0.35f, -0.35f}, {0.35f, -0.35f}, {-0.35f, 0.35f}, {0.35f, 0.35f}};
+    for (const auto& sample : kSamples)
+        if (point_seen(mesh, face, towards, sample[0], sample[1])) return true;
+    return false;
+}
+
 // Orthographic view of the box from a camera turning around its centre: yaw
 // 0 looks along +z with +x on the right and +y up (the game's axes), pitch
-// looks down. Faces are drawn from the farthest, lit by their direction; in
-// solid view the faces turned away and the inner ones are skipped.
+// looks down. Faces turned away are skipped and the others drawn from the
+// farthest, lit by their direction. Solid and see-through (`opacity` below
+// 1): only the faces seen from the camera, so what is hidden stays hidden;
+// opaque, the nearer faces simply cover the others. X-ray: every face turned
+// to the camera, inner ones included.
 void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
     const VoxelMesh& mesh = *item.voxels;
     constexpr float kRadians = 3.14159265f / 180.0f;
@@ -346,34 +395,59 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
 
     c.list.PushClipRect(position, ImVec2(position.x + size.x, position.y + size.y), true);
     if (item.floor_grid > 0 && visible_color(item.grid_color)) {
-        const ImU32 color = fade(c, item.grid_color);
+        const ImU32 color = fade(c, shade(item.grid_color, 1.0f, item.opacity));
         for (int x = 0; x <= mesh.sx; x += item.floor_grid)
             c.list.AddLine(project(x, 0, 0), project(x, 0, mesh.sz), color);
         for (int z = 0; z <= mesh.sz; z += item.floor_grid)
             c.list.AddLine(project(0, 0, z), project(mesh.sx, 0, z), color);
     }
 
-    static constexpr float kNormals[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
     // Corners of each face of the unit cube, in order around it.
     static constexpr float kCorners[6][4][3] = {
         {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}, {{1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}},
         {{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}, {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}},
         {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {{0, 0, 1}, {0, 1, 1}, {1, 1, 1}, {1, 0, 1}}};
     static constexpr float kLight[6] = {0.82f, 0.82f, 0.55f, 1.0f, 0.68f, 0.68f};
+    // See-through solid view: the faces seen from this camera, found again
+    // only when it moves.
+    const bool see_through = !item.xray && item.opacity < 0.999f;
+    VoxelVisibility& seen = mesh.visibility;
+    if (see_through && (!seen.valid || seen.yaw != yaw || seen.pitch != pitch)) {
+        const float towards[3] = {-f[0], -f[1], -f[2]};
+        seen.faces.clear();
+        for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+            const VoxelFace& face = mesh.faces[i];
+            const float* n = kNormals[face.direction];
+            if (face.inner || n[0] * f[0] + n[1] * f[1] + n[2] * f[2] >= 0.0f) continue;
+            if (seen_from_camera(mesh, face, towards)) seen.faces.push_back(i);
+        }
+        seen.valid = true;
+        seen.yaw = yaw;
+        seen.pitch = pitch;
+    }
     std::vector<std::pair<float, std::uint32_t>> order;
-    order.reserve(mesh.faces.size());
-    for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+    const auto add = [&](std::uint32_t i) {
         const VoxelFace& face = mesh.faces[i];
         const float* n = kNormals[face.direction];
-        if (!item.xray && (face.inner || n[0] * f[0] + n[1] * f[1] + n[2] * f[2] >= 0.0f)) continue;
         order.emplace_back(depth(face.x + 0.5f + n[0] * 0.5f, face.y + 0.5f + n[1] * 0.5f, face.z + 0.5f + n[2] * 0.5f), i);
+    };
+    if (!see_through) {
+        order.reserve(mesh.faces.size());
+        for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+            const VoxelFace& face = mesh.faces[i];
+            const float* n = kNormals[face.direction];
+            if ((item.xray || !face.inner) && n[0] * f[0] + n[1] * f[1] + n[2] * f[2] < 0.0f) add(i);
+        }
+    } else {
+        order.reserve(seen.faces.size());
+        for (const std::uint32_t i : seen.faces) add(i);
     }
     std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     const bool edges = visible_color(item.edge) && k >= 3.0f;
     for (const auto& [unused, i] : order) {
         const VoxelFace& face = mesh.faces[i];
         const bool ghost = item.xray && item.ghost.find(static_cast<char>(face.ch)) != std::string::npos;
-        const float alpha = ghost ? 0.18f : (item.xray ? 0.8f : 1.0f);
+        const float alpha = (ghost ? item.ghost_alpha : 1.0f) * item.opacity;
         ImVec2 points[4];
         for (int corner = 0; corner < 4; ++corner) {
             const float* p = kCorners[face.direction][corner];
@@ -382,7 +456,7 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         c.list.AddQuadFilled(points[0], points[1], points[2], points[3],
             fade(c, shade(item.cell_colors[face.ch], kLight[face.direction], alpha)));
         if (edges)
-            c.list.AddQuad(points[0], points[1], points[2], points[3], fade(c, shade(item.edge, 1.0f, ghost ? 0.3f : 1.0f)));
+            c.list.AddQuad(points[0], points[1], points[2], points[3], fade(c, shade(item.edge, 1.0f, alpha)));
     }
     // Marks on top: a dot at the centre of their cell.
     const float radius = std::max(2.0f, k * 0.35f);

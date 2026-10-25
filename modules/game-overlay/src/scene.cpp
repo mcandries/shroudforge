@@ -280,6 +280,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (!value["ghost"].is_string()) fail("voxels: ghost: expected characters");
             item.ghost = value["ghost"].get<std::string>();
         }
+        if (value.contains("ghost_alpha"))
+            item.ghost_alpha = std::clamp(parse_number(value["ghost_alpha"], "ghost_alpha"), 0.0f, 1.0f);
+        if (value.contains("opacity")) item.opacity = std::clamp(parse_number(value["opacity"], "opacity"), 0.0f, 1.0f);
         if (value.contains("edge")) item.edge = parse_color(value["edge"], "edge");
         if (value.contains("grid"))
             item.floor_grid = std::clamp(static_cast<int>(parse_number(value["grid"], "grid")), 0, kMaxVoxelSide);
