@@ -276,16 +276,29 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
     return {0.0f, 0.0f};
 }
 
+// Both edges of each cell are snapped, so small cells at a fractional screen
+// scale keep even sizes and gaps instead of overlapping.
 void draw_grid(const Context& c, const Item& item, ImVec2 position) {
     const float step = (item.cell + item.gap) * c.scale;
     const float side = std::max(1.0f, item.cell * c.scale);
+    const float rounding = item.rounding * c.scale;
     for (size_t y = 0; y < item.cells.size(); ++y) {
         const std::string& row = item.cells[y];
         for (size_t x = 0; x < row.size(); ++x) {
-            const ImU32 color = item.cell_colors[static_cast<unsigned char>(row[x])];
-            if (!visible_color(color)) continue;
-            const ImVec2 min = snap(ImVec2(position.x + x * step, position.y + y * step));
-            c.list.AddRectFilled(min, ImVec2(min.x + side, min.y + side), fade(c, color), item.rounding * c.scale);
+            const unsigned char ch = static_cast<unsigned char>(row[x]);
+            const ImU32 color = item.cell_colors[ch];
+            const ImU32 mark = item.cell_marks[ch];
+            if (!visible_color(color) && !visible_color(mark)) continue;
+            const ImVec2 origin(position.x + x * step, position.y + y * step);
+            const ImVec2 min = snap(origin);
+            const ImVec2 max = snap(ImVec2(origin.x + side, origin.y + side));
+            if (visible_color(color)) c.list.AddRectFilled(min, max, fade(c, color), rounding);
+            if (visible_color(mark)) {
+                // A centred square of about half the cell, at least a pixel.
+                const float inset = std::floor((max.x - min.x) * 0.25f);
+                c.list.AddRectFilled(ImVec2(min.x + inset, min.y + inset), ImVec2(max.x - inset, max.y - inset),
+                    fade(c, mark));
+            }
         }
     }
 }

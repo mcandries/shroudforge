@@ -137,6 +137,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field knob? ShroudForgeOverlayColor Toggle knob.
 --- @field rows? string[] Grid: one string per row, one cell per ASCII character (64 x 64 at most).
 --- @field colors? table<string, ShroudForgeOverlayColor> Grid: color of each character; others leave their cell empty.
+--- @field marks? table<string, ShroudForgeOverlayColor> Grid: a centred square over the cells of these characters.
 --- @field cell? number Grid: cell side. Default 8.
 --- @field gap? number Grid: space between cells. Default 1.
 

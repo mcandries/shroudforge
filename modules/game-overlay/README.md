@@ -90,7 +90,7 @@ Items (a plain string is a text item):
 | `spacer` | `size`: height. |
 | `separator` | `color`, `thickness`: a line across the zone. |
 | `progress` | `value` 0 to 1, `size`, `color`, `background`, `rounding`. |
-| `grid` | `rows`: strings of ASCII characters (64 rows and 64 characters at most), one cell per character; `colors`: character → color, a character without a color leaves its cell empty; `cell` (side, 8), `gap` (between cells, 1), `rounding`. For maps, shapes or small charts drawn cell by cell in a single item. |
+| `grid` | `rows`: strings of ASCII characters (64 rows and 64 characters at most), one cell per character; `colors`: character → color, a character without a color leaves its cell empty; `marks` (optional): character → color of a centred square of about half the cell, drawn over its color, to flag a cell without hiding what it holds; `cell` (side, 8), `gap` (between cells, 1), `rounding`. For maps, shapes or small charts drawn cell by cell in a single item. |
 
 ## Test
 
