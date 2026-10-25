@@ -28,10 +28,19 @@ struct VoxelMark {
     unsigned char ch = 0;
 };
 
+// Faces seen from a camera, kept while it does not move (draw_scene.cpp).
+struct VoxelVisibility {
+    bool valid = false;
+    float yaw = 0.0f, pitch = 0.0f;
+    std::vector<std::uint32_t> faces;
+};
+
 struct VoxelMesh {
     int sx = 0, sy = 0, sz = 0;
     std::vector<VoxelFace> faces;
     std::vector<VoxelMark> marks;
+    std::vector<std::uint8_t> drawn;  // 1 for a drawn cell, x fastest, then y, then z.
+    mutable VoxelVisibility visibility;
 };
 
 // Decodes `cells`, run-length text of sx * sy * sz cells (x fastest, then y,
