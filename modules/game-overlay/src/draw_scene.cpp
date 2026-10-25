@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstring>
 #include <iterator>
+#include <string>
+#include <unordered_map>
 
 namespace overlay {
 
@@ -21,6 +23,7 @@ struct Context {
     const DrawResources& resources;
     float scale;
     float opacity;
+    std::string zone;  // Owner and id of the zone drawn, for what is kept between its updates.
 };
 
 ImU32 fade(const Context& c, ImU32 color) {
@@ -369,11 +372,35 @@ bool seen_from_camera(const VoxelMesh& mesh, const VoxelFace& face, const float 
 // 1): only the faces seen from the camera, so what is hidden stays hidden;
 // opaque, the nearer faces simply cover the others. X-ray: every face turned
 // to the camera, inner ones included.
+// The camera angles a voxels view shows, per zone, eased towards the
+// item's when `ease` is set: a new zone with another angle turns the view
+// instead of jumping.
+struct ShownCamera {
+    float yaw = 0.0f, pitch = 0.0f;
+    double time = 0.0;
+};
+
 void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
     const VoxelMesh& mesh = *item.voxels;
     constexpr float kRadians = 3.14159265f / 180.0f;
-    const float yaw = (item.yaw + item.spin * static_cast<float>(ImGui::GetTime())) * kRadians;
-    const float pitch = item.pitch * kRadians;
+    const double now = ImGui::GetTime();
+    float yaw_degrees = item.yaw + item.spin * static_cast<float>(now), pitch_degrees = item.pitch;
+    if (item.ease > 0.0f) {
+        static std::unordered_map<std::string, ShownCamera> shown;
+        const auto [entry, created] = shown.try_emplace(c.zone, ShownCamera{yaw_degrees, pitch_degrees, now});
+        ShownCamera& camera = entry->second;
+        if (!created) {
+            // About 95 % of the way after `ease` seconds, the short way round.
+            const float step = 1.0f - std::exp(-static_cast<float>(now - camera.time) * 3.0f / item.ease);
+            camera.yaw += std::remainder(yaw_degrees - camera.yaw, 360.0f) * step;
+            camera.pitch += (pitch_degrees - camera.pitch) * step;
+        }
+        camera.time = now;
+        yaw_degrees = camera.yaw;
+        pitch_degrees = camera.pitch;
+    }
+    const float yaw = yaw_degrees * kRadians;
+    const float pitch = pitch_degrees * kRadians;
     const float fx = std::sin(yaw), fz = std::cos(yaw);
     // Right, view direction and up of the camera.
     const float r[3] = {fz, 0.0f, -fx};
@@ -653,7 +680,8 @@ void draw_zone(const Context& c, const Zone& zone, ImVec2 screen) {
 
 void draw_scene(ImDrawList& list, const SceneSnapshot& scene, ImVec2 screen, const DrawResources& resources) {
     for (const auto& zone : scene.zones) {
-        const Context c{list, resources, screen.y / zone->reference * scene.options.scale, scene.options.opacity};
+        const Context c{list, resources, screen.y / zone->reference * scene.options.scale, scene.options.opacity,
+            zone->owner + "/" + zone->id};
         draw_zone(c, *zone, screen);
     }
 }
