@@ -82,7 +82,7 @@ function shroudforge_input.keybind_label(setting_key) end
 
 --- One line of a zone. A plain string is a text item.
 --- @class ShroudForgeOverlayItem: ShroudForgeOverlayTextStyle
---- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress' Default: `text`.
+--- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid' Default: `text`.
 --- @field text? string Text or chip content.
 --- @field align? 'left'|'center'|'right'
 --- @field image? string PNG or JPEG file, relative to the mod folder.
@@ -105,6 +105,10 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field on? boolean Toggle state.
 --- @field on_color? ShroudForgeOverlayColor Toggle track when on.
 --- @field knob? ShroudForgeOverlayColor Toggle knob.
+--- @field rows? string[] Grid: one string per row, one cell per ASCII character (64 x 64 at most).
+--- @field colors? table<string, ShroudForgeOverlayColor> Grid: color of each character; others leave their cell empty.
+--- @field cell? number Grid: cell side. Default 8.
+--- @field gap? number Grid: space between cells. Default 1.
 
 --- A zone drawn over the game image. Sizes and offsets are reference pixels of a
 --- screen 1080 pixels high (or `reference`), scaled by the real screen height.
