@@ -4,10 +4,14 @@ pub(super) fn lua_ecs_read_fields(
     args: FunctionArgs,
     r#mod: &Mod,
 ) -> mlua::Result<(LuaValue, Option<String>)> {
-    Ok(match ecs_fields(lua, args, r#mod, false) {
+    let started = std::time::Instant::now();
+    let result = match ecs_fields(lua, args, r#mod, false) {
         Ok(value) => (value, None),
         Err(reason) => (LuaValue::Nil, Some(reason)),
-    })
+    };
+    crate::lua::ingame::report_operation_timing::record_call("ecs.read_fields", started);
+    crate::lua::ingame::report_operation_timing::report_operation_timing();
+    Ok(result)
 }
 
 pub(super) fn lua_ecs_write_fields(

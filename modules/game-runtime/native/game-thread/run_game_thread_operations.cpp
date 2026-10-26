@@ -1,6 +1,7 @@
 #include "game-thread/run_game_thread_operations.h"
 #include "game-thread/game_thread_state.h"
 #include "engine-context/observe_entity_manager.h"
+#include "game-thread/operation_timing.h"
 
 #include <nlohmann/json.hpp>
 
@@ -44,6 +45,11 @@ void __cdecl drain(void*, void*) {
         ~CallbackScope() { --dispatch_depth; draining.clear(std::memory_order_release); }
     } scope;
     engine_thread.store(GetCurrentThreadId(), std::memory_order_release);
+    static std::chrono::steady_clock::time_point previous_drain;
+    const auto drain_started = std::chrono::steady_clock::now();
+    if (previous_drain.time_since_epoch().count())
+        OperationTiming::Record(OperationTiming::Kind::DrainInterval, OperationTiming::MicrosecondsSince(previous_drain));
+    previous_drain = drain_started;
     last_drain_ms.store(GetTickCount64(), std::memory_order_relaxed);
     drain_count.fetch_add(1, std::memory_order_relaxed);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
@@ -68,6 +74,7 @@ void __cdecl drain(void*, void*) {
             }
             const auto duration = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - operation_started).count());
             last_operation_us.store(duration, std::memory_order_relaxed);
+            OperationTiming::Record(OperationTiming::Kind::DispatchRun, duration);
             auto maximum = maximum_operation_us.load(std::memory_order_relaxed);
             while (maximum < duration && !maximum_operation_us.compare_exchange_weak(maximum, duration, std::memory_order_relaxed)) {}
             job->state.store(2, std::memory_order_release);
@@ -141,8 +148,11 @@ bool Invoke(Operation operation, std::shared_ptr<void> context, std::uint32_t ti
         }
         queue.push_back(job);
     }
-    if (WaitForSingleObject(job->complete, timeout_ms) == WAIT_OBJECT_0)
+    const auto queued_at = std::chrono::steady_clock::now();
+    if (WaitForSingleObject(job->complete, timeout_ms) == WAIT_OBJECT_0) {
+        OperationTiming::Record(OperationTiming::Kind::DispatchWait, OperationTiming::MicrosecondsSince(queued_at));
         return job->executed.load(std::memory_order_acquire);
+    }
     timeout_count.fetch_add(1, std::memory_order_relaxed);
     unsigned queued = 0;
     if (job->state.compare_exchange_strong(queued, 3, std::memory_order_acq_rel)) {
