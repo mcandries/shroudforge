@@ -19,6 +19,9 @@ enum class Kind : unsigned {
     CursorSample,  // Its sample of the input and its checks.
     DirectResolve, // A direct ECS read: the owner resolutions before and after.
     DirectRun,     // A direct ECS read: the operation itself.
+    Membership,    // One entity membership check (two id lookups).
+    MembershipSlots, // Slots visited by one id lookup (recorded as a count, not microseconds).
+    SampleCopy,    // The copy of the local input (both copies).
     Count
 };
 
