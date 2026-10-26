@@ -269,6 +269,12 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
     } read_timing{started};
     std::scoped_lock operation_lock(EcsImplementation::operation_mutex);
     OperationTiming::Record(OperationTiming::Kind::CursorLock, OperationTiming::MicrosecondsSince(started));
+    OperationTiming::NoteCallerPriority(GetThreadPriority(GetCurrentThread()));
+    auto step = std::chrono::steady_clock::now();
+    const auto lap = [&](OperationTiming::Kind kind) {
+        OperationTiming::Record(kind, OperationTiming::MicrosecondsSince(step));
+        step = std::chrono::steady_clock::now();
+    };
     std::unique_lock input_lock(local_input_mutex, std::try_to_lock);
     if (!input_lock.owns_lock()) return 5;
     EngineContext::EcsView owner;
@@ -277,6 +283,7 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
         local_input = {};
         return 4;
     }
+    lap(OperationTiming::Kind::CursorResolve);
     const auto now = GetTickCount64();
     const auto layout = client_layout(owner);
     std::uint64_t count{};
@@ -309,6 +316,7 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
         local_input.registry_ms = now;
         local_input.configured = true;
     }
+    lap(OperationTiming::Kind::CursorRegistry);
     if (!current_registry_header(local_input)) { local_input = {}; return 5; }
     // A periodic discovery refresh may span several short slices. Keep the
     // last completely validated unique input while refreshing, but revalidate
@@ -317,6 +325,7 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
     if (local_input.complete && now - local_input.completed_ms >= 1000) restart_scan(local_input, true);
     if (!local_input.complete) {
         const auto result = scan_local_input(local_input, layout);
+        lap(OperationTiming::Kind::CursorScan);
         if (result != 1 && !(result == 5 && local_input.published.pointer)) return result;
     }
     if (local_input.ambiguous) return 6;
@@ -330,6 +339,7 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
         restart_scan(local_input);
         return 5;
     }
+    lap(OperationTiming::Kind::CursorSample);
     std::memcpy(buffer, sample.data(), sample.size());
     *sequence = ++local_input_sequence;
     return 1;
