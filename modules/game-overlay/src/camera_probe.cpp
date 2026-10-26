@@ -336,9 +336,13 @@ struct Place {
     uint64_t changes = 0;  // Over the current 5 s.
 };
 
+// In the DLL's own data (image memory, not searched): the search must not
+// find the overlay's copies of the blocks.
 constexpr int MAX_PLACES = 64;
 struct Search {
-    std::vector<Place> places;
+    Place places[MAX_PLACES];
+    int count = 0;
+    float scratch[19]{};
     uint64_t frame = 0;
     double wanted_until = 0.0, next_search = 0.0, last_valid = 0.0, longest = 0.0;
     bool running = false;
@@ -351,14 +355,29 @@ void search_thread(float around0, float around1, float around2,
     std::vector<std::pair<const char*, size_t>> gpu) {
     const double started = seconds();
     const float around[3] = {around0, around1, around2};
-    std::vector<const char*> found;
-    size_t scanned = 0, regions = 0;
+    size_t scanned = 0, queried = 0, regions = 0;
+    double query_time = 0.0, query_longest = 0.0, scan_time = 0.0, next_report = started + 5.0;
     const char* at = nullptr;
     MEMORY_BASIC_INFORMATION info{};
-    while (found.size() < MAX_PLACES && VirtualQuery(at, &info, sizeof(info)) == sizeof(info)) {
+    int found = 0;
+    while (found < MAX_PLACES) {
+        const double asked = seconds();
+        const bool answered = VirtualQuery(at, &info, sizeof(info)) == sizeof(info);
+        const double took = seconds() - asked;
+        query_time += took;
+        query_longest = std::max(query_longest, took);
+        ++queried;
+        if (!answered) break;
         const char* base = static_cast<const char*>(info.BaseAddress);
         const size_t size = info.RegionSize;
         at = base + size;
+        if (seconds() >= next_report) {
+            next_report = seconds() + 5.0;
+            log_line("render camera: searching for %.0f s: %zu regions asked (%.0f ms in VirtualQuery, longest %.1f ms), "
+                     "%zu read (%.0f MB, %.0f ms), %d blocks found, at %p",
+                seconds() - started, queried, query_time * 1000.0, query_longest * 1000.0, regions,
+                scanned / 1048576.0, scan_time * 1000.0, found, static_cast<const void*>(base));
+        }
         if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE) continue;
         if ((info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) continue;
         if ((info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) == 0) continue;
@@ -367,34 +386,37 @@ void search_thread(float around0, float around1, float around2,
         for (const auto& [data, length] : gpu) is_gpu = is_gpu || (base < data + length && data < base + size);
         if (is_gpu) continue;
         const char* hits[MAX_PLACES];
-        const int room = static_cast<int>(MAX_PLACES - found.size());
-        const int count = scan_linear(base, size, around, hits, room);
+        const double read_at = seconds();
+        const int count = scan_linear(base, size, around, hits, MAX_PLACES - found);
+        scan_time += seconds() - read_at;
         ++regions;
         scanned += size;
-        for (int i = 0; i < count; ++i) found.push_back(hits[i]);
+        if (count <= 0) continue;
+        // Followed at once, while the search goes on.
+        std::lock_guard lock(probe_mutex);
+        for (int i = 0; i < count && search.count < MAX_PLACES; ++i) {
+            search.places[search.count] = Place{};
+            search.places[search.count].address = hits[i];
+            ++search.count;
+            log_line("render camera:   block at %p (region %p, %.1f MB)", static_cast<const void*>(hits[i]),
+                static_cast<const void*>(base), size / 1048576.0);
+        }
+        found += count;
+        search.last_valid = seconds();
     }
     std::lock_guard lock(probe_mutex);
-    search.places.clear();
-    for (const char* address : found) {
-        Place place;
-        place.address = address;
-        search.places.push_back(place);
-    }
     search.running = false;
-    search.last_valid = seconds();
-    log_line("render camera: searched %zu regions, %.0f MB of ordinary memory in %.1f s: %zu camera blocks near the "
-             "camera",
-        regions, scanned / 1048576.0, seconds() - started, found.size());
-    for (size_t i = 0; i < found.size() && i < 16; ++i)
-        log_line("render camera:   block at %p", static_cast<const void*>(found[i]));
+    log_line("render camera: search done in %.1f s: %zu regions asked (%.0f ms in VirtualQuery, longest %.1f ms), %zu "
+             "read (%.0f MB, %.0f ms), %d blocks near the camera",
+        seconds() - started, queried, query_time * 1000.0, query_longest * 1000.0, regions, scanned / 1048576.0,
+        scan_time * 1000.0, found);
 }
 
 void start_search(double now, const float around[3]) {
     if (search.running || now < search.next_search) return;
     search.running = true;
     search.next_search = now + 10.0;
-    // Our own copies of the blocks must not be found.
-    search.places.clear();
+    search.count = 0;
     std::vector<std::pair<const char*, size_t>> gpu;
     for (auto& [memory, region] : mapped) gpu.emplace_back(region.data, static_cast<size_t>(region.size));
     std::thread(search_thread, around[0], around[1], around[2], std::move(gpu)).detach();
@@ -404,14 +426,15 @@ void start_search(double now, const float around[3]) {
 void read_places(const float around[3]) {
     ++search.frame;
     ++search.frames;
-    for (Place& place : search.places) {
-        float values[19];
-        if (!guarded_copy(values, place.address, sizeof(values))) {
+    float* values = search.scratch;
+    for (int i = 0; i < search.count; ++i) {
+        Place& place = search.places[i];
+        if (!guarded_copy(values, place.address, sizeof(search.scratch))) {
             place.valid = false;
             continue;
         }
-        if (std::memcmp(values, place.values, sizeof(values)) != 0) {
-            std::memcpy(place.values, values, sizeof(values));
+        if (std::memcmp(values, place.values, sizeof(place.values)) != 0) {
+            std::memcpy(place.values, values, sizeof(place.values));
             place.changed = search.frame;
             ++place.changes;
         }
@@ -427,8 +450,8 @@ bool render_camera(int age, RenderCamera& out) {
     // Valid places that changed in the last 3 presents, most recent first;
     // `age` 0 is the most recent change, 1 the one before.
     std::vector<const Place*> live;
-    for (const Place& place : search.places)
-        if (place.valid && search.frame - place.changed <= 3) live.push_back(&place);
+    for (int i = 0; i < search.count; ++i)
+        if (search.places[i].valid && search.frame - search.places[i].changed <= 3) live.push_back(&search.places[i]);
     std::sort(live.begin(), live.end(), [](const Place* a, const Place* b) { return a->changed > b->changed; });
     if (age < 0 || age >= static_cast<int>(live.size())) return false;
     const Place& chosen = *live[age];
@@ -463,25 +486,28 @@ void render_camera_frame() {
         static_cast<float>(input.position[2])};
     read_places(around);
     bool any_valid = false;
-    for (const Place& place : search.places) any_valid = any_valid || place.valid;
+    for (int i = 0; i < search.count; ++i) any_valid = any_valid || search.places[i].valid;
     if (any_valid) search.last_valid = now;
-    if (!search.running && (search.places.empty() || now - search.last_valid > 2.0)) start_search(now, around);
+    if (!search.running && (search.count == 0 || now - search.last_valid > 2.0)) start_search(now, around);
     search.longest = std::max(search.longest, seconds() - now);
     static double next_report = 0.0;
     if (now < next_report) return;
     next_report = now + 5.0;
     int valid = 0, fresh = 0;
-    for (const Place& place : search.places) {
+    for (int i = 0; i < search.count; ++i) {
+        const Place& place = search.places[i];
         valid += place.valid ? 1 : 0;
         fresh += place.valid && search.frame - place.changed <= 3 ? 1 : 0;
     }
     log_line("render camera: %s; %zu places, %d valid, %d changed in the last 3 frames; longest %.3f ms per present",
-        search.running ? "searching" : "following", search.places.size(), valid, fresh, search.longest * 1000.0);
+        search.running ? "searching" : "following", static_cast<size_t>(search.count), valid, fresh,
+        search.longest * 1000.0);
     // Per place: how often it changed over the 5 s, and how it differs from
     // the input camera (eye distance, gaze angle).
     const double frames = search.frames ? static_cast<double>(search.frames) : 1.0;
     int shown = 0;
-    for (Place& place : search.places) {
+    for (int i = 0; i < search.count; ++i) {
+        Place& place = search.places[i];
         if (shown < 12 && place.valid) {
             const float* f = place.values;
             const double d[3] = {f[16] - input.position[0], f[17] - input.position[1], f[18] - input.position[2]};
