@@ -14,16 +14,17 @@ PFN_vkVoidFunction camera_probe_function(const char* requested);
 // At each present: notes the camera, and logs what was found every 5 s.
 void camera_probe_frame();
 
-// The camera the game rendered a recent frame with, from its frame constants
-// in mapped memory: a view-projection matrix (row-major, world translation)
-// and its projection centre. `age` 0: the newest frame's, 1: the one before.
-// False until found (the ring is looked for while someone asks).
+// The camera the game rendered a recent frame with, from the copies of its
+// frame constants found in ordinary memory: a view-projection matrix
+// (row-major, world translation) and its projection centre. `age` 0: the
+// most recently changed copy, 1: the one before. False until found (looked
+// for on a thread while someone asks).
 struct RenderCamera {
     double matrix[16]{};
     double eye[3]{};
 };
 bool render_camera(int age, RenderCamera& out);
-// At each present, before drawing: follows the frames' camera blocks.
+// At each present, before drawing: reads the copies found (76 bytes each).
 void render_camera_frame();
 
 }  // namespace overlay
