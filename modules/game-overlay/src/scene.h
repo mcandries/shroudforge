@@ -139,6 +139,8 @@ struct Item {
     double world_cells_size = 0.5;
     // Outlined only where its surface turns, not around each cell.
     bool world_cells_smooth = false;
+    // Opacity of its edges (0 to 1), in their cell's color.
+    float world_cells_edge_opacity = 0.9f;
     std::shared_ptr<const WorldSolids> world_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

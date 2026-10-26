@@ -126,7 +126,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field points? table[] World: up to 256 `{at = {x, y, z}, color?, size?, shape?}` in meters, drawn where the game's camera puts them at every frame; shape `ring` (default), `cross` or `dot`.
 --- @field lines? table[] World: up to 256 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters.
 --- @field aim_face? table World: `{color?, width?, origin?, cell?}`, the face the building cursor aims at, outlined at every frame.
---- @field cells? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data, colors, smooth?}`, a box of cells drawn in the world; `smooth`: outlined only where its surface turns.
+--- @field cells? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data, colors, smooth?, edge_opacity?}`, a box of cells drawn in the world; `smooth`: outlined only where its surface turns; `edge_opacity`: 0 to 1 (0.9).
 --- @field solids? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data}`, filled cells (`#` in `data`): the item's cells, quads and lines behind them are drawn lighter.
 --- @field quads? table[] World: up to 64 filled quadrilaterals {corners = four {x, y, z}, color}.
 --- @field camera_lead? number World: seconds (-0.2 to 0.2) the camera is foreseen ahead (negative: delayed).
