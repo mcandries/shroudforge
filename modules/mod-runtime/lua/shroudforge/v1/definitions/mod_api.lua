@@ -117,7 +117,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field spin? number Voxels: degrees per second added to the yaw, turned by the overlay itself. Default 0.
 --- @field xray? boolean Voxels: draw every face turned to the camera, inner ones included, `ghost` ones at `ghost_alpha`.
 --- @field ghost_alpha? number Voxels: opacity of the `ghost` characters' faces in X-ray, 0 to 1. Default 0.6.
---- @field opacity? number Voxels: opacity of the view over the game, 0 to 1; see-through, hidden faces stay hidden. Default 1.
+--- @field opacity? number Voxels: opacity of the view over the game, 0 to 1; see-through, the opaque view made lighter (drawn off screen), hidden faces stay hidden. Default 1.
 --- @field plain? boolean Voxels: solid view without outlines nor anti-aliased borders, one continuous surface.
 --- @field ease? number Voxels: seconds a new yaw or pitch takes to be reached (the view turns), 0 at once. Default 0.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.
