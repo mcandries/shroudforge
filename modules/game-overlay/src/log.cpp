@@ -1,5 +1,7 @@
 #include "overlay.h"
 
+#include <share.h>
+
 #include <cstdarg>
 #include <cstdio>
 
@@ -34,9 +36,8 @@ void log_line(const char* format, ...) {
         GetModuleFileNameW(self, path, MAX_PATH);
         wchar_t* dot = wcsrchr(path, L'.');
         if (dot) wcscpy_s(dot, MAX_PATH - (dot - path), L".log");
-        FILE* opened = nullptr;
-        _wfopen_s(&opened, path, L"a");
-        return opened;
+        // Shared for reading: the log can be read while the game runs.
+        return _wfsopen(path, L"a", _SH_DENYWR);
     }();
     if (!file) return;
     // UTC wall-clock time, like the ShroudForge log, so both can be read together.
