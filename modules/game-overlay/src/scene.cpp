@@ -317,6 +317,21 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 item.world_points.push_back(point);
             }
         }
+        if (value.contains("camera_lead"))
+            item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), 0.0f, 0.2f);
+        if (value.contains("aim_face")) {
+            const auto& face = value["aim_face"];
+            if (!face.is_object()) fail("world: aim_face: expected {color, width, origin, cell}");
+            item.aim_face = true;
+            if (face.contains("color")) item.aim_face_color = parse_color(face["color"], "aim_face.color");
+            if (face.contains("width"))
+                item.aim_face_width = std::clamp(parse_number(face["width"], "aim_face.width"), 0.5f, 32.0f);
+            if (face.contains("origin")) {
+                const auto origin = position(face["origin"], "aim_face.origin");
+                for (int i = 0; i < 3; ++i) item.aim_origin[i] = origin[i];
+            }
+            if (face.contains("cell")) item.aim_cell = std::clamp(parse_number(face["cell"], "aim_face.cell"), 0.05f, 16.0f);
+        }
         if (value.contains("lines")) {
             if (!value["lines"].is_array() || value["lines"].size() > 256) fail("world: lines: at most 256");
             for (const auto& entry : value["lines"]) {

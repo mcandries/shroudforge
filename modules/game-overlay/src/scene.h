@@ -115,6 +115,16 @@ struct Item {
     // World: points and segments in the world, over the whole screen.
     std::vector<WorldPoint> world_points;
     std::vector<WorldLine> world_lines;
+    // World: the camera foreseen this many seconds ahead (0 to 0.2).
+    float camera_lead = 0.0f;
+    // World: the face the building cursor aims at, outlined at every frame from
+    // the cursor read for that frame (a grid of `aim_cell` meters from
+    // `aim_origin`); not drawn while the cursor aims at nothing.
+    bool aim_face = false;
+    ImU32 aim_face_color = IM_COL32(255, 220, 60, 255);
+    float aim_face_width = 2.0f;
+    double aim_origin[3]{};
+    double aim_cell = 0.5;
     float yaw = 0.0f;
     float pitch = 30.0f;
     float zoom = 1.0f;
