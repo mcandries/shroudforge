@@ -409,9 +409,10 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view) {
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr) {
     LocalCamera camera;
-    if (!local_camera(camera)) return false;
+    if (!local_camera(camera, lead)) return false;
+    if (read) *read = camera;
     const double* q = camera.orientation;
     const auto rotate = [&](double x, double y, double z, double out[3]) {
         // v + 2w (q x v) + 2 q x (q x v)
@@ -431,16 +432,54 @@ bool world_view(WorldView& view) {
     return view.focal_y > 0.0;
 }
 
+// The face the building cursor aims at: the cursor's transform is the corner
+// of the placement cube, turned so that its local +y is the aimed face's
+// normal; the placement cell is at its centre, the aimed cell half a cube
+// further along local -y (as Architect Line's line.cursor_cells). Its four
+// corners in meters, or false when the cells are not neighbours.
+bool aimed_face(const LocalCamera& camera, const Item& item, double corners[4][3]) {
+    const double* q = camera.cursor_orientation;
+    const double h = item.aim_cell * 0.5;
+    const auto cell_at = [&](double x, double y, double z, long long out[3]) {
+        const double tx = 2.0 * (q[1] * z - q[2] * y), ty = 2.0 * (q[2] * x - q[0] * z), tz = 2.0 * (q[0] * y - q[1] * x);
+        const double offset[3] = {x + q[3] * tx + (q[1] * tz - q[2] * ty), y + q[3] * ty + (q[2] * tx - q[0] * tz),
+            z + q[3] * tz + (q[0] * ty - q[1] * tx)};
+        for (int i = 0; i < 3; ++i)
+            out[i] = static_cast<long long>(
+                std::floor((camera.cursor_position[i] + offset[i] - item.aim_origin[i]) / item.aim_cell));
+    };
+    long long place[3], aim[3];
+    cell_at(h, h, h, place);
+    cell_at(h, -h, h, aim);
+    int axis = -1;
+    for (int i = 0; i < 3; ++i) {
+        if (place[i] == aim[i]) continue;
+        if (axis >= 0 || std::llabs(place[i] - aim[i]) != 1) return false;
+        axis = i;
+    }
+    if (axis < 0) return false;
+    const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+    const double plane = item.aim_origin[axis] + static_cast<double>(std::max(place[axis], aim[axis])) * item.aim_cell;
+    static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (int k = 0; k < 4; ++k) {
+        corners[k][axis] = plane;
+        corners[k][u] = item.aim_origin[u] + static_cast<double>(aim[u] + kSquare[k][0]) * item.aim_cell;
+        corners[k][v] = item.aim_origin[v] + static_cast<double>(aim[v] + kSquare[k][1]) * item.aim_cell;
+    }
+    return true;
+}
+
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
-    if (!world_view(view)) return;
+    LocalCamera camera;
+    if (!world_view(view, item.camera_lead, &camera)) return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
-    for (const WorldLine& segment : item.world_lines) {
+    const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {
         double a[3], b[3];
-        view.to_camera(segment.from, a);
-        view.to_camera(segment.to, b);
-        if (a[2] < kNear && b[2] < kNear) continue;
+        view.to_camera(from, a);
+        view.to_camera(to, b);
+        if (a[2] < kNear && b[2] < kNear) return;
         // Cut at the near plane what lies behind the camera.
         if (a[2] < kNear || b[2] < kNear) {
             double* behind = a[2] < kNear ? a : b;
@@ -448,8 +487,12 @@ void draw_world(const Context& c, const Item& item) {
             const double t = (kNear - front[2]) / (behind[2] - front[2]);
             for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
         }
-        c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, segment.color), segment.width * c.scale);
-    }
+        c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, color), width * c.scale);
+    };
+    for (const WorldLine& line : item.world_lines) segment(line.from, line.to, line.color, line.width);
+    double corners[4][3];
+    if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners))
+        for (int k = 0; k < 4; ++k) segment(corners[k], corners[(k + 1) % 4], item.aim_face_color, item.aim_face_width);
     for (const WorldPoint& point : item.world_points) {
         double p[3];
         view.to_camera(point.at, p);
