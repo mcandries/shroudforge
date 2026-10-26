@@ -19,7 +19,7 @@ impl IngameRuntime {
         self.process_runtime_reload_request();
         if std::time::Instant::now() >= self.next_status {
             let part = std::time::Instant::now();
-            let config = shroudforge_loader_config::config::read_loader(&self.root).ok();
+            let config = shroudforge_loader_config::config::read_loader_in_background(&self.root).ok();
             record_call("runtime.read_loader", part);
             let part = std::time::Instant::now();
             if config
