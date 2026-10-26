@@ -68,6 +68,16 @@ struct WorldQuad {
     double corners[4][3]{};
     ImU32 color = IM_COL32(255, 255, 255, 96);
 };
+// Filled cells of the world (`solids` of a world item): the world items
+// behind them, seen from the camera, are drawn lighter. The corner of the
+// first cell and the cell side in meters; 1 in `filled` for a filled cell,
+// x fastest, then y, then z.
+struct WorldSolids {
+    int sx = 0, sy = 0, sz = 0;
+    double origin[3]{};
+    double cell = 0.5;
+    std::vector<std::uint8_t> filled;
+};
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -127,6 +137,9 @@ struct Item {
     std::shared_ptr<const VoxelMesh> world_cells;
     double world_cells_origin[3]{};
     double world_cells_size = 0.5;
+    // Outlined only where its surface turns, not around each cell.
+    bool world_cells_smooth = false;
+    std::shared_ptr<const WorldSolids> world_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
     // World: the face the building cursor aims at, outlined at every frame from
