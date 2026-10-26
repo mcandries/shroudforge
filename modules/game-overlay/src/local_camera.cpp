@@ -139,18 +139,10 @@ void report(double lead, double now) {
 
 }  // namespace
 
-namespace {
-bool valid = false;
-LocalCamera cached;
-}  // namespace
-
-bool last_local_camera(LocalCamera& camera) {
-    camera = cached;
-    return valid;
-}
-
 bool local_camera(LocalCamera& camera, double lead) {
     static int frame = -1;
+    static bool valid = false;
+    static LocalCamera cached;
     if (frame != ImGui::GetFrameCount()) {
         frame = ImGui::GetFrameCount();
         valid = false;

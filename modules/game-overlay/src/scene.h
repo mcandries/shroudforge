@@ -123,10 +123,6 @@ struct Item {
     std::vector<WorldQuad> world_quads;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
-    // World: -1, the player's input camera; 0, the camera the game rendered
-    // its newest frame with (frame constants, camera_probe.cpp); 1, the frame
-    // before. Diagnostic: falls back to the input camera until found.
-    int render_camera = -1;
     // World: the face the building cursor aims at, outlined at every frame from
     // the cursor read for that frame (a grid of `aim_cell` meters from
     // `aim_origin`); not drawn while the cursor aims at nothing.

@@ -29,7 +29,6 @@ add_library(shroudforge_overlay SHARED
     src/build_voxel_mesh.cpp
     src/player_options.cpp
     src/local_camera.cpp
-    src/camera_probe.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp

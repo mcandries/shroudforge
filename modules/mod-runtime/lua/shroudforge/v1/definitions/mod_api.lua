@@ -128,7 +128,6 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field aim_face? table World: `{color?, width?, origin?, cell?}`, the face the building cursor aims at, outlined at every frame.
 --- @field quads? table[] World: up to 64 filled quadrilaterals {corners = four {x, y, z}, color}.
 --- @field camera_lead? number World: seconds (-0.2 to 0.2) the camera is foreseen ahead (negative: delayed).
---- @field render_camera? integer World, diagnostic: -1 input camera, 0 the newest rendered frame's camera, 1 the frame before.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.
 --- @field edge? ShroudForgeOverlayColor Voxels: outline of each face (when cells are 3 pixels or more).
 --- @field grid? number Voxels: lines on the floor of the box every this many cells. Default 0 (none).
