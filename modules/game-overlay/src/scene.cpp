@@ -334,6 +334,21 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
             if (face.contains("cell")) item.aim_cell = std::clamp(parse_number(face["cell"], "aim_face.cell"), 0.05f, 16.0f);
         }
+        if (value.contains("quads")) {
+            if (!value["quads"].is_array() || value["quads"].size() > 64) fail("world: quads: at most 64");
+            for (const auto& entry : value["quads"]) {
+                if (!entry.is_object() || !entry.contains("corners") || !entry["corners"].is_array() ||
+                    entry["corners"].size() != 4)
+                    fail("world: a quad needs corners = four {x, y, z}");
+                WorldQuad quad;
+                for (int k = 0; k < 4; ++k) {
+                    const auto corner = position(entry["corners"][k], "corners");
+                    for (int i = 0; i < 3; ++i) quad.corners[k][i] = corner[i];
+                }
+                if (entry.contains("color")) quad.color = parse_color(entry["color"], "color");
+                item.world_quads.push_back(quad);
+            }
+        }
         if (value.contains("lines")) {
             if (!value["lines"].is_array() || value["lines"].size() > 256) fail("world: lines: at most 256");
             for (const auto& entry : value["lines"]) {
