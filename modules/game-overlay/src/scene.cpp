@@ -353,6 +353,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (cells.contains("cell"))
                 item.world_cells_size = std::clamp(parse_number(cells["cell"], "cells.cell"), 0.05f, 16.0f);
             item.world_cells_smooth = cells.value("smooth", false);
+            if (cells.contains("edge_opacity"))
+                item.world_cells_edge_opacity =
+                    std::clamp(parse_number(cells["edge_opacity"], "cells.edge_opacity"), 0.0f, 1.0f);
             try {
                 item.world_cells = std::make_shared<const VoxelMesh>(build_voxel_mesh(
                     box[0], box[1], box[2], cells["data"].get<std::string>(), item.cell_colors, item.cell_marks));
