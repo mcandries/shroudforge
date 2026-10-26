@@ -38,7 +38,10 @@ bool readable(std::uintptr_t address, std::size_t size, ReadRegionCache* regions
     if (regions) return regions->check(address, size);
     if (!address || !size || address > UINTPTR_MAX - size) return false;
     MEMORY_BASIC_INFORMATION memory{};
-    if (!VirtualQuery(reinterpret_cast<const void*>(address), &memory, sizeof(memory))) return false;
+    const auto query_started = std::chrono::steady_clock::now();
+    const bool queried = VirtualQuery(reinterpret_cast<const void*>(address), &memory, sizeof(memory)) != 0;
+    OperationTiming::Record(OperationTiming::Kind::PageQuery, OperationTiming::MicrosecondsSince(query_started));
+    if (!queried) return false;
     const auto end = reinterpret_cast<std::uintptr_t>(memory.BaseAddress) + memory.RegionSize;
     return memory.State == MEM_COMMIT && !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
         address + size <= end;
