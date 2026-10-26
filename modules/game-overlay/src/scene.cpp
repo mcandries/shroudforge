@@ -293,6 +293,24 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("grid"))
             item.floor_grid = std::clamp(static_cast<int>(parse_number(value["grid"], "grid")), 0, kMaxVoxelSide);
         if (value.contains("grid_color")) item.grid_color = parse_color(value["grid_color"], "grid_color");
+        if (value.contains("lines")) {
+            if (!value["lines"].is_array() || value["lines"].size() > 256) fail("voxels: lines: at most 256");
+            for (const auto& entry : value["lines"]) {
+                if (!entry.is_object() || !entry.contains("from") || !entry.contains("to"))
+                    fail("voxels: a line needs from and to = {x, y, z} in cells");
+                WorldLine segment;
+                for (int end = 0; end < 2; ++end) {
+                    const json& at = entry[end == 0 ? "from" : "to"];
+                    if (!at.is_array() || at.size() != 3 || !at[0].is_number() || !at[1].is_number() || !at[2].is_number())
+                        fail("voxels: lines: expected {x, y, z} in cells");
+                    for (int i = 0; i < 3; ++i) (end == 0 ? segment.from : segment.to)[i] = at[i].get<double>();
+                }
+                if (entry.contains("color")) segment.color = parse_color(entry["color"], "color");
+                if (entry.contains("width"))
+                    segment.width = std::clamp(parse_number(entry["width"], "width"), 0.5f, 16.0f);
+                item.world_lines.push_back(segment);
+            }
+        }
     } else if (type == "world") {
         item.kind = ItemKind::World;
         const auto position = [&](const json& at, const char* field) {
@@ -406,7 +424,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
         }
         if (value.contains("lines")) {
-            if (!value["lines"].is_array() || value["lines"].size() > 256) fail("world: lines: at most 256");
+            if (!value["lines"].is_array() || value["lines"].size() > 2048) fail("world: lines: at most 2048");
             for (const auto& entry : value["lines"]) {
                 if (!entry.is_object() || !entry.contains("from") || !entry.contains("to"))
                     fail("world: a line needs from and to = {x, y, z}");
