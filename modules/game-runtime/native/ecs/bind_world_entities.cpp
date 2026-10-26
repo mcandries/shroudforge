@@ -1,3 +1,4 @@
+#include "game-thread/operation_timing.h"
 #include "ecs/component_operation.h"
 #include "ecs/building_prop_query_state.h"
 #include "ecs/registry/component_discovery_state.h"
@@ -95,9 +96,16 @@ bool invoke_read_operation(GameThreadDispatcher::Operation operation, const std:
         expected = read_only_view;
         epoch = layout_epoch;
     }
+    auto step = std::chrono::steady_clock::now();
     if (!EngineContext::ResolveEcs(before) || before != expected) return false;
+    OperationTiming::Record(OperationTiming::Kind::DirectResolve, OperationTiming::MicrosecondsSince(step));
+    step = std::chrono::steady_clock::now();
     operation(context.get());
-    return EngineContext::ResolveEcs(after) && after == before && current_epoch() == epoch;
+    OperationTiming::Record(OperationTiming::Kind::DirectRun, OperationTiming::MicrosecondsSince(step));
+    step = std::chrono::steady_clock::now();
+    const bool same = EngineContext::ResolveEcs(after) && after == before && current_epoch() == epoch;
+    OperationTiming::Record(OperationTiming::Kind::DirectResolve, OperationTiming::MicrosecondsSince(step));
+    return same;
 }
 
 }

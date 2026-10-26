@@ -13,10 +13,18 @@ enum class Kind : unsigned {
     DrainInterval, // Between two drains of the queue by the game thread.
     CursorLock,    // ReadLocalCursorInput waiting for the ECS operation lock.
     CursorRead,    // ReadLocalCursorInput in full.
+    CursorResolve, // Its owner resolution (ResolveClientEcs).
+    CursorRegistry, // Its component registry check, every second.
+    CursorScan,    // Its entity scan, while incomplete.
+    CursorSample,  // Its sample of the input and its checks.
+    DirectResolve, // A direct ECS read: the owner resolutions before and after.
+    DirectRun,     // A direct ECS read: the operation itself.
     Count
 };
 
 void Record(Kind kind, std::uint64_t microseconds);
+// The calling thread's Windows priority, reported with the timings.
+void NoteCallerPriority(int priority);
 
 inline std::uint64_t MicrosecondsSince(std::chrono::steady_clock::time_point started) {
     return static_cast<std::uint64_t>(
