@@ -31,7 +31,7 @@ struct VoxelMark {
 // Faces seen from a camera, kept while it does not move (draw_scene.cpp).
 struct VoxelVisibility {
     bool valid = false;
-    float yaw = 0.0f, pitch = 0.0f;
+    float yaw = 0.0f, pitch = 0.0f, distance = 0.0f;
     std::vector<std::uint32_t> faces;
 };
 
