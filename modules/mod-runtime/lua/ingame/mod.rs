@@ -30,6 +30,7 @@ mod impact;
 pub(crate) mod overrides;
 pub(crate) mod player_input;
 pub(crate) mod prove_buffer_transform;
+pub(crate) mod report_operation_timing;
 pub(crate) mod resources;
 mod set_profile_patch_enabled;
 pub(crate) mod world;

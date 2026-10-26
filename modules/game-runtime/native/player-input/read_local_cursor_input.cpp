@@ -1,4 +1,5 @@
 #include "player-input/world_cursor_state.h"
+#include "game-thread/operation_timing.h"
 #include "ecs/ecs_session_state.h"
 
 #include <algorithm>
@@ -265,7 +266,13 @@ std::uint32_t ReadLocalCursorInput(std::size_t component_size, std::uint64_t exp
                                   std::uint8_t* buffer, std::size_t capacity, std::uint64_t* sequence){
     if (!component_size || component_size > MaximumInputBytes || !expected_session || !buffer ||
         capacity != component_size || !sequence) return 2;
+    const auto started = std::chrono::steady_clock::now();
+    struct ReadTiming {
+        std::chrono::steady_clock::time_point started;
+        ~ReadTiming() { OperationTiming::Record(OperationTiming::Kind::CursorRead, OperationTiming::MicrosecondsSince(started)); }
+    } read_timing{started};
     std::scoped_lock operation_lock(EcsImplementation::operation_mutex);
+    OperationTiming::Record(OperationTiming::Kind::CursorLock, OperationTiming::MicrosecondsSince(started));
     std::unique_lock input_lock(local_input_mutex, std::try_to_lock);
     if (!input_lock.owns_lock()) return 5;
     EngineContext::EcsView owner;

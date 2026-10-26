@@ -56,3 +56,12 @@ fn input_detail() -> Option<String> {
     let length = unsafe { detail(buffer.as_mut_ptr(), buffer.len()) }.min(buffer.len() - 1);
     (length > 0).then(|| String::from_utf8_lossy(&buffer[..length]).into_owned())
 }
+
+/// How long runtime operations waited since the last call, then reset
+/// (diagnostic): "dispatch-wait 12x avg 25.10 max 40.20 ms; ...".
+pub fn operation_timing() -> Option<String> {
+    let timing = provider()?.operation_timing?;
+    let mut buffer = [0u8; 2048];
+    let length = unsafe { timing(buffer.as_mut_ptr(), buffer.len()) }.min(buffer.len() - 1);
+    Some(String::from_utf8_lossy(&buffer[..length]).into_owned())
+}

@@ -5,6 +5,18 @@ pub(crate) fn lua_world_cursor_get(
     args: FunctionArgs,
     r#mod: &Mod,
 ) -> mlua::Result<(LuaValue, Option<String>)> {
+    let started = std::time::Instant::now();
+    let result = world_cursor_get(lua, args, r#mod);
+    super::report_operation_timing::record_call("cursor.get", started);
+    super::report_operation_timing::report_operation_timing();
+    result
+}
+
+fn world_cursor_get(
+    lua: &mlua::Lua,
+    args: FunctionArgs,
+    r#mod: &Mod,
+) -> mlua::Result<(LuaValue, Option<String>)> {
     let state = lua.app_data_ref::<AppState>().unwrap();
     if let Some(reason) = runtime_denial_reason(&state, r#mod, "runtime.world.cursor.get") {
         return Ok((LuaValue::Nil, Some(reason)));

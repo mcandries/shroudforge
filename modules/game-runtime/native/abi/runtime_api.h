@@ -295,6 +295,11 @@ KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeWorldCursorReadInput(
    one ClientPlayerInput per player), or what it tried when it could not.
    Returns the text length. */
 KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeWorldCursorInputDetail(char* buffer, size_t capacity);
+
+/* Optional diagnostic: how long runtime operations waited since the last
+   call ("dispatch-wait 12x avg 25.10 max 40.20 ms; ..."), then reset.
+   Returns the text length, truncated to capacity - 1. */
+KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeOperationTiming(char* buffer, size_t capacity);
 /* Optional ABI-12 client input extension. Exact build only. Dispatch is not a
    replicated-world acknowledgement. kind: select=0, place=1, remove=2, undo=3.
    Status: unknown=0, queued=1, pressed=2, dispatched=3, timeout=4, cancelled=5. */

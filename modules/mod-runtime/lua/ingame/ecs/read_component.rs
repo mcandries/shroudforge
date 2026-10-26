@@ -5,7 +5,11 @@ pub(super) fn lua_ecs_read(
     args: FunctionArgs,
     r#mod: &Mod,
 ) -> mlua::Result<(LuaValue, Option<String>)> {
-    lua_ecs_read_impl(lua, args, r#mod, false)
+    let started = std::time::Instant::now();
+    let result = lua_ecs_read_impl(lua, args, r#mod, false);
+    crate::lua::ingame::report_operation_timing::record_call("ecs.read", started);
+    crate::lua::ingame::report_operation_timing::report_operation_timing();
+    result
 }
 
 pub(super) fn lua_ecs_read_bytes(
