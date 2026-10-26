@@ -47,7 +47,7 @@ struct Polyline {
     bool closed = false;
 };
 
-enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid, Voxels, World };
+enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid, Voxels, World, Drum };
 enum class WorldShape { Ring, Cross, Dot };
 
 // A point or a segment in the game world (meters), drawn where the game's
@@ -107,6 +107,14 @@ struct Item {
     std::vector<Polyline> icon;
     float viewbox = 24.0f;
     float stroke = 1.8f;
+    // Drum: a choice of `drum_options` shown as a turning cylinder, the
+    // current one (`drum_index`, 0-based) in the middle; `drum_id` keeps its
+    // turn from one zone update to the next.
+    std::vector<std::string> drum_options;
+    int drum_index = 0;
+    std::string drum_id;
+    ImU32 drum_dim = IM_COL32(216, 211, 198, 140);
+    ImU32 drum_border = IM_COL32(201, 162, 78, 140);
     // Toggle
     bool on = false;
     ImU32 on_color = IM_COL32(201, 162, 78, 255);

@@ -112,7 +112,7 @@ function shroudforge_input.keybind_label(setting_key) end
 
 --- One line of a zone. A plain string is a text item.
 --- @class ShroudForgeOverlayItem: ShroudForgeOverlayTextStyle
---- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid'|'voxels'|'world' Default: `text`.
+--- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid'|'voxels'|'world'|'drum' Default: `text`.
 --- @field text? string Text or chip content.
 --- @field align? 'left'|'center'|'right'
 --- @field image? string PNG or JPEG file, relative to the mod folder.
@@ -154,6 +154,9 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field follow_camera? boolean Voxels: turn with the game's camera at every frame (its yaw plus `camera_offset`); `yaw` is used while the camera cannot be read.
 --- @field camera_offset? number Voxels: degrees added to the game camera's yaw with `follow_camera`.
 --- @field points? table[] World: up to 256 `{at = {x, y, z}, color?, size?, shape?}` in meters, drawn where the game's camera puts them at every frame; shape `ring` (default), `cross` or `dot`.
+--- @field options? string[] Drum: 1 to 8 texts, the choices.
+--- @field index? integer Drum: the current choice, 1-based.
+--- @field id? string Drum: keeps its turn between updates of the zone.
 --- @field lines? table[] World: up to 2048 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters; voxels: up to 256 in cells of the box, drawn over everything.
 --- @field aim_face? table World: `{color?, width?, origin?, cell?}`, the face the building cursor aims at, outlined at every frame.
 --- @field cells? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data, colors, smooth?, edge_opacity?}`, a box of cells drawn in the world; `smooth`: outlined only where its surface turns; `edge_opacity`: 0 to 1 (0.9).
