@@ -368,10 +368,12 @@ bool seen_from_camera(const VoxelMesh& mesh, const VoxelFace& face, const float 
 // Orthographic view of the box from a camera turning around its centre: yaw
 // 0 looks along +z with +x on the right and +y up (the game's axes), pitch
 // looks down. Faces turned away are skipped and the others drawn from the
-// farthest, lit by their direction. Solid and see-through (`opacity` below
-// 1): only the faces seen from the camera, so what is hidden stays hidden;
-// opaque, the nearer faces simply cover the others. X-ray: every face turned
-// to the camera, inner ones included.
+// farthest, lit by their direction. Solid and see-through (`opacity` or the
+// layer's below 1): drawn opaque off screen, then laid over the game at
+// once, so the view is the opaque one made lighter; without an off-screen
+// target, only the faces seen from the camera, so what is hidden stays
+// hidden. Opaque, the nearer faces simply cover the others. X-ray: every
+// face turned to the camera, inner ones included.
 // The camera angles a voxels view shows, per zone, eased towards the
 // item's when `ease` is set: a new zone with another angle turns the view
 // instead of jumping.
@@ -435,9 +437,18 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         {{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}, {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}},
         {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {{0, 0, 1}, {0, 1, 1}, {1, 1, 1}, {1, 0, 1}}};
     static constexpr float kLight[6] = {0.82f, 0.82f, 0.55f, 1.0f, 0.68f, 0.68f};
-    // See-through solid view: the faces seen from this camera, found again
-    // only when it moves.
-    const bool see_through = !item.xray && item.opacity < 0.999f;
+    // Solid and lighter than opaque: the faces are drawn opaque off screen,
+    // then laid over the game with that opacity, at once. (Not in X-ray: its
+    // partly transparent faces would be darkened by the second blending.)
+    const float over = item.opacity * c.opacity;
+    const Offscreen target =
+        !item.xray && over < 0.999f && c.resources.offscreen ? c.resources.offscreen() : Offscreen{};
+    const bool layered = target.list != nullptr && target.size.x > 0.0f && target.size.y > 0.0f;
+    ImDrawList& faces = layered ? *target.list : c.list;
+    if (layered) faces.PushClipRect(position, ImVec2(position.x + size.x, position.y + size.y), false);
+    // Without it, see-through solid view: the faces seen from this camera,
+    // found again only when it moves.
+    const bool see_through = !layered && !item.xray && item.opacity < 0.999f;
     VoxelVisibility& seen = mesh.visibility;
     if (see_through && (!seen.valid || seen.yaw != yaw || seen.pitch != pitch)) {
         const float towards[3] = {-f[0], -f[1], -f[2]};
@@ -474,23 +485,31 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     // overlaps would draw the seams between faces when see-through.
     const bool plain = item.plain && !item.xray;
     const bool edges = !plain && visible_color(item.edge) && k >= 3.0f;
-    const ImDrawListFlags flags = c.list.Flags;
-    if (plain) c.list.Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    const ImDrawListFlags flags = faces.Flags;
+    if (plain) faces.Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    // Off screen, the colors as they are: the opacity comes when laid over.
+    const auto color = [&](ImU32 value) { return layered ? value : fade(c, value); };
     for (const auto& [unused, i] : order) {
         const VoxelFace& face = mesh.faces[i];
         const bool ghost = item.xray && item.ghost.find(static_cast<char>(face.ch)) != std::string::npos;
-        const float alpha = (ghost ? item.ghost_alpha : 1.0f) * item.opacity;
+        const float alpha = (ghost ? item.ghost_alpha : 1.0f) * (layered ? 1.0f : item.opacity);
         ImVec2 points[4];
         for (int corner = 0; corner < 4; ++corner) {
             const float* p = kCorners[face.direction][corner];
             points[corner] = project(face.x + p[0], face.y + p[1], face.z + p[2]);
         }
-        c.list.AddQuadFilled(points[0], points[1], points[2], points[3],
-            fade(c, shade(item.cell_colors[face.ch], kLight[face.direction], alpha)));
-        if (edges)
-            c.list.AddQuad(points[0], points[1], points[2], points[3], fade(c, shade(item.edge, 1.0f, alpha)));
+        faces.AddQuadFilled(points[0], points[1], points[2], points[3],
+            color(shade(item.cell_colors[face.ch], kLight[face.direction], alpha)));
+        if (edges) faces.AddQuad(points[0], points[1], points[2], points[3], color(shade(item.edge, 1.0f, alpha)));
     }
-    c.list.Flags = flags;
+    faces.Flags = flags;
+    if (layered) {
+        faces.PopClipRect();
+        const ImVec2 end(position.x + size.x, position.y + size.y);
+        c.list.AddImage(target.texture, position, end, ImVec2(position.x / target.size.x, position.y / target.size.y),
+            ImVec2(end.x / target.size.x, end.y / target.size.y),
+            IM_COL32(255, 255, 255, static_cast<int>(over * 255.0f + 0.5f)));
+    }
     // Marks on top: a dot at the centre of their cell.
     const float radius = std::max(2.0f, k * 0.35f);
     for (const VoxelMark& mark : mesh.marks)
