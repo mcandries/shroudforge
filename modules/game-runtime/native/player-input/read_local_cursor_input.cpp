@@ -144,8 +144,11 @@ bool sample_local_input(const LocalInputState& state, const ResolvedLayout& layo
         !entity_view(pointer, layout, entity) || entity.id != state.published.id || entity.generation != state.published.generation ||
         !component_address(entity, layout, state.component, address)) return false;
     std::vector<std::uint8_t> verification(sample.size());
-    return read_bytes(address, sample.data(), sample.size()) &&
-        read_bytes(address, verification.data(), verification.size()) && verification == sample &&
+    const auto copy_started = std::chrono::steady_clock::now();
+    const bool copied = read_bytes(address, sample.data(), sample.size()) &&
+        read_bytes(address, verification.data(), verification.size());
+    OperationTiming::Record(OperationTiming::Kind::SampleCopy, OperationTiming::MicrosecondsSince(copy_started));
+    return copied && verification == sample &&
         entity_view(pointer, layout, again) && again == entity &&
         component_address(again, layout, state.component, again_address) && again_address == address &&
         read(state.owner.entity_table + state.published_slot * sizeof(pointer), pointer) && pointer == entity.pointer;
