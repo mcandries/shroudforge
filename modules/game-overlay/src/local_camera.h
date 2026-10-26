@@ -23,8 +23,11 @@ struct LocalCamera {
 
 // The camera for the frame being drawn; false when the runtime cannot give it
 // (no world, official runtime without the export, no layout yet). `lead`
-// seconds: the camera foreseen that far ahead from its last turn and move,
-// to make up for a camera read older than the frame drawn.
+// seconds: the camera foreseen that far ahead from its mean turn and move
+// over the last 0.1 s (at most 8 degrees), to make up for a camera read
+// older than the frame drawn; negative, the camera read that long before,
+// for one read newer than the frame drawn. Either way, how the camera read
+// changes is logged every 5 s.
 bool local_camera(LocalCamera& camera, double lead = 0.0);
 
 }  // namespace overlay
