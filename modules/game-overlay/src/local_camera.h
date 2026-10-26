@@ -30,4 +30,8 @@ struct LocalCamera {
 // changes is logged every 5 s.
 bool local_camera(LocalCamera& camera, double lead = 0.0);
 
+// The camera last read by local_camera, without reading it again (false
+// before any read, or when the last one failed).
+bool last_local_camera(LocalCamera& camera);
+
 }  // namespace overlay
