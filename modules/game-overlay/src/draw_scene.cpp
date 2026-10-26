@@ -265,6 +265,7 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
     }
     case ItemKind::Icon:
     case ItemKind::Toggle:
+    case ItemKind::Drum:
         return {item.size.x * c.scale, item.size.y * c.scale};
     case ItemKind::Grow:
         return {0.0f, 0.0f};
@@ -890,6 +891,70 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     c.list.PopClipRect();
 }
 
+// A drum: the options around a cylinder seen from the front, the current one
+// in the middle of a dark band, the previous and the next squashed and dimmed
+// above and below it; shaded top and bottom. A new index turns the drum
+// there, the short way round, in about a quarter of a second (kept per zone
+// and drum id).
+ImU32 mix(ImU32 a, ImU32 b, float t) {
+    const auto channel = [&](int shift) {
+        const float x = static_cast<float>((a >> shift) & 0xFF), y = static_cast<float>((b >> shift) & 0xFF);
+        return static_cast<ImU32>(x + (y - x) * t + 0.5f) << shift;
+    };
+    return channel(IM_COL32_R_SHIFT) | channel(IM_COL32_G_SHIFT) | channel(IM_COL32_B_SHIFT) | channel(IM_COL32_A_SHIFT);
+}
+
+void draw_drum(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
+    struct Turn {
+        float shown = 0.0f;
+        double time = 0.0;
+    };
+    static std::unordered_map<std::string, Turn> turns;
+    const int count = static_cast<int>(item.drum_options.size());
+    const double now = ImGui::GetTime();
+    float shown = static_cast<float>(item.drum_index);
+    if (!item.drum_id.empty()) {
+        const auto [entry, created] = turns.try_emplace(c.zone + "/" + item.drum_id, Turn{shown, now});
+        Turn& turn = entry->second;
+        if (!created) {
+            const float left = std::remainder(shown - turn.shown, static_cast<float>(count));
+            const float step = 1.0f - std::exp(-static_cast<float>(now - turn.time) * 14.0f);
+            turn.shown = std::fabs(left) < 0.01f ? shown : turn.shown + left * step;
+        }
+        turn.time = now;
+        shown = turn.shown;
+    }
+    const ImVec2 min = snap(position);
+    const ImVec2 max(min.x + size.x, min.y + size.y);
+    const float rounding = 5.0f * c.scale;
+    c.list.AddRectFilled(min, max, fade(c, item.background), rounding);
+    c.list.PushClipRect(min, max, true);
+    // Each option, and its copies a turn away, where it stands on the cylinder.
+    for (int i = 0; i < count; ++i)
+        for (int turn = -1; turn <= 1; ++turn) {
+            const float d = static_cast<float>(i + turn * count) - shown;
+            if (std::fabs(d) > 1.3f) continue;
+            const float angle = d * 0.95f;
+            const float facing = std::cos(angle);
+            if (facing <= 0.15f) continue;
+            const float away = std::min(1.0f, std::fabs(d));
+            TextStyle style = item.style;
+            style.size = item.style.size * (1.0f - 0.32f * away);
+            style.color = mix(item.style.color, item.drum_dim, away);
+            const char* text = item.drum_options[static_cast<size_t>(i)].c_str();
+            const ImVec2 extent = text_size(c, style, text, nullptr, 0.0f);
+            const float y = min.y + size.y * 0.5f + std::sin(angle) * size.y * 0.62f - extent.y * 0.5f;
+            draw_text_run(c, style, ImVec2(min.x + (size.x - extent.x) * 0.5f, y), text, nullptr, 0.0f);
+        }
+    // Shaded towards the top and the bottom, as a cylinder.
+    const float band = size.y * 0.3f;
+    const ImU32 dark = fade(c, IM_COL32(0, 0, 0, 170)), clear = fade(c, IM_COL32(0, 0, 0, 0));
+    c.list.AddRectFilledMultiColor(min, ImVec2(max.x, min.y + band), dark, dark, clear, clear);
+    c.list.AddRectFilledMultiColor(ImVec2(min.x, max.y - band), max, clear, clear, dark, dark);
+    c.list.PopClipRect();
+    c.list.AddRect(min, max, fade(c, item.drum_border), rounding, std::max(1.0f, c.scale));
+}
+
 void draw_icon(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
     const float k = std::min(size.x, size.y) / item.viewbox;
     const ImVec2 origin(position.x + (size.x - item.viewbox * k) * 0.5f, position.y + (size.y - item.viewbox * k) * 0.5f);
@@ -980,6 +1045,9 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
     }
     case ItemKind::Icon:
         draw_icon(c, item, position, size);
+        break;
+    case ItemKind::Drum:
+        draw_drum(c, item, position, size);
         break;
     case ItemKind::Toggle: {
         const ImVec2 min = snap(position);
