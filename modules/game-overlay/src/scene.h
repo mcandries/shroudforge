@@ -107,6 +107,7 @@ struct Item {
     float opacity = 1.0f;
     bool plain = false;  // Solid view: no outlines nor smoothed borders, one continuous surface.
     float ease = 0.0f;   // Seconds a new camera angle takes to be reached, 0 = at once.
+    float perspective = 0.0f;  // 0 = parallel view, to 1 = a field of 90 degrees.
     ImU32 edge = IM_COL32(0, 0, 0, 110);
     int floor_grid = 0;  // Lines on the floor of the box every this many cells, 0 = none.
     ImU32 grid_color = IM_COL32(255, 255, 255, 40);

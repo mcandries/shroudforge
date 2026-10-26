@@ -365,7 +365,8 @@ bool seen_from_camera(const VoxelMesh& mesh, const VoxelFace& face, const float 
     return false;
 }
 
-// Orthographic view of the box from a camera turning around its centre: yaw
+// View of the box from a camera turning around its centre, parallel or in
+// perspective (`perspective`): yaw
 // 0 looks along +z with +x on the right and +y up (the game's axes), pitch
 // looks down. Faces turned away are skipped and the others drawn from the
 // farthest, lit by their direction. Solid and see-through (`opacity` or the
@@ -412,14 +413,40 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     const float k = item.zoom * std::min(size.x, size.y) / std::max(1.0f, diagonal);
     const ImVec2 centre(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
     const float half[3] = {mesh.sx * 0.5f, mesh.sy * 0.5f, mesh.sz * 0.5f};
+    // Perspective: the camera, `distance` from the centre, sees the box in a
+    // field of up to 90 degrees; nearer points are drawn larger. The sphere
+    // around the box shows as large as in the parallel view, so it still fits.
+    const float radius = std::max(0.5f, diagonal * 0.5f);
+    const float field = item.perspective * 90.0f * kRadians;
+    const float distance = field > 0.001f ? radius / std::tan(field * 0.5f) + radius : 0.0f;
+    const float fit = distance > 0.0f ? std::sqrt(distance * distance - radius * radius) : 0.0f;
     const auto project = [&](float x, float y, float z) {
         x -= half[0];
         y -= half[1];
         z -= half[2];
-        return ImVec2(centre.x + (x * r[0] + y * r[1] + z * r[2]) * k, centre.y - (x * u[0] + y * u[1] + z * u[2]) * k);
+        const float s = distance > 0.0f ? fit / (distance + x * f[0] + y * f[1] + z * f[2]) : 1.0f;
+        return ImVec2(centre.x + (x * r[0] + y * r[1] + z * r[2]) * k * s,
+            centre.y - (x * u[0] + y * u[1] + z * u[2]) * k * s);
     };
+    // Farther first: along the view, or from the camera in perspective.
     const auto depth = [&](float x, float y, float z) {
-        return (x - half[0]) * f[0] + (y - half[1]) * f[1] + (z - half[2]) * f[2];
+        x -= half[0];
+        y -= half[1];
+        z -= half[2];
+        if (distance <= 0.0f) return x * f[0] + y * f[1] + z * f[2];
+        x += f[0] * distance;
+        y += f[1] * distance;
+        z += f[2] * distance;
+        return std::sqrt(x * x + y * y + z * z);
+    };
+    // Whether a face is turned to the camera (from its centre in perspective).
+    const auto turned_to_camera = [&](const VoxelFace& face) {
+        const float* n = kNormals[face.direction];
+        if (distance <= 0.0f) return n[0] * f[0] + n[1] * f[1] + n[2] * f[2] < 0.0f;
+        const float x = face.x + 0.5f + n[0] * 0.5f - half[0] + f[0] * distance;
+        const float y = face.y + 0.5f + n[1] * 0.5f - half[1] + f[1] * distance;
+        const float z = face.z + 0.5f + n[2] * 0.5f - half[2] + f[2] * distance;
+        return n[0] * x + n[1] * y + n[2] * z < 0.0f;
     };
 
     c.list.PushClipRect(position, ImVec2(position.x + size.x, position.y + size.y), true);
@@ -450,18 +477,18 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     // found again only when it moves.
     const bool see_through = !layered && !item.xray && item.opacity < 0.999f;
     VoxelVisibility& seen = mesh.visibility;
-    if (see_through && (!seen.valid || seen.yaw != yaw || seen.pitch != pitch)) {
+    if (see_through && (!seen.valid || seen.yaw != yaw || seen.pitch != pitch || seen.distance != distance)) {
         const float towards[3] = {-f[0], -f[1], -f[2]};
         seen.faces.clear();
         for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
             const VoxelFace& face = mesh.faces[i];
-            const float* n = kNormals[face.direction];
-            if (face.inner || n[0] * f[0] + n[1] * f[1] + n[2] * f[2] >= 0.0f) continue;
+            if (face.inner || !turned_to_camera(face)) continue;
             if (seen_from_camera(mesh, face, towards)) seen.faces.push_back(i);
         }
         seen.valid = true;
         seen.yaw = yaw;
         seen.pitch = pitch;
+        seen.distance = distance;
     }
     std::vector<std::pair<float, std::uint32_t>> order;
     const auto add = [&](std::uint32_t i) {
@@ -473,8 +500,7 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         order.reserve(mesh.faces.size());
         for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
             const VoxelFace& face = mesh.faces[i];
-            const float* n = kNormals[face.direction];
-            if ((item.xray || !face.inner) && n[0] * f[0] + n[1] * f[1] + n[2] * f[2] < 0.0f) add(i);
+            if ((item.xray || !face.inner) && turned_to_camera(face)) add(i);
         }
     } else {
         order.reserve(seen.faces.size());
@@ -511,9 +537,9 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
             IM_COL32(255, 255, 255, static_cast<int>(over * 255.0f + 0.5f)));
     }
     // Marks on top: a dot at the centre of their cell.
-    const float radius = std::max(2.0f, k * 0.35f);
+    const float dot = std::max(2.0f, k * 0.35f);
     for (const VoxelMark& mark : mesh.marks)
-        c.list.AddCircleFilled(project(mark.x + 0.5f, mark.y + 0.5f, mark.z + 0.5f), radius,
+        c.list.AddCircleFilled(project(mark.x + 0.5f, mark.y + 0.5f, mark.z + 0.5f), dot,
             fade(c, item.cell_marks[mark.ch]), 12);
     c.list.PopClipRect();
 }
