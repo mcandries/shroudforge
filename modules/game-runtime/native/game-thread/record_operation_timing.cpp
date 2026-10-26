@@ -12,10 +12,14 @@ struct Counter {
     std::atomic<std::uint64_t> count{}, total{}, maximum{};
 };
 Counter counters[static_cast<unsigned>(OperationTiming::Kind::Count)];
-constexpr const char* names[] = {"dispatch-wait", "dispatch-run", "drain-interval", "cursor-lock", "cursor-read"};
+constexpr const char* names[] = {"dispatch-wait", "dispatch-run", "drain-interval", "cursor-lock", "cursor-read",
+    "cursor-resolve", "cursor-registry", "cursor-scan", "cursor-sample", "direct-resolve", "direct-run"};
+std::atomic<int> caller_priority{-99};
 }
 
 namespace OperationTiming {
+void NoteCallerPriority(int priority) { caller_priority.store(priority, std::memory_order_relaxed); }
+
 void Record(Kind kind, std::uint64_t microseconds) {
     auto& counter = counters[static_cast<unsigned>(kind)];
     counter.count.fetch_add(1, std::memory_order_relaxed);
@@ -41,6 +45,8 @@ extern "C" std::size_t __cdecl KfcRuntimeOperationTiming(char* buffer, std::size
             static_cast<unsigned long long>(count), total / 1000.0 / count, maximum / 1000.0);
         text += line;
     }
+    const auto priority = caller_priority.load(std::memory_order_relaxed);
+    if (priority != -99) text += "; caller thread priority " + std::to_string(priority);
     const auto length = std::min(text.size(), capacity - 1);
     std::memcpy(buffer, text.data(), length);
     buffer[length] = '\0';
