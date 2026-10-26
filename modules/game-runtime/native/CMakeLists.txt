@@ -140,6 +140,7 @@ add_library(kfc-runtime SHARED
     player-input/sample_world_cursor.cpp
     player-input/read_local_cursor_input.cpp
     game-thread/record_operation_timing.cpp
+    player-input/read_local_camera.cpp
     voxels/read_and_write_voxels.cpp
     voxels/read_registered_voxel_grid.cpp
     building/remove_building_prop.cpp
