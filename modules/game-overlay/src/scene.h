@@ -125,6 +125,10 @@ struct Item {
     float opacity = 1.0f;
     bool plain = false;  // Solid view: no outlines nor smoothed borders, one continuous surface.
     float ease = 0.0f;   // Seconds a new camera angle takes to be reached, 0 = at once.
+    // Turning with the game's camera: its yaw read at every frame plus
+    // camera_offset degrees, instead of `yaw` (kept when the camera cannot be read).
+    bool follow_camera = false;
+    float camera_offset = 0.0f;
     float perspective = 0.0f;  // 0 = parallel view, to 1 = a field of 90 degrees.
     ImU32 edge = IM_COL32(0, 0, 0, 110);
     int floor_grid = 0;  // Lines on the floor of the box every this many cells, 0 = none.
