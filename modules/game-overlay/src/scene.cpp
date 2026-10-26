@@ -291,6 +291,47 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("grid"))
             item.floor_grid = std::clamp(static_cast<int>(parse_number(value["grid"], "grid")), 0, kMaxVoxelSide);
         if (value.contains("grid_color")) item.grid_color = parse_color(value["grid_color"], "grid_color");
+    } else if (type == "world") {
+        item.kind = ItemKind::World;
+        const auto position = [&](const json& at, const char* field) {
+            if (!at.is_array() || at.size() != 3 || !at[0].is_number() || !at[1].is_number() || !at[2].is_number())
+                fail(std::string("world: ") + field + ": expected {x, y, z} in meters");
+            return std::array<double, 3>{at[0].get<double>(), at[1].get<double>(), at[2].get<double>()};
+        };
+        if (value.contains("points")) {
+            if (!value["points"].is_array() || value["points"].size() > 256) fail("world: points: at most 256");
+            for (const auto& entry : value["points"]) {
+                if (!entry.is_object() || !entry.contains("at")) fail("world: a point needs at = {x, y, z}");
+                WorldPoint point;
+                const auto at = position(entry["at"], "at");
+                for (int i = 0; i < 3; ++i) point.at[i] = at[i];
+                if (entry.contains("color")) point.color = parse_color(entry["color"], "color");
+                if (entry.contains("size")) point.size = std::clamp(parse_number(entry["size"], "size"), 1.0f, 128.0f);
+                const std::string shape = entry.value("shape", std::string("ring"));
+                if (shape == "ring") point.shape = WorldShape::Ring;
+                else if (shape == "cross") point.shape = WorldShape::Cross;
+                else if (shape == "dot") point.shape = WorldShape::Dot;
+                else fail("world: shape is ring, cross or dot");
+                item.world_points.push_back(point);
+            }
+        }
+        if (value.contains("lines")) {
+            if (!value["lines"].is_array() || value["lines"].size() > 256) fail("world: lines: at most 256");
+            for (const auto& entry : value["lines"]) {
+                if (!entry.is_object() || !entry.contains("from") || !entry.contains("to"))
+                    fail("world: a line needs from and to = {x, y, z}");
+                WorldLine segment;
+                const auto from = position(entry["from"], "from");
+                const auto to = position(entry["to"], "to");
+                for (int i = 0; i < 3; ++i) {
+                    segment.from[i] = from[i];
+                    segment.to[i] = to[i];
+                }
+                if (entry.contains("color")) segment.color = parse_color(entry["color"], "color");
+                if (entry.contains("width")) segment.width = std::clamp(parse_number(entry["width"], "width"), 0.5f, 32.0f);
+                item.world_lines.push_back(segment);
+            }
+        }
     } else if (type == "grow") {
         item.kind = ItemKind::Grow;
     } else if (type == "spacer") {

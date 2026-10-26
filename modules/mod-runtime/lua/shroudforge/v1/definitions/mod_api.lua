@@ -82,7 +82,7 @@ function shroudforge_input.keybind_label(setting_key) end
 
 --- One line of a zone. A plain string is a text item.
 --- @class ShroudForgeOverlayItem: ShroudForgeOverlayTextStyle
---- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid'|'voxels' Default: `text`.
+--- @field type? 'text'|'image'|'row'|'flow'|'chip'|'icon'|'toggle'|'grow'|'spacer'|'separator'|'progress'|'grid'|'voxels'|'world' Default: `text`.
 --- @field text? string Text or chip content.
 --- @field align? 'left'|'center'|'right'
 --- @field image? string PNG or JPEG file, relative to the mod folder.
@@ -121,6 +121,8 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field plain? boolean Voxels: solid view without outlines nor anti-aliased borders, one continuous surface.
 --- @field ease? number Voxels: seconds a new yaw or pitch takes to be reached (the view turns), 0 at once. Default 0.
 --- @field perspective? number Voxels: 0 a parallel view, up to 1 a perspective with a field of 90 degrees. Default 0.
+--- @field points? table[] World: up to 256 `{at = {x, y, z}, color?, size?, shape?}` in meters, drawn where the game's camera puts them at every frame; shape `ring` (default), `cross` or `dot`.
+--- @field lines? table[] World: up to 256 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.
 --- @field edge? ShroudForgeOverlayColor Voxels: outline of each face (when cells are 3 pixels or more).
 --- @field grid? number Voxels: lines on the floor of the box every this many cells. Default 0 (none).
