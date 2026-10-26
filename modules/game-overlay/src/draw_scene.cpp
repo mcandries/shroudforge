@@ -489,6 +489,24 @@ void draw_world(const Context& c, const Item& item) {
         }
         c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, color), width * c.scale);
     };
+    // Quads first, under the lines; the part behind the camera cut off.
+    for (const WorldQuad& quad : item.world_quads) {
+        double in[4][3];
+        for (int k = 0; k < 4; ++k) view.to_camera(quad.corners[k], in[k]);
+        ImVec2 out[8];
+        int count = 0;
+        for (int k = 0; k < 4; ++k) {
+            const double* a = in[k];
+            const double* b = in[(k + 1) % 4];
+            if (a[2] >= kNear) out[count++] = view.to_screen(a);
+            if ((a[2] >= kNear) != (b[2] >= kNear)) {
+                const double t = (kNear - a[2]) / (b[2] - a[2]);
+                const double cut[3] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, kNear};
+                out[count++] = view.to_screen(cut);
+            }
+        }
+        if (count >= 3) c.list.AddConvexPolyFilled(out, count, fade(c, quad.color));
+    }
     for (const WorldLine& line : item.world_lines) segment(line.from, line.to, line.color, line.width);
     double corners[4][3];
     if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners))
