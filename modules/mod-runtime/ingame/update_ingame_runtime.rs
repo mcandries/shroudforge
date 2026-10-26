@@ -3,11 +3,14 @@ use crate::env::AppState;
 
 impl IngameRuntime {
     pub fn update(&mut self, delta_seconds: f64) {
+        use crate::lua::ingame::report_operation_timing::record_call;
+        let part = std::time::Instant::now();
         let mut diagnostic_host = super::run_diagnostic_job::RuntimeDiagnosticHost::new(
             &self.runner,
             self.active_mod_ids(),
         );
         self.diagnostics.tick_with_host(&mut diagnostic_host);
+        record_call("runtime.diagnostics", part);
         self.runner
             .lua
             .app_data_ref::<AppState>()
@@ -15,7 +18,10 @@ impl IngameRuntime {
             .poll_native_dll_loads();
         self.process_runtime_reload_request();
         if std::time::Instant::now() >= self.next_status {
+            let part = std::time::Instant::now();
             let config = shroudforge_loader_config::config::read_loader(&self.root).ok();
+            record_call("runtime.read_loader", part);
+            let part = std::time::Instant::now();
             if config
                 .as_ref()
                 .and_then(|value| value.pointer("/modules/network/enabled"))
@@ -40,12 +46,19 @@ impl IngameRuntime {
             } else {
                 shroudforge_steam_networking::service_shutdown();
             }
+            record_call("runtime.network_health", part);
+            let part = std::time::Instant::now();
             self.refresh_configuration();
+            record_call("runtime.refresh_configuration", part);
+            let part = std::time::Instant::now();
             self.publish_status(true);
+            record_call("runtime.publish_status", part);
             self.next_status = std::time::Instant::now() + std::time::Duration::from_secs(1);
         }
         crate::env::shroudforge::dispatch_ui_actions(&self.runner.lua, &self.active_mod_ids());
+        let part = std::time::Instant::now();
         self.update_mod_callbacks(delta_seconds);
+        record_call("runtime.mods", part);
         let state = self.runner.lua.app_data_ref::<AppState>().unwrap();
         state.advance_loaded_resource_indexes();
     }

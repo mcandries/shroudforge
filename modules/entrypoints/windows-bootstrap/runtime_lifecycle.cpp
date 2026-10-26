@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "bootstrap_state.h"
 
 using namespace BootstrapImplementation;
@@ -128,12 +129,22 @@ DWORD WINAPI run(void*) {
     auto previous = std::chrono::steady_clock::now();
     auto next_runtime_status = previous;
     std::string previous_runtime_status;
+    // Diagnostic: a turn longer than this is logged with the time of each part.
+    constexpr double slow_turn_ms = 80.0;
+    auto work_ended = previous;
     while (WaitForSingleObject(stop_event, 16) == WAIT_TIMEOUT) {
         const auto now = std::chrono::steady_clock::now();
         const auto delta = std::chrono::duration<double>(now - previous).count();
         previous = now;
+        const auto ms = [](std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+            return std::chrono::duration<double, std::milli>(to - from).count();
+        };
+        const double waited = ms(work_ended, now);
         EcsRuntime::Tick();
+        const auto ticked = std::chrono::steady_clock::now();
+        bool status_written{};
         if (now >= next_runtime_status) {
+            status_written = true;
             write_runtime_heartbeat(root);
             const auto status = EcsRuntime::Status();
             const auto state = runtime_status_state(status);
@@ -144,9 +155,20 @@ DWORD WINAPI run(void*) {
             }
             next_runtime_status = now + std::chrono::seconds(2);
         }
+        const auto statused = std::chrono::steady_clock::now();
         if (!update(handle, delta)) {
             startup_failed(root, "runtime-update", "Runtime update failed. Stopping the Lua runtime");
             break;
+        }
+        work_ended = std::chrono::steady_clock::now();
+        const double turn = waited + ms(now, work_ended);
+        if (turn > slow_turn_ms) {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                "slow mods loop turn %.0f ms: waited %.0f, native tick %.0f, status %.0f%s, runtime and mods update %.0f",
+                turn, waited, ms(now, ticked), ms(ticked, statused), status_written ? " (written)" : "",
+                ms(statused, work_ended));
+            log(line);
         }
     }
     destroy(handle);
