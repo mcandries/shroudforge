@@ -5,6 +5,7 @@
 // screen height, 1080 by default) multiplied by the screen scale.
 
 #include "draw_scene.h"
+#include "local_camera.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -277,6 +278,8 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
     }
     case ItemKind::Voxels:
         return {item.size.x * c.scale, item.size.y * c.scale};
+    case ItemKind::World:
+        return {0.0f, 0.0f};
     }
     return {0.0f, 0.0f};
 }
@@ -382,6 +385,93 @@ struct ShownCamera {
     float yaw = 0.0f, pitch = 0.0f;
     double time = 0.0;
 };
+
+// World items: points and segments of the game world projected with the
+// game's camera read for this frame (local_camera), over the whole screen
+// whatever the zone's place. The camera's orientation takes its axes to the
+// world's; it looks along its +z, +x to the right, +y up; fovY in radians.
+// Nothing is drawn while the camera cannot be read.
+struct WorldView {
+    double eye[3]{}, right[3]{}, up[3]{}, forward[3]{};
+    double focal_x = 1.0, focal_y = 1.0;
+    ImVec2 screen;
+
+    // Camera space of a world point: x right, y up, z forward (meters).
+    void to_camera(const double point[3], double out[3]) const {
+        const double d[3] = {point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
+        out[0] = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
+        out[1] = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
+        out[2] = d[0] * forward[0] + d[1] * forward[1] + d[2] * forward[2];
+    }
+    ImVec2 to_screen(const double p[3]) const {
+        return ImVec2(static_cast<float>(screen.x * 0.5 * (1.0 + p[0] / (p[2] * focal_x))),
+            static_cast<float>(screen.y * 0.5 * (1.0 - p[1] / (p[2] * focal_y))));
+    }
+};
+
+bool world_view(WorldView& view) {
+    LocalCamera camera;
+    if (!local_camera(camera)) return false;
+    const double* q = camera.orientation;
+    const auto rotate = [&](double x, double y, double z, double out[3]) {
+        // v + 2w (q x v) + 2 q x (q x v)
+        const double tx = 2.0 * (q[1] * z - q[2] * y), ty = 2.0 * (q[2] * x - q[0] * z), tz = 2.0 * (q[0] * y - q[1] * x);
+        out[0] = x + q[3] * tx + (q[1] * tz - q[2] * ty);
+        out[1] = y + q[3] * ty + (q[2] * tx - q[0] * tz);
+        out[2] = z + q[3] * tz + (q[0] * ty - q[1] * tx);
+    };
+    for (int i = 0; i < 3; ++i) view.eye[i] = camera.position[i];
+    rotate(1.0, 0.0, 0.0, view.right);
+    rotate(0.0, 1.0, 0.0, view.up);
+    rotate(0.0, 0.0, 1.0, view.forward);
+    view.screen = ImGui::GetIO().DisplaySize;
+    if (view.screen.x <= 0.0f || view.screen.y <= 0.0f) return false;
+    view.focal_y = std::tan(camera.fov_y * 0.5);
+    view.focal_x = view.focal_y * view.screen.x / view.screen.y;
+    return view.focal_y > 0.0;
+}
+
+void draw_world(const Context& c, const Item& item) {
+    WorldView view;
+    if (!world_view(view)) return;
+    constexpr double kNear = 0.05;
+    c.list.PushClipRectFullScreen();
+    for (const WorldLine& segment : item.world_lines) {
+        double a[3], b[3];
+        view.to_camera(segment.from, a);
+        view.to_camera(segment.to, b);
+        if (a[2] < kNear && b[2] < kNear) continue;
+        // Cut at the near plane what lies behind the camera.
+        if (a[2] < kNear || b[2] < kNear) {
+            double* behind = a[2] < kNear ? a : b;
+            const double* front = a[2] < kNear ? b : a;
+            const double t = (kNear - front[2]) / (behind[2] - front[2]);
+            for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
+        }
+        c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, segment.color), segment.width * c.scale);
+    }
+    for (const WorldPoint& point : item.world_points) {
+        double p[3];
+        view.to_camera(point.at, p);
+        if (p[2] < kNear) continue;
+        const ImVec2 at = view.to_screen(p);
+        const float r = point.size * 0.5f * c.scale;
+        const ImU32 color = fade(c, point.color);
+        switch (point.shape) {
+        case WorldShape::Ring:
+            c.list.AddCircle(at, r, color, 24, std::max(1.5f, 2.0f * c.scale));
+            break;
+        case WorldShape::Cross:
+            c.list.AddLine(ImVec2(at.x - r, at.y), ImVec2(at.x + r, at.y), color, std::max(1.5f, 2.0f * c.scale));
+            c.list.AddLine(ImVec2(at.x, at.y - r), ImVec2(at.x, at.y + r), color, std::max(1.5f, 2.0f * c.scale));
+            break;
+        case WorldShape::Dot:
+            c.list.AddCircleFilled(at, r, color, 16);
+            break;
+        }
+    }
+    c.list.PopClipRect();
+}
 
 void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
     const VoxelMesh& mesh = *item.voxels;
@@ -650,6 +740,9 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
         break;
     case ItemKind::Voxels:
         draw_voxels(c, item, position, size);
+        break;
+    case ItemKind::World:
+        draw_world(c, item);
         break;
     }
 }
