@@ -45,3 +45,13 @@ pub fn world_cursor_read_input(component_size: usize) -> Result<(Vec<u8>, u64), 
         _ => Err("native local cursor reader returned an unsupported result".into()),
     }
 }
+
+/// Gives the native runtime the reflected layout of the local camera inside
+/// ClientPlayerInput (component size, 9 byte offsets), so that a caller
+/// drawing every frame can read it. False when the runtime lacks it.
+pub fn set_local_camera_layout(component_size: usize, offsets: &[u32]) -> bool {
+    let Some(set) = provider().and_then(|provider| provider.set_local_camera_layout) else {
+        return false;
+    };
+    unsafe { set(component_size, offsets.as_ptr(), offsets.len()) == 1 }
+}

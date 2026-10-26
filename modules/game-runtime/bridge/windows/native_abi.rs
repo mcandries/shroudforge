@@ -121,6 +121,7 @@ pub struct GridSpec {
 pub(super) type WorldGridGetSpecForSession =
     unsafe extern "C" fn(u64, *const c_char, *mut GridSpec) -> u32;
 pub(super) type WorldCursorRead = unsafe extern "C" fn(*mut u8, usize, *mut u64) -> bool;
+pub(super) type SetLocalCameraLayout = unsafe extern "C" fn(usize, *const u32, usize) -> u32;
 pub(super) type WorldCursorReadInput =
     unsafe extern "C" fn(usize, u64, *mut u8, usize, *mut u64) -> u32;
 pub(super) type WorldVoxelReadForSession =
@@ -179,6 +180,7 @@ pub(super) struct Provider {
     pub(super) world_entity_identity: WorldEntityIdentity,
     pub(super) world_entity_set_scale: WorldEntitySetScale,
     pub(super) world_cursor_read: Option<WorldCursorRead>,
+    pub(super) set_local_camera_layout: Option<SetLocalCameraLayout>,
     pub(super) world_cursor_read_input: Option<WorldCursorReadInput>,
     pub(super) world_voxel_read_for_session: Option<WorldVoxelReadForSession>,
     pub(super) world_voxel_write: WorldVoxelWrite,
