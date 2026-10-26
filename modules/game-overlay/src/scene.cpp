@@ -201,6 +201,33 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("stroke")) item.stroke = std::clamp(parse_number(value["stroke"], "stroke"), 0.1f, 16.0f);
         item.color = item.style.color;
         if (value.contains("color")) item.color = parse_color(value["color"], "color");
+    } else if (type == "drum") {
+        item.kind = ItemKind::Drum;
+        if (!value.contains("options") || !value["options"].is_array() || value["options"].empty() ||
+            value["options"].size() > 8)
+            fail("drum: options: 1 to 8 texts");
+        for (const json& option : value["options"]) {
+            if (!option.is_string() || option.get<std::string>().size() > 64) fail("drum: options are texts of 64 bytes at most");
+            item.drum_options.push_back(option.get<std::string>());
+        }
+        const int count = static_cast<int>(item.drum_options.size());
+        if (value.contains("index"))
+            item.drum_index = std::clamp(static_cast<int>(parse_number(value["index"], "index")), 1, count) - 1;
+        if (value.contains("id")) {
+            if (!value["id"].is_string()) fail("drum: id: expected text");
+            item.drum_id = value["id"].get<std::string>();
+        }
+        item.style.color = IM_COL32(240, 234, 216, 255);
+        item.style.shadow = false;
+        item.style.outline = 0.0f;
+        parse_text_style(value, item.style);
+        item.background = IM_COL32(12, 11, 9, 230);
+        if (value.contains("background")) item.background = parse_color(value["background"], "background");
+        if (value.contains("dim")) item.drum_dim = parse_color(value["dim"], "dim");
+        if (value.contains("border")) item.drum_border = parse_color(value["border"], "border");
+        // `size` is the text size; `box` the drum's width and height.
+        item.size = {96.0f, 26.0f};
+        if (value.contains("box")) item.size = parse_pair(value["box"], "box");
     } else if (type == "toggle") {
         item.kind = ItemKind::Toggle;
         item.on = value.value("on", false);
