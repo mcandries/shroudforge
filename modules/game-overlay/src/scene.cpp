@@ -352,12 +352,40 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             for (int i = 0; i < 3; ++i) item.world_cells_origin[i] = origin[i];
             if (cells.contains("cell"))
                 item.world_cells_size = std::clamp(parse_number(cells["cell"], "cells.cell"), 0.05f, 16.0f);
+            item.world_cells_smooth = cells.value("smooth", false);
             try {
                 item.world_cells = std::make_shared<const VoxelMesh>(build_voxel_mesh(
                     box[0], box[1], box[2], cells["data"].get<std::string>(), item.cell_colors, item.cell_marks));
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
+        }
+        if (value.contains("solids")) {
+            const auto& solids = value["solids"];
+            if (!solids.is_object() || !solids.contains("box") || !solids["box"].is_array() || solids["box"].size() != 3 ||
+                !solids.contains("data") || !solids["data"].is_string() || !solids.contains("origin"))
+                fail("world: solids needs box = {x, y, z}, data (text) and origin = {x, y, z}");
+            auto shape = std::make_shared<WorldSolids>();
+            int box[3];
+            for (int i = 0; i < 3; ++i) {
+                if (!solids["box"][i].is_number_integer()) fail("world: solids: box sides are integers");
+                box[i] = solids["box"][i].get<int>();
+            }
+            shape->sx = box[0];
+            shape->sy = box[1];
+            shape->sz = box[2];
+            const auto origin = position(solids["origin"], "solids.origin");
+            for (int i = 0; i < 3; ++i) shape->origin[i] = origin[i];
+            if (solids.contains("cell")) shape->cell = std::clamp(parse_number(solids["cell"], "solids.cell"), 0.05f, 16.0f);
+            try {
+                const std::vector<unsigned char> grid =
+                    decode_voxel_cells(box[0], box[1], box[2], solids["data"].get<std::string>());
+                shape->filled.resize(grid.size());
+                for (size_t i = 0; i < grid.size(); ++i) shape->filled[i] = grid[i] == '#' ? 1 : 0;
+            } catch (const std::runtime_error& error) {
+                fail(error.what());
+            }
+            item.world_solids = std::move(shape);
         }
         if (value.contains("quads")) {
             if (!value["quads"].is_array() || value["quads"].size() > 64) fail("world: quads: at most 64");

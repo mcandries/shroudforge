@@ -323,6 +323,8 @@ ImU32 shade(ImU32 color, float light, float alpha_factor) {
 }
 
 constexpr float kNormals[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+// Light of a face by its direction (as kNormals): the top brightest.
+constexpr float kLight[6] = {0.82f, 0.82f, 0.55f, 1.0f, 0.68f, 0.68f};
 
 // Whether a point of a face is seen from the camera: a ray from it towards
 // the camera (`towards`, unit) crosses no drawn cell before it leaves the box
@@ -469,23 +471,101 @@ bool aimed_face(const LocalCamera& camera, const Item& item, double corners[4][3
     return true;
 }
 
+// A color made lighter, for what lies behind filled cells of the world.
+ImU32 lighter(ImU32 color) {
+    const auto channel = [&](int shift) {
+        const float value = static_cast<float>((color >> shift) & 0xFF);
+        return static_cast<ImU32>(value + (255.0f - value) * 0.6f + 0.5f) << shift;
+    };
+    return channel(IM_COL32_R_SHIFT) | channel(IM_COL32_G_SHIFT) | channel(IM_COL32_B_SHIFT) |
+        (color & IM_COL32_A_MASK);
+}
+
+// Whether a world point lies behind filled cells of `solids` seen from `eye`:
+// a walk, cell by cell, along the part of the segment from the point to the
+// eye inside the box (at most its three sides added).
+bool behind_solids(const WorldSolids& solids, const double point[3], const double eye[3]) {
+    const int size[3] = {solids.sx, solids.sy, solids.sz};
+    double start[3], d[3];
+    double t0 = 0.0, t1 = 1.0;
+    for (int i = 0; i < 3; ++i) {
+        start[i] = (point[i] - solids.origin[i]) / solids.cell;
+        d[i] = (eye[i] - solids.origin[i]) / solids.cell - start[i];
+        if (std::fabs(d[i]) < 1e-9) {
+            if (start[i] < 0.0 || start[i] >= size[i]) return false;
+            continue;
+        }
+        double a = -start[i] / d[i], b = (size[i] - start[i]) / d[i];
+        if (a > b) std::swap(a, b);
+        t0 = std::max(t0, a);
+        t1 = std::min(t1, b);
+    }
+    if (t0 >= t1) return false;
+    int cell[3], step[3];
+    double next[3], delta[3];
+    for (int i = 0; i < 3; ++i) {
+        const double at = start[i] + d[i] * t0;
+        cell[i] = std::clamp(static_cast<int>(std::floor(at)), 0, size[i] - 1);
+        if (std::fabs(d[i]) < 1e-9) {
+            step[i] = 0;
+            next[i] = delta[i] = DBL_MAX;
+        } else {
+            step[i] = d[i] > 0.0 ? 1 : -1;
+            const double border = d[i] > 0.0 ? cell[i] + 1.0 : static_cast<double>(cell[i]);
+            next[i] = t0 + (border - at) / d[i];
+            delta[i] = std::fabs(1.0 / d[i]);
+        }
+    }
+    while (true) {
+        if (solids.filled[(static_cast<size_t>(cell[2]) * size[1] + cell[1]) * size[0] + cell[0]]) return true;
+        const int axis = next[0] < next[1] ? (next[0] < next[2] ? 0 : 2) : (next[1] < next[2] ? 1 : 2);
+        if (next[axis] >= t1) return false;
+        cell[axis] += step[axis];
+        if (cell[axis] < 0 || cell[axis] >= size[axis]) return false;
+        next[axis] += delta[axis];
+    }
+}
+
+// Whether a world point is behind the item's `solids`, from a hair nearer
+// the eye: a point on the side of a filled cell is not behind it.
+bool behind_solids(const Item& item, const WorldView& view, const double point[3]) {
+    if (!item.world_solids) return false;
+    double d[3], length = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        d[i] = view.eye[i] - point[i];
+        length += d[i] * d[i];
+    }
+    length = std::sqrt(length);
+    if (length < 1e-6) return false;
+    const double hair = 0.02 * item.world_solids->cell / length;
+    const double from[3] = {point[0] + d[0] * hair, point[1] + d[1] * hair, point[2] + d[2] * hair};
+    return behind_solids(*item.world_solids, from, view.eye);
+}
+
 // A box of cells in the world (`cells` of a world item): the faces turned to
-// the camera, filled with their cell's color and outlined with it more
-// opaque, the farthest first; at most kMaxWorldFaces.
+// the camera filled with their cell's color, lit by their direction, the
+// farthest first (at most kMaxWorldFaces); then over all of them their edges,
+// in the color more opaque: each face's, or only the creases when smooth. A
+// face behind the item's solids is drawn lighter (the first kMaxHiddenTests
+// faces tested).
 constexpr size_t kMaxWorldFaces = 30000;
+constexpr size_t kMaxHiddenTests = 4000;
 void draw_world_cells(const Context& c, const Item& item, const WorldView& view) {
     constexpr double kNear = 0.05;
     const VoxelMesh& mesh = *item.world_cells;
     const double s = item.world_cells_size;
     struct Shown {
         double depth;
+        double corners[4][3];  // Camera space.
         ImVec2 points[8];
         int count;
         ImU32 fill, edge;
+        std::uint8_t edges;
     };
     std::vector<Shown> shown;
     shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
     static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    size_t tests = 0;
     for (const VoxelFace& face : mesh.faces) {
         if (face.inner) continue;
         if (shown.size() >= kMaxWorldFaces) break;
@@ -519,17 +599,44 @@ void draw_world_cells(const Context& c, const Item& item, const WorldView& view)
             }
         }
         if (entry.count < 3) continue;
-        const ImU32 color = item.cell_colors[face.ch];
+        ImU32 color = item.cell_colors[face.ch];
+        if (item.world_solids && tests < kMaxHiddenTests) {
+            ++tests;
+            double middle[3];
+            for (int i = 0; i < 3; ++i) middle[i] = base[i] + 0.5 * s;
+            middle[axis] = plane;
+            if (behind_solids(item, view, middle)) color = lighter(color);
+        }
+        std::memcpy(entry.corners, in, sizeof in);
         entry.depth = centre[2];
-        entry.fill = fade(c, color);
+        entry.fill = fade(c, shade(color, kLight[face.direction], 1.0f));
         entry.edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 230));
+        entry.edges = item.world_cells_smooth ? face.creases : std::uint8_t{0xF};
         shown.push_back(entry);
     }
     std::sort(shown.begin(), shown.end(), [](const Shown& a, const Shown& b) { return a.depth > b.depth; });
-    for (const Shown& entry : shown) {
-        c.list.AddConvexPolyFilled(entry.points, entry.count, entry.fill);
-        c.list.AddPolyline(entry.points, entry.count, entry.edge, 1.5f * c.scale, ImDrawFlags_Closed);
-    }
+    // The fills without anti-aliased borders, whose overlaps would draw the
+    // seams between faces; the edges after, so that no nearer fill covers
+    // part of one.
+    const ImDrawListFlags flags = c.list.Flags;
+    c.list.Flags &= ~ImDrawListFlags_AntiAliasedFill;
+    for (const Shown& entry : shown) c.list.AddConvexPolyFilled(entry.points, entry.count, entry.fill);
+    c.list.Flags = flags;
+    for (const Shown& entry : shown)
+        for (int k = 0; k < 4; ++k) {
+            if (!(entry.edges & (1 << k))) continue;
+            double a[3], b[3];
+            std::memcpy(a, entry.corners[k], sizeof a);
+            std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
+            if (a[2] < kNear && b[2] < kNear) continue;
+            if (a[2] < kNear || b[2] < kNear) {
+                double* behind = a[2] < kNear ? a : b;
+                const double* front = a[2] < kNear ? b : a;
+                const double t = (kNear - front[2]) / (behind[2] - front[2]);
+                for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
+            }
+            c.list.AddLine(view.to_screen(a), view.to_screen(b), entry.edge, 1.5f * c.scale);
+        }
 }
 
 void draw_world(const Context& c, const Item& item) {
@@ -569,9 +676,18 @@ void draw_world(const Context& c, const Item& item) {
                 out[count++] = view.to_screen(cut);
             }
         }
-        if (count >= 3) c.list.AddConvexPolyFilled(out, count, fade(c, quad.color));
+        if (count < 3) continue;
+        double middle[3] = {0.0, 0.0, 0.0};
+        for (int k = 0; k < 4; ++k)
+            for (int i = 0; i < 3; ++i) middle[i] += quad.corners[k][i] * 0.25;
+        c.list.AddConvexPolyFilled(out, count, fade(c, behind_solids(item, view, middle) ? lighter(quad.color) : quad.color));
     }
-    for (const WorldLine& line : item.world_lines) segment(line.from, line.to, line.color, line.width);
+    // Lighter behind the solids, from their middle.
+    for (const WorldLine& line : item.world_lines) {
+        const double middle[3] = {(line.from[0] + line.to[0]) * 0.5, (line.from[1] + line.to[1]) * 0.5,
+            (line.from[2] + line.to[2]) * 0.5};
+        segment(line.from, line.to, behind_solids(item, view, middle) ? lighter(line.color) : line.color, line.width);
+    }
     double corners[4][3];
     if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners))
         for (int k = 0; k < 4; ++k) segment(corners[k], corners[(k + 1) % 4], item.aim_face_color, item.aim_face_width);
@@ -687,7 +803,6 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         {{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}, {{1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}},
         {{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}, {{0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}},
         {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {{0, 0, 1}, {0, 1, 1}, {1, 1, 1}, {1, 0, 1}}};
-    static constexpr float kLight[6] = {0.82f, 0.82f, 0.55f, 1.0f, 0.68f, 0.68f};
     // Solid and lighter than opaque: the faces are drawn opaque off screen,
     // then laid over the game with that opacity, at once. (Not in X-ray: its
     // partly transparent faces would be darkened by the second blending.)
