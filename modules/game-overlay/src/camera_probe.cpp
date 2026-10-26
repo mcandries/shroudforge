@@ -304,16 +304,24 @@ bool camera_block(const float* f) {
     return std::fabs(w) < 1.0f;
 }
 
-// Camera blocks in `size` bytes from `data`, starting `from` and wrapping,
-// over `span` bytes. Returns how many (at most MAX_BLOCKS), -1 on a fault.
-int scan_blocks(const char* data, size_t size, size_t from, size_t span, Found* out) {
+// Camera blocks among the `span` bytes from `from` (wrapping in `size`
+// bytes) whose eye is within CLOSE_METERS meters of `around`. Returns how many (at most
+// MAX_BLOCKS), -1 on a fault. Plain code under __try.
+constexpr float CLOSE_METERS = 3.0f;
+int scan_blocks(const char* data, size_t size, size_t from, size_t span, const float around[3], Found* out) {
     int count = 0;
     __try {
-        for (size_t step = 0; step < span && count < MAX_BLOCKS; step += 16) {
-            const size_t at = (from + step) % size;
-            if (at + 76 > size) continue;
+        size_t at = from - from % 16;
+        for (size_t done = 0; done < span && count < MAX_BLOCKS; done += 16, at += 16) {
+            if (at + 76 > size) {
+                at = static_cast<size_t>(-16);  // Back to 0 at the next step.
+                continue;
+            }
             const float* f = reinterpret_cast<const float*>(data + at);
             if (std::fabs(f[8]) > 0.02f || !(f[11] > 0.0f && f[11] < 1.0f)) continue;
+            if (std::fabs(f[16] - around[0]) > CLOSE_METERS || std::fabs(f[17] - around[1]) > CLOSE_METERS ||
+                std::fabs(f[18] - around[2]) > CLOSE_METERS)
+                continue;
             if (!camera_block(f)) continue;
             out[count].offset = at;
             std::memcpy(out[count].values, f, sizeof(out[count].values));
@@ -336,44 +344,66 @@ struct Ring {
     size_t size = 0;
     size_t cursor = 0;
     uint64_t frame = 0;
-    double last_seen = 0.0, next_search = 0.0, wanted_until = 0.0;
+    double last_new = 0.0, wanted_until = 0.0;
     std::vector<Known> known;
+    // The search, a slice per present: the region and offset it is at.
+    const char* search_region = nullptr;
+    size_t search_offset = 0;
     // Over the current 5 s, for the probe's log.
     uint64_t frames = 0, found = 0, born = 0, advance = 0;
+    double longest = 0.0;
 } ring;
 
-// Looks for the ring among the mapped regions (1 to 64 MB), once a second.
-void find_ring(double now) {
-    if (now < ring.next_search) return;
-    ring.next_search = now + 1.0;
+// The search for the ring: SEARCH_SLICE bytes per present at most, through
+// the mapped regions of 1 to 16 MB, for camera blocks near the input camera.
+constexpr size_t SEARCH_SLICE = 4u << 20;
+void find_ring(double now, const float around[3]) {
+    std::vector<std::pair<const char*, size_t>> regions;
+    for (auto& [memory, region] : mapped)
+        if (region.size >= (1u << 20) && region.size <= (16u << 20))
+            regions.emplace_back(region.data, static_cast<size_t>(region.size));
+    if (regions.empty()) return;
+    std::sort(regions.begin(), regions.end());
+    size_t index = 0;
+    while (index < regions.size() && regions[index].first < ring.search_region) ++index;
+    if (index == regions.size() || regions[index].first != ring.search_region) ring.search_offset = 0;
+    if (index == regions.size()) index = 0;
+    size_t budget = SEARCH_SLICE;
     Found blocks[MAX_BLOCKS];
-    for (auto& [memory, region] : mapped) {
-        if (region.size < (1u << 20) || region.size > (64u << 20)) continue;
-        const int count =
-            scan_blocks(region.data, static_cast<size_t>(region.size), 0, static_cast<size_t>(region.size), blocks);
+    for (size_t visited = 0; visited < regions.size() && budget > 0; ++visited) {
+        const auto [data, size] = regions[index];
+        const size_t span = std::min(budget, size - std::min(size, ring.search_offset));
+        const int count = scan_blocks(data, size, ring.search_offset, span, around, blocks);
+        budget -= span;
         if (count > 0) {
-            ring.data = region.data;
-            ring.size = static_cast<size_t>(region.size);
+            ring.data = data;
+            ring.size = size;
             ring.cursor = blocks[count - 1].offset;
             ring.known.clear();
-            ring.last_seen = now;
-            log_line("render camera: ring found, %.1f MB at %p, %d camera blocks", region.size / 1048576.0,
-                static_cast<const void*>(region.data), count);
+            ring.last_new = now;
+            log_line("render camera: ring found, %.1f MB at %p, %d camera blocks near the camera", size / 1048576.0,
+                static_cast<const void*>(data), count);
             return;
         }
+        ring.search_offset += span;
+        if (ring.search_offset >= size) {
+            ring.search_offset = 0;
+            index = (index + 1) % regions.size();
+        }
+        ring.search_region = regions[index].first;
     }
 }
 
-// Notes the blocks written since the last frame; the newest moves the cursor.
-void track_ring(double now) {
+// Notes the blocks written since the last present; the newest moves the cursor.
+void track_ring(double now, const float around[3]) {
     if (!ring.data) {
-        find_ring(now);
+        find_ring(now, around);
         return;
     }
     bool still_mapped = false;
     for (auto& [memory, region] : mapped) still_mapped = still_mapped || region.data == ring.data;
-    if (!still_mapped || now - ring.last_seen > 2.0) {
-        log_line("render camera: ring lost");
+    if (!still_mapped || now - ring.last_new > 2.0) {
+        log_line("render camera: ring lost (%s)", still_mapped ? "no new camera block for 2 s" : "unmapped");
         const double wanted = ring.wanted_until;
         ring = Ring{};
         ring.wanted_until = wanted;
@@ -381,8 +411,8 @@ void track_ring(double now) {
     }
     Found blocks[MAX_BLOCKS];
     const size_t back = 128u << 10;
-    const int count =
-        scan_blocks(ring.data, ring.size, (ring.cursor + ring.size - back) % ring.size, back + (1u << 20), blocks);
+    const int count = scan_blocks(ring.data, ring.size, (ring.cursor + ring.size - back) % ring.size,
+        std::min(ring.size, back + (1u << 20)), around, blocks);
     if (count < 0) return;
     ++ring.frame;
     ++ring.frames;
@@ -398,7 +428,10 @@ void track_ring(double now) {
         for (const Known& old : ring.known)
             if (old.offset == block.offset && std::memcmp(old.values, block.values, sizeof(block.values)) == 0)
                 block.born = old.born;
-        if (block.born == ring.frame) ++ring.born;
+        if (block.born == ring.frame) {
+            ++ring.born;
+            ring.last_new = now;
+        }
         if (block.born >= newest_born) {
             newest_born = block.born;
             newest = block.offset;
@@ -408,7 +441,6 @@ void track_ring(double now) {
     if (count > 0) {
         ring.advance += (newest + ring.size - ring.cursor) % ring.size;
         ring.cursor = newest;
-        ring.last_seen = now;
     }
     ring.known = std::move(next);
 }
@@ -452,18 +484,25 @@ bool render_camera(int age, RenderCamera& out) {
 
 void render_camera_frame() {
     const double now = seconds();
+    LocalCamera input;
+    const bool known = last_local_camera(input);
     std::lock_guard lock(probe_mutex);
-    if (now > ring.wanted_until && !camera_probe_enabled()) return;
-    track_ring(now);
+    // Only while a world item asks for it, near the input camera.
+    if (now > ring.wanted_until || !known) return;
+    const float around[3] = {static_cast<float>(input.position[0]), static_cast<float>(input.position[1]),
+        static_cast<float>(input.position[2])};
+    track_ring(now, around);
+    ring.longest = std::max(ring.longest, seconds() - now);
     static double next_report = 0.0;
-    if (!camera_probe_enabled() || now < next_report || !ring.data) return;
+    if (now < next_report) return;
     next_report = now + 5.0;
     const double frames = ring.frames ? static_cast<double>(ring.frames) : 1.0;
-    log_line("render camera: %llu frames, %.1f camera blocks seen and %.2f new per frame, cursor %.1f KB further "
-             "per frame",
-        static_cast<unsigned long long>(ring.frames), ring.found / frames, ring.born / frames,
-        ring.advance / frames / 1024.0);
+    log_line("render camera: %s; %llu frames, %.1f camera blocks seen and %.2f new per frame, cursor %.1f KB further "
+             "per frame, longest %.2f ms per present",
+        ring.data ? "ring followed" : "looking for the ring", static_cast<unsigned long long>(ring.frames),
+        ring.found / frames, ring.born / frames, ring.advance / frames / 1024.0, ring.longest * 1000.0);
     ring.frames = ring.found = ring.born = ring.advance = 0;
+    ring.longest = 0.0;
 }
 
 }  // namespace overlay
