@@ -63,6 +63,11 @@ struct WorldLine {
     ImU32 color = IM_COL32(255, 255, 255, 255);
     float width = 2.0f;  // Reference pixels.
 };
+// A filled flat quadrilateral of the world (four corners in order, meters).
+struct WorldQuad {
+    double corners[4][3]{};
+    ImU32 color = IM_COL32(255, 255, 255, 96);
+};
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -115,6 +120,7 @@ struct Item {
     // World: points and segments in the world, over the whole screen.
     std::vector<WorldPoint> world_points;
     std::vector<WorldLine> world_lines;
+    std::vector<WorldQuad> world_quads;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
     // World: the face the building cursor aims at, outlined at every frame from
