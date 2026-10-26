@@ -5,6 +5,7 @@
 // screen height, 1080 by default) multiplied by the screen scale.
 
 #include "draw_scene.h"
+#include "camera_probe.h"
 #include "local_camera.h"
 
 #include <algorithm>
@@ -409,7 +410,42 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr) {
+// The view from the camera the game rendered a frame with: the matrix rows
+// give the axes and focal lengths, its projection centre the eye. Every 5 s
+// with the probe on, logs how it differs from the input camera.
+bool render_view(WorldView& view, int age, const WorldView& input) {
+    RenderCamera rendered;
+    if (!render_camera(age, rendered)) return false;
+    const double* m = rendered.matrix;
+    const double n0 = std::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+    const double n1 = std::sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+    const double n3 = std::sqrt(m[12] * m[12] + m[13] * m[13] + m[14] * m[14]);
+    if (n0 <= 0.0 || n1 <= 0.0 || n3 <= 0.0) return false;
+    for (int i = 0; i < 3; ++i) {
+        view.eye[i] = rendered.eye[i];
+        view.right[i] = m[i] / n0;
+        view.up[i] = m[4 + i] / n1;
+        view.forward[i] = m[12 + i] / n3;
+    }
+    view.focal_x = 1.0 / n0;
+    view.focal_y = 1.0 / n1;
+    static double next_log = 0.0;
+    if (camera_probe_enabled() && ImGui::GetTime() >= next_log) {
+        next_log = ImGui::GetTime() + 5.0;
+        const auto dot = [](const double a[3], const double b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+        const double d[3] = {view.eye[0] - input.eye[0], view.eye[1] - input.eye[1], view.eye[2] - input.eye[2]};
+        log_line("render camera (age %d): eye %.3f, %.3f, %.3f m, %.3f m from the input camera's; gaze %.2f deg apart, "
+                 "up %.2f deg apart; fov y %.2f deg (input %.2f), x %.2f deg (input %.2f)",
+            age, view.eye[0], view.eye[1], view.eye[2], std::sqrt(dot(d, d)),
+            std::acos(std::clamp(dot(view.forward, input.forward), -1.0, 1.0)) * 57.29578,
+            std::acos(std::clamp(dot(view.up, input.up), -1.0, 1.0)) * 57.29578, 2.0 * std::atan(view.focal_y) * 57.29578,
+            2.0 * std::atan(input.focal_y) * 57.29578, 2.0 * std::atan(view.focal_x) * 57.29578,
+            2.0 * std::atan(input.focal_x) * 57.29578);
+    }
+    return true;
+}
+
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, int render_age = -1) {
     LocalCamera camera;
     if (!local_camera(camera, lead)) return false;
     if (read) *read = camera;
@@ -429,7 +465,12 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr)
     if (view.screen.x <= 0.0f || view.screen.y <= 0.0f) return false;
     view.focal_y = std::tan(camera.fov_y * 0.5);
     view.focal_x = view.focal_y * view.screen.x / view.screen.y;
-    return view.focal_y > 0.0;
+    if (view.focal_y <= 0.0) return false;
+    if (render_age >= 0) {
+        const WorldView input = view;
+        render_view(view, render_age, input);
+    }
+    return true;
 }
 
 // The face the building cursor aims at: the cursor's transform is the corner
@@ -472,7 +513,7 @@ bool aimed_face(const LocalCamera& camera, const Item& item, double corners[4][3
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
     LocalCamera camera;
-    if (!world_view(view, item.camera_lead, &camera)) return;
+    if (!world_view(view, item.camera_lead, &camera, item.render_camera)) return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
     const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {
