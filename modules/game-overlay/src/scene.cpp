@@ -317,6 +317,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 item.world_points.push_back(point);
             }
         }
+        if (value.contains("render_camera"))
+            item.render_camera = static_cast<int>(std::clamp(parse_number(value["render_camera"], "render_camera"), -1.0f, 3.0f));
         if (value.contains("camera_lead"))
             item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), -0.2f, 0.2f);
         if (value.contains("aim_face")) {

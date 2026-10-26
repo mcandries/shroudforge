@@ -198,6 +198,7 @@ VKAPI_ATTR void VKAPI_CALL DestroySwapchainKHR(VkDevice device, VkSwapchainKHR s
 VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     DeviceData* d = device_of(dispatch_key(queue));
     camera_probe_frame();
+    render_camera_frame();
     VkSemaphore done = VK_NULL_HANDLE;
     {
         std::lock_guard render(d->render_mutex);
