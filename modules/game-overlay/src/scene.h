@@ -121,6 +121,12 @@ struct Item {
     std::vector<WorldPoint> world_points;
     std::vector<WorldLine> world_lines;
     std::vector<WorldQuad> world_quads;
+    // World: a box of cells in the world (`cells`), its faces built once
+    // (colors by character in cell_colors); the corner of its first cell and
+    // the cell side, in meters.
+    std::shared_ptr<const VoxelMesh> world_cells;
+    double world_cells_origin[3]{};
+    double world_cells_size = 0.5;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
     // World: the face the building cursor aims at, outlined at every frame from

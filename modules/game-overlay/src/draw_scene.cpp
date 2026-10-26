@@ -469,6 +469,69 @@ bool aimed_face(const LocalCamera& camera, const Item& item, double corners[4][3
     return true;
 }
 
+// A box of cells in the world (`cells` of a world item): the faces turned to
+// the camera, filled with their cell's color and outlined with it more
+// opaque, the farthest first; at most kMaxWorldFaces.
+constexpr size_t kMaxWorldFaces = 30000;
+void draw_world_cells(const Context& c, const Item& item, const WorldView& view) {
+    constexpr double kNear = 0.05;
+    const VoxelMesh& mesh = *item.world_cells;
+    const double s = item.world_cells_size;
+    struct Shown {
+        double depth;
+        ImVec2 points[8];
+        int count;
+        ImU32 fill, edge;
+    };
+    std::vector<Shown> shown;
+    shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
+    static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (const VoxelFace& face : mesh.faces) {
+        if (face.inner) continue;
+        if (shown.size() >= kMaxWorldFaces) break;
+        const int axis = face.direction / 2;
+        const bool positive = face.direction % 2 == 1;
+        const double base[3] = {item.world_cells_origin[0] + face.x * s, item.world_cells_origin[1] + face.y * s,
+            item.world_cells_origin[2] + face.z * s};
+        const double plane = base[axis] + (positive ? s : 0.0);
+        // Only the faces turned to the camera.
+        if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
+        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+        double in[4][3];
+        double centre[3] = {0.0, 0.0, 0.0};
+        for (int k = 0; k < 4; ++k) {
+            double corner[3];
+            corner[axis] = plane;
+            corner[u] = base[u] + kSquare[k][0] * s;
+            corner[v] = base[v] + kSquare[k][1] * s;
+            view.to_camera(corner, in[k]);
+            for (int i = 0; i < 3; ++i) centre[i] += in[k][i] * 0.25;
+        }
+        Shown entry{};
+        for (int k = 0; k < 4; ++k) {
+            const double* a = in[k];
+            const double* b = in[(k + 1) % 4];
+            if (a[2] >= kNear) entry.points[entry.count++] = view.to_screen(a);
+            if ((a[2] >= kNear) != (b[2] >= kNear)) {
+                const double t = (kNear - a[2]) / (b[2] - a[2]);
+                const double cut[3] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, kNear};
+                entry.points[entry.count++] = view.to_screen(cut);
+            }
+        }
+        if (entry.count < 3) continue;
+        const ImU32 color = item.cell_colors[face.ch];
+        entry.depth = centre[2];
+        entry.fill = fade(c, color);
+        entry.edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 230));
+        shown.push_back(entry);
+    }
+    std::sort(shown.begin(), shown.end(), [](const Shown& a, const Shown& b) { return a.depth > b.depth; });
+    for (const Shown& entry : shown) {
+        c.list.AddConvexPolyFilled(entry.points, entry.count, entry.fill);
+        c.list.AddPolyline(entry.points, entry.count, entry.edge, 1.5f * c.scale, ImDrawFlags_Closed);
+    }
+}
+
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
     LocalCamera camera;
@@ -489,6 +552,7 @@ void draw_world(const Context& c, const Item& item) {
         }
         c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, color), width * c.scale);
     };
+    if (item.world_cells) draw_world_cells(c, item, view);
     // Quads first, under the lines; the part behind the camera cut off.
     for (const WorldQuad& quad : item.world_quads) {
         double in[4][3];
