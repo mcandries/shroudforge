@@ -4,6 +4,8 @@
 // runs a render pass over the swapchain image (load, draw, store), submits it
 // after the game's wait semaphores and makes the real present wait on it. The
 // ImGui backend is initialized on the first such present, with that queue.
+// When a zone draws off screen (see Offscreen), a pass over an image as large
+// as the screen runs first (clear, draw), and the zones show it as a texture.
 
 #include "draw_scene.h"
 #include "overlay.h"
@@ -16,12 +18,16 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 
 namespace overlay {
 
 namespace {
 
 constexpr uint32_t kFrames = 4;
+// ImGui vertex buffers: one set per frame for the zones, one for the
+// off-screen pass.
+constexpr uint32_t kDrawsPerFrame = 2;
 constexpr wchar_t kDefaultFont[] = L"C:\\Windows\\Fonts\\segoeui.ttf";
 
 struct FrameSlot {
@@ -29,6 +35,19 @@ struct FrameSlot {
     VkFence fence{};
     VkSemaphore done{};
     bool submitted = false;
+};
+
+// The off-screen image, in the swapchain's format so that the ImGui pipeline
+// draws into it as into the swapchain image.
+struct OffscreenTarget {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkImageView view{};
+    VkFramebuffer framebuffer{};
+    VkDescriptorSet texture{};
+    VkExtent2D extent{};
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    bool failed = false;  // Not created for this extent and format: views are drawn directly.
 };
 
 }  // namespace
@@ -41,6 +60,10 @@ struct Renderer {
     FrameSlot frames[kFrames];
     uint32_t next_frame = 0;
     std::unordered_map<VkFormat, VkRenderPass> passes;
+    std::unordered_map<VkFormat, VkRenderPass> offscreen_passes;
+    OffscreenTarget offscreen;
+    std::unique_ptr<ImDrawList> offscreen_list;
+    bool offscreen_used = false;
     VkFormat pipeline_format = VK_FORMAT_UNDEFINED;
     ImGuiContext* context{};
     bool backend_ready = false;
@@ -108,6 +131,49 @@ VkRenderPass pass_for(DeviceData& d, Renderer& r, VkFormat format) {
     info.pSubpasses = &subpass;
     info.dependencyCount = 1;
     info.pDependencies = &dependency;
+    if (d.fn.CreateRenderPass(d.device, &info, nullptr, &pass) != VK_SUCCESS) pass = VK_NULL_HANDLE;
+    return pass;
+}
+
+// Clears the off-screen image, then leaves it for the zones' pass to sample.
+VkRenderPass offscreen_pass_for(DeviceData& d, Renderer& r, VkFormat format) {
+    auto& pass = r.offscreen_passes[format];
+    if (pass) return pass;
+    VkAttachmentDescription attachment{};
+    attachment.format = format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color;
+    // After the previous frame sampled it; before this frame samples it.
+    VkSubpassDependency dependencies[2]{};
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    info.attachmentCount = 1;
+    info.pAttachments = &attachment;
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 2;
+    info.pDependencies = dependencies;
     if (d.fn.CreateRenderPass(d.device, &info, nullptr, &pass) != VK_SUCCESS) pass = VK_NULL_HANDLE;
     return pass;
 }
@@ -180,7 +246,7 @@ bool init_backend(DeviceData& d, Renderer& r, VkFormat format) {
     info.Queue = r.queue;
     info.DescriptorPoolSize = 128;
     info.MinImageCount = 2;
-    info.ImageCount = kFrames;
+    info.ImageCount = kFrames * kDrawsPerFrame;
     info.PipelineInfoMain.RenderPass = pass;
     info.CheckVkResultFn = check_result;
     if (!ImGui_ImplVulkan_Init(&info)) {
@@ -254,6 +320,88 @@ void wait_frames(DeviceData& d, Renderer& r) {
         d.fn.ResetFences(d.device, 1, &frame.fence);
         frame.submitted = false;
     }
+}
+
+void release_offscreen(DeviceData& d, Renderer& r) {
+    OffscreenTarget& o = r.offscreen;
+    if (o.image || o.texture) wait_frames(d, r);
+    if (o.texture) ImGui_ImplVulkan_RemoveTexture(o.texture);
+    if (o.framebuffer) d.fn.DestroyFramebuffer(d.device, o.framebuffer, nullptr);
+    if (o.view) d.fn.DestroyImageView(d.device, o.view, nullptr);
+    if (o.image) d.fn.DestroyImage(d.device, o.image, nullptr);
+    if (o.memory) d.fn.FreeMemory(d.device, o.memory, nullptr);
+    o = OffscreenTarget{};
+}
+
+bool create_offscreen(DeviceData& d, Renderer& r, VkExtent2D extent, VkFormat format) {
+    OffscreenTarget& o = r.offscreen;
+    o.extent = extent;
+    o.format = format;
+    VkRenderPass pass = offscreen_pass_for(d, r, format);
+    if (!pass) return false;
+    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = {extent.width, extent.height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (d.fn.CreateImage(d.device, &image_info, nullptr, &o.image) != VK_SUCCESS) return false;
+    VkMemoryRequirements requirements{};
+    d.fn.GetImageMemoryRequirements(d.device, o.image, &requirements);
+    auto memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        d.instance->next_gipa(d.instance->instance, "vkGetPhysicalDeviceMemoryProperties"));
+    if (!memory_properties) return false;
+    VkPhysicalDeviceMemoryProperties properties{};
+    memory_properties(d.physical_device, &properties);
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < properties.memoryTypeCount && type == UINT32_MAX; ++i)
+        if ((requirements.memoryTypeBits & (1u << i)) &&
+                (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            type = i;
+    if (type == UINT32_MAX) return false;
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = type;
+    if (d.fn.AllocateMemory(d.device, &allocate, nullptr, &o.memory) != VK_SUCCESS) return false;
+    if (d.fn.BindImageMemory(d.device, o.image, o.memory, 0) != VK_SUCCESS) return false;
+    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.image = o.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (d.fn.CreateImageView(d.device, &view_info, nullptr, &o.view) != VK_SUCCESS) return false;
+    VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    framebuffer_info.renderPass = pass;
+    framebuffer_info.attachmentCount = 1;
+    framebuffer_info.pAttachments = &o.view;
+    framebuffer_info.width = extent.width;
+    framebuffer_info.height = extent.height;
+    framebuffer_info.layers = 1;
+    if (d.fn.CreateFramebuffer(d.device, &framebuffer_info, nullptr, &o.framebuffer) != VK_SUCCESS) return false;
+    o.texture = ImGui_ImplVulkan_AddTexture(o.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return o.texture != VK_NULL_HANDLE;
+}
+
+// The off-screen image for this extent and format, created or recreated as
+// needed; false when it cannot be (then logged once).
+bool ensure_offscreen(DeviceData& d, Renderer& r, VkExtent2D extent, VkFormat format) {
+    OffscreenTarget& o = r.offscreen;
+    const bool same = o.extent.width == extent.width && o.extent.height == extent.height && o.format == format;
+    if (same && (o.texture || o.failed)) return !o.failed;
+    release_offscreen(d, r);
+    if (create_offscreen(d, r, extent, format)) return true;
+    release_offscreen(d, r);
+    r.offscreen.extent = extent;
+    r.offscreen.format = format;
+    r.offscreen.failed = true;
+    log_line("off-screen target unavailable (%ux%u, format %d), views drawn directly", extent.width, extent.height,
+        static_cast<int>(format));
+    return false;
 }
 
 }  // namespace
@@ -332,12 +480,29 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.last_tick = now;
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    if (!r.offscreen_list) r.offscreen_list = std::make_unique<ImDrawList>(ImGui::GetDrawListSharedData());
+    ImDrawList& offscreen = *r.offscreen_list;
+    offscreen._ResetForNewFrame();
+    offscreen.PushTexture(io.Fonts->TexRef);
+    offscreen.PushClipRectFullScreen();
+    r.offscreen_used = false;
     DrawResources resources{
         [&](const std::string& path) { return font_for(r, path); },
         [&](Image& image) { return texture_for(r, image); },
+        [&]() -> Offscreen {
+            if (!ensure_offscreen(d, r, target->extent, target->format)) return {};
+            r.offscreen_used = true;
+            return {&offscreen, ImTextureRef(reinterpret_cast<ImTextureID>(r.offscreen.texture)), io.DisplaySize};
+        },
     };
     draw_scene(*ImGui::GetForegroundDrawList(), scene, io.DisplaySize, resources);
     ImGui::Render();
+    // Textures first: the off-screen pass may use the font atlas before the
+    // zones' pass would upload it.
+    ImDrawData* zones = ImGui::GetDrawData();
+    if (zones->Textures)
+        for (ImTextureData* texture : *zones->Textures)
+            if (texture->Status != ImTextureStatus_OK) ImGui_ImplVulkan_UpdateTexture(texture);
 
     // Record: one render pass over the presented image.
     VkCommandBuffer cb = frame.command_buffer;
@@ -345,12 +510,30 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     d.fn.BeginCommandBuffer(cb, &begin);
+    if (r.offscreen_used) {
+        ImDrawData data;
+        data.Valid = true;
+        data.DisplayPos = ImVec2(0.0f, 0.0f);
+        data.DisplaySize = io.DisplaySize;
+        data.FramebufferScale = ImVec2(1.0f, 1.0f);
+        data.AddDrawList(&offscreen);
+        VkClearValue clear{};
+        VkRenderPassBeginInfo offscreen_begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        offscreen_begin.renderPass = offscreen_pass_for(d, r, r.offscreen.format);
+        offscreen_begin.framebuffer = r.offscreen.framebuffer;
+        offscreen_begin.renderArea.extent = r.offscreen.extent;
+        offscreen_begin.clearValueCount = 1;
+        offscreen_begin.pClearValues = &clear;
+        d.fn.CmdBeginRenderPass(cb, &offscreen_begin, VK_SUBPASS_CONTENTS_INLINE);
+        ImGui_ImplVulkan_RenderDrawData(&data, cb);
+        d.fn.CmdEndRenderPass(cb);
+    }
     VkRenderPassBeginInfo pass_begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     pass_begin.renderPass = pass;
     pass_begin.framebuffer = target->framebuffers[image_index];
     pass_begin.renderArea.extent = target->extent;
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cb);
+    ImGui_ImplVulkan_RenderDrawData(zones, cb);
     d.fn.CmdEndRenderPass(cb);
     d.fn.EndCommandBuffer(cb);
 
@@ -391,6 +574,8 @@ void destroy_renderer(DeviceData& d) {
     d.fn.DeviceWaitIdle(d.device);
     if (r->context) {
         ImGui::SetCurrentContext(r->context);
+        if (r->backend_ready) release_offscreen(d, *r);
+        r->offscreen_list.reset();
         if (r->backend_ready) ImGui_ImplVulkan_Shutdown();
         for (ImTextureData* texture : r->textures) ImGui::UnregisterUserTexture(texture);
         ImGui::DestroyContext(r->context);
@@ -403,6 +588,8 @@ void destroy_renderer(DeviceData& d) {
     }
     if (r->pool) d.fn.DestroyCommandPool(d.device, r->pool, nullptr);
     for (auto& [format, pass] : r->passes)
+        if (pass) d.fn.DestroyRenderPass(d.device, pass, nullptr);
+    for (auto& [format, pass] : r->offscreen_passes)
         if (pass) d.fn.DestroyRenderPass(d.device, pass, nullptr);
     delete r;
     d.renderer = nullptr;
