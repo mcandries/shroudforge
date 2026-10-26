@@ -9,6 +9,8 @@
 
 #include "overlay.h"
 
+#include "camera_probe.h"
+
 #include <intrin.h>
 
 #include <cstring>
@@ -113,6 +115,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
 #define OVERLAY_LOAD(name) d->fn.name = reinterpret_cast<PFN_vk##name>(next_gdpa(*device, "vk" #name));
     OVERLAY_DEVICE_FUNCTIONS(OVERLAY_LOAD)
 #undef OVERLAY_LOAD
+    if (is_game_process()) camera_probe_attach(next_gdpa, *device);
     {
         std::lock_guard lock(state_mutex);
         devices[dispatch_key(*device)] = d;
@@ -194,6 +197,7 @@ VKAPI_ATTR void VKAPI_CALL DestroySwapchainKHR(VkDevice device, VkSwapchainKHR s
 
 VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     DeviceData* d = device_of(dispatch_key(queue));
+    camera_probe_frame();
     VkSemaphore done = VK_NULL_HANDLE;
     {
         std::lock_guard render(d->render_mutex);
@@ -216,6 +220,7 @@ PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(CreateSwapchainKHR);
     INTERCEPT(DestroySwapchainKHR);
     INTERCEPT(QueuePresentKHR);
+    if (PFN_vkVoidFunction probe = camera_probe_function(requested)) return probe;
     return nullptr;
 }
 
