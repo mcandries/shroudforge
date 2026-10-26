@@ -881,6 +881,12 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     for (const VoxelMark& mark : mesh.marks)
         c.list.AddCircleFilled(project(mark.x + 0.5f, mark.y + 0.5f, mark.z + 0.5f), dot,
             fade(c, item.cell_marks[mark.ch]), 12);
+    // Lines over everything, in cells of the box.
+    for (const WorldLine& line : item.world_lines)
+        c.list.AddLine(project(static_cast<float>(line.from[0]), static_cast<float>(line.from[1]),
+                           static_cast<float>(line.from[2])),
+            project(static_cast<float>(line.to[0]), static_cast<float>(line.to[1]), static_cast<float>(line.to[2])),
+            fade(c, line.color), line.width * c.scale);
     c.list.PopClipRect();
 }
 

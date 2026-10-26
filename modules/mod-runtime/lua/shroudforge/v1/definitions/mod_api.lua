@@ -124,7 +124,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field follow_camera? boolean Voxels: turn with the game's camera at every frame (its yaw plus `camera_offset`); `yaw` is used while the camera cannot be read.
 --- @field camera_offset? number Voxels: degrees added to the game camera's yaw with `follow_camera`.
 --- @field points? table[] World: up to 256 `{at = {x, y, z}, color?, size?, shape?}` in meters, drawn where the game's camera puts them at every frame; shape `ring` (default), `cross` or `dot`.
---- @field lines? table[] World: up to 256 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters.
+--- @field lines? table[] World: up to 2048 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters; voxels: up to 256 in cells of the box, drawn over everything.
 --- @field aim_face? table World: `{color?, width?, origin?, cell?}`, the face the building cursor aims at, outlined at every frame.
 --- @field cells? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data, colors, smooth?, edge_opacity?}`, a box of cells drawn in the world; `smooth`: outlined only where its surface turns; `edge_opacity`: 0 to 1 (0.9).
 --- @field solids? table World: `{origin = {x, y, z}, cell?, box = {x, y, z}, data}`, filled cells (`#` in `data`): the item's cells, quads and lines behind them are drawn lighter.
