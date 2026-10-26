@@ -151,6 +151,8 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field plain? boolean Voxels: solid view without outlines nor anti-aliased borders, one continuous surface.
 --- @field ease? number Voxels: seconds a new yaw or pitch takes to be reached (the view turns), 0 at once. Default 0.
 --- @field perspective? number Voxels: 0 a parallel view, up to 1 a perspective with a field of 90 degrees. Default 0.
+--- @field follow_camera? boolean Voxels: turn with the game's camera at every frame (its yaw plus `camera_offset`); `yaw` is used while the camera cannot be read.
+--- @field camera_offset? number Voxels: degrees added to the game camera's yaw with `follow_camera`.
 --- @field points? table[] World: up to 256 `{at = {x, y, z}, color?, size?, shape?}` in meters, drawn where the game's camera puts them at every frame; shape `ring` (default), `cross` or `dot`.
 --- @field lines? table[] World: up to 256 `{from = {x, y, z}, to = {x, y, z}, color?, width?}` in meters.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.

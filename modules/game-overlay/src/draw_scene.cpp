@@ -478,6 +478,15 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     constexpr float kRadians = 3.14159265f / 180.0f;
     const double now = ImGui::GetTime();
     float yaw_degrees = item.yaw + item.spin * static_cast<float>(now), pitch_degrees = item.pitch;
+    // Following the game's camera: its yaw for this frame, plus the offset.
+    // Not eased: it already moves with the camera at every frame.
+    bool following = false;
+    WorldView game;
+    if (item.follow_camera && world_view(game)) {
+        yaw_degrees = static_cast<float>(std::atan2(game.forward[0], game.forward[2])) / kRadians + item.camera_offset +
+            item.spin * static_cast<float>(now);
+        following = true;
+    }
     if (item.ease > 0.0f) {
         static std::unordered_map<std::string, ShownCamera> shown;
         const auto [entry, created] = shown.try_emplace(c.zone, ShownCamera{yaw_degrees, pitch_degrees, now});
@@ -485,7 +494,7 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         if (!created) {
             // About 95 % of the way after `ease` seconds, the short way round.
             const float step = 1.0f - std::exp(-static_cast<float>(now - camera.time) * 3.0f / item.ease);
-            camera.yaw += std::remainder(yaw_degrees - camera.yaw, 360.0f) * step;
+            camera.yaw = following ? yaw_degrees : camera.yaw + std::remainder(yaw_degrees - camera.yaw, 360.0f) * step;
             camera.pitch += (pitch_degrees - camera.pitch) * step;
         }
         camera.time = now;
