@@ -122,16 +122,53 @@ local VoxelViewJob = {}
 --- @return {box: integer[], cells: string, seconds: number}?
 function VoxelViewJob:result() end
 
+--- @class ShroudForgeWorldCellsJob
+local WorldCellsJob = {}
+--- Nil while the build is being made, then its tiles (nil past `total` cells), its solids (nil
+--- past `solids_max` cells) and the build time.
+--- @return {cells: {tiles: {lo: integer[], box: integer[], data: string, changed: integer}[], changed: integer}?, solids: {lo: integer[], box: integer[], data: string, filled: integer}?, seconds: number}?
+function WorldCellsJob:result() end
+
+--- @class ShroudForgeVoxelChunks
+local VoxelChunks = {}
+--- Keep the chunk at origin / 16 = x, y, z: 8192 bytes of little-endian u16, one value for
+--- every cell, or nil (forgotten, read as not read).
+--- @param x integer
+--- @param y integer
+--- @param z integer
+--- @param cells string|integer|nil
+function VoxelChunks:set(x, y, z, cells) end
+--- Forget every chunk.
+function VoxelChunks:clear() end
+--- @return integer
+function VoxelChunks:count() end
+
 --- @class ShroudForgeVoxels
 shroudforge.voxels = {}
+
+--- A store of the chunks a mod read, kept on the native side: `view3d` and `world` take the
+--- chunks they need from it without copying them again.
+--- @return ShroudForgeVoxelChunks
+function shroudforge.voxels.chunks() end
+
+--- Build, on a thread of its own, what a build changes in the world, as tiles of at most `tile`
+--- cells a side (256; the empty ones left out): run-length text as for `view3d`, `+` a cell
+--- filled (or replaced, unless `plan.only_empty` keeps the blocks there; a cell not read counts
+--- as empty), `-` a block removed, `.` the rest; and the filled cells `margin` around lo..hi (8,
+--- less on an axis over 128), `#` a filled cell the build does not change.
+--- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, tile: integer?, total: integer?, margin: integer?, solids_max: integer?}
+--- `lo`..`hi`: the build's box, or the start cell alone; `chunks` and `plan` as for `view3d`.
+--- @return ShroudForgeWorldCellsJob
+function shroudforge.voxels.world(params) end
 --- Build a 3D view of cells lo..hi (256 a side, 8 388 608 cells at most) on a thread of its own,
 --- from the chunks a mod already read: run-length text, x fastest, then y, then z, a decimal count
 --- before a character repeating it. Characters: `.` air, `#` block, `%` terrain, `^` roof, `+`
 --- planned to build, `-` planned to remove, `S` start, `E` end, `P` the player, `?` not read.
 --- Ask the returned job at the next updates: the mod never waits.
---- @param params {lo: integer[], hi: integer[], chunks: table[]?, plan: table?, start: integer[]?, finish: integer[]?, player: integer[]?, roofs: integer[]?, surface: boolean?, depth: integer?}
---- `chunks`: {x, y, z, cells} per 16 x 16 x 16 chunk (origin divided by 16; cells 8192 bytes of
---- little-endian u16, or one value for every cell); a missing chunk reads as not read. `plan`:
+--- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, start: integer[]?, finish: integer[]?, player: integer[]?, roofs: integer[]?, surface: boolean?, depth: integer?}
+--- `chunks`: a store (`shroudforge.voxels.chunks()`), or {x, y, z, cells} per 16 x 16 x 16 chunk
+--- (origin divided by 16; cells 8192 bytes of little-endian u16, or one value for every cell),
+--- copied; a missing chunk reads as not read. `plan`:
 --- {kind = "add"|"remove", only_empty, lo, hi, cells = {x1, y1, z1, ...} or nil for the whole box}.
 --- `surface`: terrain only `depth` cells deep under the open air, and around the plan.
 --- @return ShroudForgeVoxelViewJob

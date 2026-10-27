@@ -25,6 +25,7 @@ pub(crate) mod values;
 pub(crate) mod shroudforge {
     pub(crate) mod v1 {
         mod build_voxel_view;
+        mod build_world_cells;
         mod create_mod_api;
         mod create_voxel_view_api;
         mod dispatch_mod_ui_actions;
@@ -32,6 +33,7 @@ pub(crate) mod shroudforge {
         pub(crate) mod read_runtime_operations;
         mod read_ui_locale;
         mod set_mod_settings;
+        mod voxel_chunk_store;
         pub(crate) use create_mod_api::create;
         pub(crate) use dispatch_mod_ui_actions::{dispatch_ui_actions, invoke_mod_action};
         pub(crate) use set_mod_settings::set_settings;

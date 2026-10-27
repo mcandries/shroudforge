@@ -1,0 +1,257 @@
+use std::collections::HashMap;
+
+use super::build_voxel_view::{chunk_value, flush, plan_contains, ChunkCells, ViewPlan};
+
+/// A build shown in the world, as Architect Line's preview.world_tiles and
+/// preview.world_solids make it.
+pub(crate) struct WorldInput {
+    /// Chunks by origin divided by CHUNK; a chunk missing reads as not read.
+    pub chunks: HashMap<[i32; 3], ChunkCells>,
+    /// The cells the build changes (none: only the filled cells around).
+    pub plan: Option<ViewPlan>,
+    /// The build's box: the plan's, or the start cell alone.
+    pub lo: [i32; 3],
+    pub hi: [i32; 3],
+    /// Tiles of at most `tile` cells a side; none past `total` cells in the plan's box.
+    pub tile: i32,
+    pub total: usize,
+    /// Filled cells `margin` around the box (less on an axis over 128), none past `solids_max` cells.
+    pub margin: i32,
+    pub solids_max: usize,
+}
+
+/// A box of cells, run-length text x fastest, then y, then z, and how many of
+/// them are not `.`.
+pub(crate) struct WorldBox {
+    pub lo: [i32; 3],
+    pub size: [usize; 3],
+    pub data: String,
+    pub count: usize,
+}
+
+pub(crate) struct WorldCells {
+    /// The tiles that change something, and the cells changed in all.
+    pub tiles: Option<(Vec<WorldBox>, usize)>,
+    /// The filled cells around: `#` a filled cell the build does not change.
+    pub solids: Option<WorldBox>,
+}
+
+/// Run-length text of `size` cells from `lo`, each from `cell`, with the
+/// number of cells not `.`.
+fn run_length(lo: [i32; 3], hi: [i32; 3], mut cell: impl FnMut(i32, i32, i32) -> u8) -> (String, usize) {
+    let mut text = String::new();
+    let (mut last, mut run, mut count) = (0u8, 0usize, 0usize);
+    for z in lo[2]..=hi[2] {
+        for y in lo[1]..=hi[1] {
+            for x in lo[0]..=hi[0] {
+                let ch = cell(x, y, z);
+                if ch != b'.' {
+                    count += 1;
+                }
+                if ch == last {
+                    run += 1;
+                } else {
+                    flush(&mut text, last, run);
+                    last = ch;
+                    run = 1;
+                }
+            }
+        }
+    }
+    flush(&mut text, last, run);
+    (text, count)
+}
+
+fn size_of(lo: [i32; 3], hi: [i32; 3]) -> [usize; 3] {
+    [(hi[0] - lo[0] + 1) as usize, (hi[1] - lo[1] + 1) as usize, (hi[2] - lo[2] + 1) as usize]
+}
+
+/// The build in the world, many times faster than the mod's own Lua: `+` a
+/// cell filled (or replaced, unless the plan keeps the blocks there, a cell
+/// not read counting as empty), `-` a block removed, `.` the rest.
+pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
+    let tiles = input.plan.as_ref().and_then(|plan| {
+        let size = size_of(plan.lo, plan.hi);
+        if size.iter().product::<usize>() > input.total {
+            return None;
+        }
+        let step = input.tile.max(1) as usize;
+        let (mut tiles, mut changed) = (Vec::new(), 0usize);
+        for z in (plan.lo[2]..=plan.hi[2]).step_by(step) {
+            for y in (plan.lo[1]..=plan.hi[1]).step_by(step) {
+                for x in (plan.lo[0]..=plan.hi[0]).step_by(step) {
+                    let lo = [x, y, z];
+                    let hi = [
+                        (x + input.tile - 1).min(plan.hi[0]),
+                        (y + input.tile - 1).min(plan.hi[1]),
+                        (z + input.tile - 1).min(plan.hi[2]),
+                    ];
+                    let (data, count) = run_length(lo, hi, |x, y, z| {
+                        if !plan_contains(plan, [x, y, z]) {
+                            return b'.';
+                        }
+                        let full = chunk_value(&input.chunks, x, y, z) > 0;
+                        if plan.add {
+                            // Building keeps the blocks already there (replace off).
+                            if plan.only_empty && full { b'.' } else { b'+' }
+                        } else if full {
+                            b'-'
+                        } else {
+                            b'.'
+                        }
+                    });
+                    if count > 0 {
+                        tiles.push(WorldBox { lo, size: size_of(lo, hi), data, count });
+                        changed += count;
+                    }
+                }
+            }
+        }
+        Some((tiles, changed))
+    });
+    let (mut lo, mut hi) = (input.lo, input.hi);
+    for axis in 0..3 {
+        let side = input.hi[axis] - input.lo[axis] + 1;
+        let margin = input.margin.min((128 - side).div_euclid(2)).max(0);
+        lo[axis] -= margin;
+        hi[axis] += margin;
+    }
+    let size = size_of(lo, hi);
+    let solids = if size.iter().any(|&side| side > 256) || size.iter().product::<usize>() > input.solids_max {
+        None
+    } else {
+        // A filled cell the build changes (removed, or replaced) hides nothing.
+        let changes = input.plan.as_ref().filter(|plan| !plan.add || !plan.only_empty);
+        let (data, count) = run_length(lo, hi, |x, y, z| {
+            let filled = chunk_value(&input.chunks, x, y, z) > 0;
+            if filled && !changes.is_some_and(|plan| plan_contains(plan, [x, y, z])) { b'#' } else { b'.' }
+        });
+        Some(WorldBox { lo, size, data, count })
+    };
+    WorldCells { tiles, solids }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn input(plan: Option<ViewPlan>, lo: [i32; 3], hi: [i32; 3]) -> WorldInput {
+        WorldInput { chunks: HashMap::new(), plan, lo, hi, tile: 256, total: 1 << 20, margin: 8, solids_max: 1 << 18 }
+    }
+
+    #[test]
+    fn a_line_over_a_block_keeps_it_and_the_rest_is_solids() {
+        // x = 2 is a block; the plan builds x = 0..3 at y = z = 0, keeping blocks.
+        let mut world = input(
+            Some(ViewPlan {
+                add: true,
+                only_empty: true,
+                lo: [0, 0, 0],
+                hi: [3, 0, 0],
+                cells: Some(HashSet::from([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]])),
+            }),
+            [0, 0, 0],
+            [3, 0, 0],
+        );
+        world.margin = 1;
+        world.chunks.insert([0, 0, 0], ChunkCells::Uniform(0));
+        let mut bytes = vec![0u8; 8192];
+        bytes[4] = 155; // x = 2
+        world.chunks.insert([0, 0, 0], ChunkCells::Packed(std::sync::Arc::new(bytes)));
+        let cells = build_world_cells(&world);
+        let (tiles, changed) = cells.tiles.unwrap();
+        assert_eq!((tiles.len(), changed), (1, 3));
+        assert_eq!(tiles[0].data, "2+.+");
+        assert_eq!(tiles[0].size, [4, 1, 1]);
+        // Solids: one cell around (x -1..4, y and z -1..1), the block at x = 2,
+        // which the build keeps (cells of chunk -1 not read: not filled).
+        let solids = cells.solids.unwrap();
+        assert_eq!((solids.lo, solids.size, solids.count), ([-1, -1, -1], [6, 3, 3], 1));
+        assert_eq!(solids.data, "27.#26.");
+    }
+
+    #[test]
+    fn removing_shows_only_the_blocks_there_and_hides_nothing() {
+        let mut world = input(
+            Some(ViewPlan { add: false, only_empty: false, lo: [0, 0, 0], hi: [1, 0, 0], cells: None }),
+            [0, 0, 0],
+            [1, 0, 0],
+        );
+        world.margin = 0;
+        world.chunks.insert([0, 0, 0], ChunkCells::Uniform(300));
+        let cells = build_world_cells(&world);
+        assert_eq!(cells.tiles.unwrap().0[0].data, "2-");
+        assert_eq!(cells.solids.unwrap().data, "2.");
+    }
+
+    #[test]
+    fn too_large_a_build_has_no_cells_and_a_start_alone_only_solids() {
+        let mut world = input(
+            Some(ViewPlan { add: true, only_empty: false, lo: [0, 0, 0], hi: [99, 99, 99], cells: None }),
+            [0, 0, 0],
+            [99, 99, 99],
+        );
+        world.total = 1000;
+        assert!(build_world_cells(&world).tiles.is_none());
+        let start = build_world_cells(&input(None, [5, 5, 5], [5, 5, 5]));
+        assert!(start.tiles.is_none());
+        assert_eq!(start.solids.unwrap().size, [17, 17, 17]);
+    }
+
+    /// Cross-check with a mod's own Lua builder: WORLD_CELLS_FIXTURE names a
+    /// JSON file of an input and the tiles and solids that builder made from
+    /// it (Architect Line's tools/world_cells_fixture.lua). Ignored without it.
+    #[test]
+    #[ignore]
+    fn same_world_as_a_fixture() {
+        let path = std::env::var("WORLD_CELLS_FIXTURE").expect("WORLD_CELLS_FIXTURE");
+        let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cell = |value: &serde_json::Value| -> [i32; 3] {
+            let list = value.as_array().unwrap();
+            [list[0].as_i64().unwrap() as i32, list[1].as_i64().unwrap() as i32, list[2].as_i64().unwrap() as i32]
+        };
+        let plan = &fixture["plan"];
+        let flat: Vec<i32> = plan["cells"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap() as i32).collect();
+        let mut world = input(
+            Some(ViewPlan {
+                add: plan["add"].as_bool().unwrap(),
+                only_empty: plan["only_empty"].as_bool().unwrap(),
+                lo: cell(&plan["lo"]),
+                hi: cell(&plan["hi"]),
+                cells: Some(flat.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()),
+            }),
+            cell(&fixture["lo"]),
+            cell(&fixture["hi"]),
+        );
+        world.margin = fixture["margin"].as_i64().unwrap() as i32;
+        world.tile = fixture["tile"].as_i64().unwrap() as i32;
+        for chunk in fixture["chunks"].as_array().unwrap() {
+            let cells = match &chunk[3] {
+                serde_json::Value::String(hex) => ChunkCells::Packed(std::sync::Arc::new(
+                    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect(),
+                )),
+                value => ChunkCells::Uniform(value.as_i64().unwrap() as i32),
+            };
+            world.chunks.insert(cell(chunk), cells);
+        }
+        let started = std::time::Instant::now();
+        let built = build_world_cells(&world);
+        eprintln!("built in {:?}", started.elapsed());
+        let expected = &fixture["expected"];
+        let (tiles, changed) = built.tiles.unwrap();
+        assert_eq!(changed as u64, expected["changed"].as_u64().unwrap());
+        let expected_tiles = expected["tiles"].as_array().unwrap();
+        assert_eq!(tiles.len(), expected_tiles.len());
+        for (tile, wanted) in tiles.iter().zip(expected_tiles) {
+            assert_eq!(tile.lo, cell(&wanted["lo"]));
+            assert_eq!(tile.data, wanted["data"].as_str().unwrap());
+            assert_eq!(tile.count as u64, wanted["changed"].as_u64().unwrap());
+        }
+        let solids = built.solids.unwrap();
+        assert_eq!(solids.lo, cell(&expected["solids"]["lo"]));
+        assert_eq!(solids.count as u64, expected["solids"]["filled"].as_u64().unwrap());
+        assert_eq!(solids.data, expected["solids"]["data"].as_str().unwrap());
+    }
+}
