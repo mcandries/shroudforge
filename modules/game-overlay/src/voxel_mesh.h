@@ -6,7 +6,9 @@
 #include <imgui.h>
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,14 @@ namespace overlay {
 
 constexpr int kMaxVoxelSide = 256;
 constexpr size_t kMaxVoxelFaces = 400000;
+// A box larger than this on a side also gets coarser meshes (2 and 4 cells a
+// cell), drawn when its cells would be smaller than a few pixels.
+constexpr int kVoxelLevelsFrom = 64;
+constexpr int kVoxelLevels = 2;
+// Most faces of the mesh a voxels view draws by default (`max_faces`): a
+// coarser one beyond (27/10: 256 x 64 x 256 in the large frame, 250 000
+// faces, 7 ms a frame).
+constexpr int kDefaultVoxelFaces = 120000;
 
 // One side of a cell. Directions: 0 = -x, 1 = +x, 2 = -y, 3 = +y, 4 = -z, 5 = +z.
 struct VoxelFace {
@@ -40,17 +50,44 @@ struct VoxelVisibility {
     std::vector<std::uint32_t> faces;
 };
 
+// Faces to draw from a camera, farthest first, kept while it does not move.
+struct VoxelOrder {
+    bool valid = false, xray = false, see_through = false;
+    float yaw = 0.0f, pitch = 0.0f, distance = 0.0f;
+    std::vector<std::uint32_t> faces;
+};
+
 struct VoxelMesh {
     int sx = 0, sy = 0, sz = 0;
+    int scale = 1;  // Cells of the box per cell of this mesh (coarser levels).
     std::vector<VoxelFace> faces;
     std::vector<VoxelMark> marks;
     std::vector<std::uint8_t> drawn;  // 1 for a drawn cell, x fastest, then y, then z.
     mutable VoxelVisibility visibility;
+    mutable VoxelOrder order;
+    // Coarser meshes of the same box, 2 then 4 cells a cell (a large box only).
+    std::vector<std::shared_ptr<const VoxelMesh>> coarser;
+};
+
+// A mesh built on the overlay's own thread (build_voxel_mesh_later): until it
+// is ready, the item shows the one it replaces (`previous`, set when its zone
+// replaces another), so a mod setting its zone never waits for the faces.
+struct VoxelSlot {
+    std::atomic<std::shared_ptr<const VoxelMesh>> ready;
+    std::shared_ptr<const VoxelMesh> previous;
+    std::shared_ptr<const VoxelMesh> shown() const {
+        auto mesh = ready.load();
+        return mesh ? mesh : previous;
+    }
 };
 
 // The sx * sy * sz characters of run-length `cells` (see build_voxel_mesh),
 // x fastest. Throws std::runtime_error on malformed input.
 std::vector<unsigned char> decode_voxel_cells(int sx, int sy, int sz, const std::string& cells);
+
+// Checks `cells` as decode_voxel_cells reads them, without decoding them.
+// Throws std::runtime_error on malformed input.
+void check_voxel_cells(int sx, int sy, int sz, const std::string& cells);
 
 // Decodes `cells`, run-length text of sx * sy * sz cells (x fastest, then y,
 // then z): each character is one cell, a decimal count before it repeats it
@@ -58,9 +95,19 @@ std::vector<unsigned char> decode_voxel_cells(int sx, int sy, int sz, const std:
 // color. Keeps every face of a drawn cell that touches a cell not drawn (or
 // the outside of the box), the faces against a drawn cell of another
 // character (inner), and the cells whose character has a mark; marks the
-// creases of each face. Throws
-// std::runtime_error on malformed input.
+// creases of each face. With `levels`, a box over kVoxelLevelsFrom on a side
+// also gets its coarser meshes: each of their cells takes, among the cells it
+// covers, the drawn character the rarest in the box (a planned block, an
+// endpoint, a wall before the terrain), so that small things stay seen.
+// Throws std::runtime_error on malformed input.
 VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, const std::array<ImU32, 128>& colors,
-    const std::array<ImU32, 128>& marks);
+    const std::array<ImU32, 128>& marks, bool levels = false);
+
+// build_voxel_mesh on the overlay's thread, then `slot` filled, unless its
+// item is gone meanwhile (its zone replaced again: not built). Checked
+// input only (check_voxel_cells); an error goes to the log (27/10: 24 to 40
+// ms for 256 x 64 x 256, in overlay.set, on the game's mods loop).
+void build_voxel_mesh_later(const std::shared_ptr<VoxelSlot>& slot, int sx, int sy, int sz, std::string cells,
+    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels);
 
 }  // namespace overlay
