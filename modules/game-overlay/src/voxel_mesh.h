@@ -12,7 +12,7 @@
 
 namespace overlay {
 
-constexpr int kMaxVoxelSide = 128;
+constexpr int kMaxVoxelSide = 256;
 constexpr size_t kMaxVoxelFaces = 400000;
 
 // One side of a cell. Directions: 0 = -x, 1 = +x, 2 = -y, 3 = +y, 4 = -z, 5 = +z.
