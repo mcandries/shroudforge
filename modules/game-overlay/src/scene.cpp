@@ -298,11 +298,13 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
         }
         try {
-            item.voxels = std::make_shared<const VoxelMesh>(build_voxel_mesh(box[0], box[1], box[2],
-                value["cells"].get<std::string>(), item.cell_colors, item.cell_marks));
+            check_voxel_cells(box[0], box[1], box[2], value["cells"].get_ref<const std::string&>());
         } catch (const std::runtime_error& error) {
             fail(error.what());
         }
+        item.voxels = std::make_shared<VoxelSlot>();
+        build_voxel_mesh_later(item.voxels, box[0], box[1], box[2], value["cells"].get<std::string>(), item.cell_colors,
+            item.cell_marks, true);
         item.size = {240.0f, 180.0f};
         if (value.contains("size")) item.size = parse_pair(value["size"], "size");
         if (value.contains("yaw")) item.yaw = parse_number(value["yaw"], "yaw");
@@ -316,6 +318,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("camera_offset")) item.camera_offset = parse_number(value["camera_offset"], "camera_offset");
         if (value.contains("perspective"))
             item.perspective = std::clamp(parse_number(value["perspective"], "perspective"), 0.0f, 1.0f);
+        if (value.contains("max_faces"))
+            item.max_faces = static_cast<int>(
+                std::clamp(parse_number(value["max_faces"], "max_faces"), 1000.0f, static_cast<float>(kMaxVoxelFaces)));
         if (value.contains("ghost")) {
             if (!value["ghost"].is_string()) fail("voxels: ghost: expected characters");
             item.ghost = value["ghost"].get<std::string>();
@@ -409,11 +414,13 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 item.world_cells_edge_opacity =
                     std::clamp(parse_number(cells["edge_opacity"], "cells.edge_opacity"), 0.0f, 1.0f);
             try {
-                item.world_cells = std::make_shared<const VoxelMesh>(build_voxel_mesh(
-                    box[0], box[1], box[2], cells["data"].get<std::string>(), item.cell_colors, item.cell_marks));
+                check_voxel_cells(box[0], box[1], box[2], cells["data"].get_ref<const std::string&>());
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
+            item.world_cells = std::make_shared<VoxelSlot>();
+            build_voxel_mesh_later(item.world_cells, box[0], box[1], box[2], cells["data"].get<std::string>(),
+                item.cell_colors, item.cell_marks, false);
         }
         if (value.contains("solids")) {
             const auto& solids = value["solids"];
@@ -553,6 +560,26 @@ std::shared_ptr<Zone> parse_zone(const std::string& owner, const std::string& id
     return zone;
 }
 
+// The meshes of a zone's items, in order: voxels views, then world cells.
+void collect_slots(const std::vector<Item>& items, std::vector<VoxelSlot*>& voxels, std::vector<VoxelSlot*>& world) {
+    for (const Item& item : items) {
+        if (item.voxels) voxels.push_back(item.voxels.get());
+        if (item.world_cells) world.push_back(item.world_cells.get());
+        collect_slots(item.children, voxels, world);
+    }
+}
+
+// A zone replacing another: each of its meshes being built shows meanwhile
+// the one at the same place in the other (the n-th voxels view, the n-th
+// world cells), so the view does not blink at every change.
+void keep_meshes_shown(const Zone& old_zone, Zone& zone) {
+    std::vector<VoxelSlot*> old_voxels, old_world, voxels, world;
+    collect_slots(old_zone.items, old_voxels, old_world);
+    collect_slots(zone.items, voxels, world);
+    for (size_t i = 0; i < voxels.size() && i < old_voxels.size(); ++i) voxels[i]->previous = old_voxels[i]->shown();
+    for (size_t i = 0; i < world.size() && i < old_world.size(); ++i) world[i]->previous = old_world[i]->shown();
+}
+
 void write_error(const std::string& message, char* error, uint32_t error_size) {
     if (!error || error_size == 0) return;
     strncpy_s(error, error_size, message.c_str(), _TRUNCATE);
@@ -642,6 +669,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_SetZone(const char* owner, const char* id,
         auto zone = parse_zone(owner, id, json::parse(zone_json));
         std::lock_guard lock(scene_mutex);
         const auto key = std::make_pair(std::string(owner), std::string(id));
+        if (const auto old = zones.find(key); old != zones.end()) keep_meshes_shown(*old->second, *zone);
         if (!zones.count(key)) {
             const auto owned = std::count_if(zones.begin(), zones.end(), [&](auto& entry) { return entry.first.first == owner; });
             if (static_cast<size_t>(owned) >= kMaxZonesPerOwner) fail("too many zones for this mod (32 at most)");

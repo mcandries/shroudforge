@@ -553,9 +553,8 @@ bool behind_solids(const Item& item, const WorldView& view, const double point[3
 // faces tested).
 constexpr size_t kMaxWorldFaces = 30000;
 constexpr size_t kMaxHiddenTests = 4000;
-void draw_world_cells(const Context& c, const Item& item, const WorldView& view) {
+void draw_world_cells(const Context& c, const Item& item, const VoxelMesh& mesh, const WorldView& view) {
     constexpr double kNear = 0.05;
-    const VoxelMesh& mesh = *item.world_cells;
     const double s = item.world_cells_size;
     struct Shown {
         double depth;
@@ -663,7 +662,7 @@ void draw_world(const Context& c, const Item& item) {
         }
         c.list.AddLine(view.to_screen(a), view.to_screen(b), fade(c, color), width * c.scale);
     };
-    if (item.world_cells) draw_world_cells(c, item, view);
+    if (const auto mesh = item.world_cells ? item.world_cells->shown() : nullptr) draw_world_cells(c, item, *mesh, view);
     // Quads first, under the lines; the part behind the camera cut off.
     for (const WorldQuad& quad : item.world_quads) {
         double in[4][3];
@@ -718,8 +717,19 @@ void draw_world(const Context& c, const Item& item) {
     c.list.PopClipRect();
 }
 
+// Pixels a cell of the drawn mesh should at least take: smaller, a coarser
+// mesh of the box is drawn (27/10: 256 cells a side in the preview's frame,
+// about a pixel a cell, 21 ms a frame and 570 000 vertices). A mesh of more
+// faces than the item's `max_faces` too.
+constexpr float kLevelPixels = 2.0f;
+// Depth buckets of the farthest-first order (an order by buckets, not a sort).
+constexpr size_t kDepthBuckets = 16384;
+
 void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
-    const VoxelMesh& mesh = *item.voxels;
+    // Nothing until its first faces are built (then the last ones meanwhile).
+    const auto shown = item.voxels ? item.voxels->shown() : nullptr;
+    if (!shown) return;
+    const VoxelMesh& full = *shown;
     constexpr float kRadians = 3.14159265f / 180.0f;
     const double now = ImGui::GetTime();
     float yaw_degrees = item.yaw + item.spin * static_cast<float>(now), pitch_degrees = item.pitch;
@@ -753,10 +763,18 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     const float r[3] = {fz, 0.0f, -fx};
     const float f[3] = {fx * std::cos(pitch), -std::sin(pitch), fz * std::cos(pitch)};
     const float u[3] = {fx * std::sin(pitch), std::cos(pitch), fz * std::sin(pitch)};
-    const float diagonal = std::sqrt(static_cast<float>(mesh.sx * mesh.sx + mesh.sy * mesh.sy + mesh.sz * mesh.sz));
+    const float diagonal = std::sqrt(static_cast<float>(full.sx * full.sx + full.sy * full.sy + full.sz * full.sz));
     const float k = item.zoom * std::min(size.x, size.y) / std::max(1.0f, diagonal);
     const ImVec2 centre(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
-    const float half[3] = {mesh.sx * 0.5f, mesh.sy * 0.5f, mesh.sz * 0.5f};
+    const float half[3] = {full.sx * 0.5f, full.sy * 0.5f, full.sz * 0.5f};
+    // The mesh whose cells take at least kLevelPixels, within max_faces, or
+    // the coarsest.
+    const VoxelMesh* chosen = &full;
+    for (const auto& coarse : full.coarser)
+        if (k * chosen->scale < kLevelPixels || chosen->faces.size() > static_cast<size_t>(item.max_faces))
+            chosen = coarse.get();
+    const VoxelMesh& mesh = *chosen;
+    const float s = static_cast<float>(mesh.scale);
     // Perspective: the camera, `distance` from the centre, sees the box in a
     // field of up to 90 degrees; nearer points are drawn larger. The sphere
     // around the box shows as large as in the parallel view, so it still fits.
@@ -783,23 +801,24 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         z += f[2] * distance;
         return std::sqrt(x * x + y * y + z * z);
     };
-    // Whether a face is turned to the camera (from its centre in perspective).
+    // Whether a face is turned to the camera (from its centre in perspective),
+    // in cells of the box.
     const auto turned_to_camera = [&](const VoxelFace& face) {
         const float* n = kNormals[face.direction];
         if (distance <= 0.0f) return n[0] * f[0] + n[1] * f[1] + n[2] * f[2] < 0.0f;
-        const float x = face.x + 0.5f + n[0] * 0.5f - half[0] + f[0] * distance;
-        const float y = face.y + 0.5f + n[1] * 0.5f - half[1] + f[1] * distance;
-        const float z = face.z + 0.5f + n[2] * 0.5f - half[2] + f[2] * distance;
+        const float x = (face.x + 0.5f + n[0] * 0.5f) * s - half[0] + f[0] * distance;
+        const float y = (face.y + 0.5f + n[1] * 0.5f) * s - half[1] + f[1] * distance;
+        const float z = (face.z + 0.5f + n[2] * 0.5f) * s - half[2] + f[2] * distance;
         return n[0] * x + n[1] * y + n[2] * z < 0.0f;
     };
 
     c.list.PushClipRect(position, ImVec2(position.x + size.x, position.y + size.y), true);
     if (item.floor_grid > 0 && visible_color(item.grid_color)) {
         const ImU32 color = fade(c, shade(item.grid_color, 1.0f, item.opacity));
-        for (int x = 0; x <= mesh.sx; x += item.floor_grid)
-            c.list.AddLine(project(x, 0, 0), project(x, 0, mesh.sz), color);
-        for (int z = 0; z <= mesh.sz; z += item.floor_grid)
-            c.list.AddLine(project(0, 0, z), project(mesh.sx, 0, z), color);
+        for (int x = 0; x <= full.sx; x += item.floor_grid)
+            c.list.AddLine(project(x, 0, 0), project(x, 0, full.sz), color);
+        for (int z = 0; z <= full.sz; z += item.floor_grid)
+            c.list.AddLine(project(0, 0, z), project(full.sx, 0, z), color);
     }
 
     // Corners of each face of the unit cube, in order around it.
@@ -833,43 +852,112 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
         seen.pitch = pitch;
         seen.distance = distance;
     }
-    std::vector<std::pair<float, std::uint32_t>> order;
-    const auto add = [&](std::uint32_t i) {
-        const VoxelFace& face = mesh.faces[i];
-        const float* n = kNormals[face.direction];
-        order.emplace_back(depth(face.x + 0.5f + n[0] * 0.5f, face.y + 0.5f + n[1] * 0.5f, face.z + 0.5f + n[2] * 0.5f), i);
-    };
-    if (!see_through) {
-        order.reserve(mesh.faces.size());
-        for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+    // Farthest first, by depth buckets (no sort: 27/10, every face sorted at
+    // every frame), found again only when the camera moves.
+    VoxelOrder& order = mesh.order;
+    if (!order.valid || order.yaw != yaw || order.pitch != pitch || order.distance != distance ||
+        order.xray != item.xray || order.see_through != see_through) {
+        static thread_local std::vector<float> depths;
+        static thread_local std::vector<std::uint32_t> ids, counts;
+        depths.clear();
+        ids.clear();
+        const auto add = [&](std::uint32_t i) {
             const VoxelFace& face = mesh.faces[i];
-            if ((item.xray || !face.inner) && turned_to_camera(face)) add(i);
+            const float* n = kNormals[face.direction];
+            depths.push_back(depth((face.x + 0.5f + n[0] * 0.5f) * s, (face.y + 0.5f + n[1] * 0.5f) * s,
+                (face.z + 0.5f + n[2] * 0.5f) * s));
+            ids.push_back(i);
+        };
+        if (!see_through) {
+            for (std::uint32_t i = 0; i < mesh.faces.size(); ++i) {
+                const VoxelFace& face = mesh.faces[i];
+                if ((item.xray || !face.inner) && turned_to_camera(face)) add(i);
+            }
+        } else {
+            for (const std::uint32_t i : seen.faces) add(i);
         }
-    } else {
-        order.reserve(seen.faces.size());
-        for (const std::uint32_t i : seen.faces) add(i);
+        order.faces.resize(ids.size());
+        if (!ids.empty()) {
+            const auto [low, high] = std::minmax_element(depths.begin(), depths.end());
+            const float far = *high, range = std::max(1e-6f, *high - *low);
+            const float to_bucket = (kDepthBuckets - 1) / range;
+            counts.assign(kDepthBuckets + 1, 0);
+            for (const float d : depths) ++counts[static_cast<size_t>((far - d) * to_bucket) + 1];
+            for (size_t b = 1; b <= kDepthBuckets; ++b) counts[b] += counts[b - 1];
+            for (size_t i = 0; i < ids.size(); ++i)
+                order.faces[counts[static_cast<size_t>((far - depths[i]) * to_bucket)]++] = ids[i];
+        }
+        order.valid = true;
+        order.yaw = yaw;
+        order.pitch = pitch;
+        order.distance = distance;
+        order.xray = item.xray;
+        order.see_through = see_through;
     }
-    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     // Plain solid view: neither outlines nor anti-aliased borders, whose
     // overlaps would draw the seams between faces when see-through.
     const bool plain = item.plain && !item.xray;
-    const bool edges = !plain && visible_color(item.edge) && k >= 3.0f;
+    const bool edges = !plain && visible_color(item.edge) && k * s >= 3.0f;
     const ImDrawListFlags flags = faces.Flags;
     if (plain) faces.Flags &= ~ImDrawListFlags_AntiAliasedFill;
     // Off screen, the colors as they are: the opacity comes when laid over.
     const auto color = [&](ImU32 value) { return layered ? value : fade(c, value); };
-    for (const auto& [unused, i] : order) {
-        const VoxelFace& face = mesh.faces[i];
-        const bool ghost = item.xray && item.ghost.find(static_cast<char>(face.ch)) != std::string::npos;
-        const float alpha = (ghost ? item.ghost_alpha : 1.0f) * (layered ? 1.0f : item.opacity);
-        ImVec2 points[4];
+    const auto alpha_of = [&](unsigned char ch) {
+        const bool ghost = item.xray && item.ghost.find(static_cast<char>(ch)) != std::string::npos;
+        return (ghost ? item.ghost_alpha : 1.0f) * (layered ? 1.0f : item.opacity);
+    };
+    // Colors by direction and character, made once per frame.
+    ImU32 colors[6][128];
+    bool colored[128] = {};
+    const auto color_of = [&](const VoxelFace& face) {
+        if (!colored[face.ch]) {
+            const float alpha = alpha_of(face.ch);
+            for (int d = 0; d < 6; ++d) colors[d][face.ch] = color(shade(item.cell_colors[face.ch], kLight[d], alpha));
+            colored[face.ch] = true;
+        }
+        return colors[face.direction][face.ch];
+    };
+    // Corners in pixels: parallel, the projected origin plus a step per axis;
+    // in perspective, each projected.
+    const ImVec2 origin = project(0.0f, 0.0f, 0.0f);
+    ImVec2 axis_step[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        const ImVec2 end = project(axis == 0 ? s : 0.0f, axis == 1 ? s : 0.0f, axis == 2 ? s : 0.0f);
+        axis_step[axis] = ImVec2(end.x - origin.x, end.y - origin.y);
+    }
+    const auto corners_of = [&](const VoxelFace& face, ImVec2 points[4]) {
         for (int corner = 0; corner < 4; ++corner) {
             const float* p = kCorners[face.direction][corner];
-            points[corner] = project(face.x + p[0], face.y + p[1], face.z + p[2]);
+            const float x = face.x + p[0], y = face.y + p[1], z = face.z + p[2];
+            points[corner] = distance > 0.0f
+                ? project(x * s, y * s, z * s)
+                : ImVec2(origin.x + axis_step[0].x * x + axis_step[1].x * y + axis_step[2].x * z,
+                      origin.y + axis_step[0].y * x + axis_step[1].y * y + axis_step[2].y * z);
         }
-        faces.AddQuadFilled(points[0], points[1], points[2], points[3],
-            color(shade(item.cell_colors[face.ch], kLight[face.direction], alpha)));
-        if (edges) faces.AddQuad(points[0], points[1], points[2], points[3], color(shade(item.edge, 1.0f, alpha)));
+    };
+    if (plain) {
+        // Plain quads written straight into the list, by batches.
+        const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+        constexpr size_t kBatch = 8192;
+        for (size_t first = 0; first < order.faces.size(); first += kBatch) {
+            const size_t count = std::min(kBatch, order.faces.size() - first);
+            faces.PrimReserve(static_cast<int>(count * 6), static_cast<int>(count * 4));
+            for (size_t j = first; j < first + count; ++j) {
+                const VoxelFace& face = mesh.faces[order.faces[j]];
+                ImVec2 points[4];
+                corners_of(face, points);
+                faces.PrimQuadUV(points[0], points[1], points[2], points[3], uv, uv, uv, uv, color_of(face));
+            }
+        }
+    } else {
+        for (const std::uint32_t i : order.faces) {
+            const VoxelFace& face = mesh.faces[i];
+            ImVec2 points[4];
+            corners_of(face, points);
+            faces.AddQuadFilled(points[0], points[1], points[2], points[3], color_of(face));
+            if (edges)
+                faces.AddQuad(points[0], points[1], points[2], points[3], color(shade(item.edge, 1.0f, alpha_of(face.ch))));
+        }
     }
     faces.Flags = flags;
     if (layered) {
@@ -881,7 +969,7 @@ void draw_voxels(const Context& c, const Item& item, ImVec2 position, ImVec2 siz
     }
     // Marks on top: a dot at the centre of their cell.
     const float dot = std::max(2.0f, k * 0.35f);
-    for (const VoxelMark& mark : mesh.marks)
+    for (const VoxelMark& mark : full.marks)
         c.list.AddCircleFilled(project(mark.x + 0.5f, mark.y + 0.5f, mark.z + 0.5f), dot,
             fade(c, item.cell_marks[mark.ch]), 12);
     // Lines over everything, in cells of the box.
