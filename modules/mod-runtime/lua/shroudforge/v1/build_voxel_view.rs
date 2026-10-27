@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Side of the chunks a mod keeps its voxel reads in: 16 x 16 x 16 cells,
 /// x fastest, then y, then z.
@@ -6,13 +7,33 @@ pub(crate) const CHUNK: i32 = 16;
 
 /// What a mod read for one chunk: two bytes per cell (little-endian u16, the
 /// value `runtime.world.voxel.read` gives), one value for every cell, or
-/// nothing yet.
+/// nothing yet. Shared, so that a view takes the chunks a mod keeps on the
+/// native side (voxel_chunk_store) without copying them.
+#[derive(Clone)]
 pub(crate) enum ChunkCells {
-    Packed(Vec<u8>),
+    Packed(Arc<Vec<u8>>),
     Uniform(i32),
 }
 
+/// The value of a cell in `chunks`, -1 when its chunk was not read.
+pub(crate) fn chunk_value(chunks: &HashMap<[i32; 3], ChunkCells>, x: i32, y: i32, z: i32) -> i32 {
+    let key = [x.div_euclid(CHUNK), y.div_euclid(CHUNK), z.div_euclid(CHUNK)];
+    match chunks.get(&key) {
+        None => -1,
+        Some(ChunkCells::Uniform(value)) => *value,
+        Some(ChunkCells::Packed(bytes)) => {
+            let index =
+                (x.rem_euclid(CHUNK) + y.rem_euclid(CHUNK) * CHUNK + z.rem_euclid(CHUNK) * CHUNK * CHUNK) as usize * 2;
+            match bytes.get(index..index + 2) {
+                Some(pair) => i32::from(u16::from_le_bytes([pair[0], pair[1]])),
+                None => -1,
+            }
+        }
+    }
+}
+
 /// The cells a build changes, as the view draws them.
+#[derive(Clone)]
 pub(crate) struct ViewPlan {
     /// Building (true) or removing.
     pub add: bool,
@@ -159,7 +180,7 @@ pub(crate) fn build_voxel_view(input: &ViewInput) -> ([usize; 3], String) {
     (size, text)
 }
 
-fn flush(text: &mut String, ch: u8, run: usize) {
+pub(crate) fn flush(text: &mut String, ch: u8, run: usize) {
     if run == 0 {
         return;
     }
@@ -179,7 +200,7 @@ fn solid(value: i32, roofs: &HashSet<i32>) -> u8 {
     }
 }
 
-fn plan_contains(plan: &ViewPlan, cell: [i32; 3]) -> bool {
+pub(crate) fn plan_contains(plan: &ViewPlan, cell: [i32; 3]) -> bool {
     for axis in 0..3 {
         if cell[axis] < plan.lo[axis] || cell[axis] > plan.hi[axis] {
             return false;
@@ -194,21 +215,7 @@ fn read_values(input: &ViewInput, size: [usize; 3]) -> Vec<i32> {
     for z in input.lo[2]..=input.hi[2] {
         for y in input.lo[1]..=input.hi[1] {
             for x in input.lo[0]..=input.hi[0] {
-                let key = [x.div_euclid(CHUNK), y.div_euclid(CHUNK), z.div_euclid(CHUNK)];
-                let value = match input.chunks.get(&key) {
-                    None => -1,
-                    Some(ChunkCells::Uniform(value)) => *value,
-                    Some(ChunkCells::Packed(bytes)) => {
-                        let index = (x.rem_euclid(CHUNK) + y.rem_euclid(CHUNK) * CHUNK
-                            + z.rem_euclid(CHUNK) * CHUNK * CHUNK) as usize
-                            * 2;
-                        match bytes.get(index..index + 2) {
-                            Some(pair) => i32::from(u16::from_le_bytes([pair[0], pair[1]])),
-                            None => -1,
-                        }
-                    }
-                };
-                values.push(value);
+                values.push(chunk_value(&input.chunks, x, y, z));
             }
         }
     }
@@ -291,7 +298,7 @@ mod tests {
                 }
             }
         }
-        ChunkCells::Packed(bytes)
+        ChunkCells::Packed(Arc::new(bytes))
     }
 
     #[test]
@@ -350,9 +357,9 @@ mod tests {
         for chunk in fixture["chunks"].as_array().unwrap() {
             let key = cell(chunk);
             let cells = match &chunk[3] {
-                serde_json::Value::String(hex) => ChunkCells::Packed(
+                serde_json::Value::String(hex) => ChunkCells::Packed(Arc::new(
                     (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect(),
-                ),
+                )),
                 value => ChunkCells::Uniform(value.as_i64().unwrap() as i32),
             };
             view.chunks.insert(key, cells);
