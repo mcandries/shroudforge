@@ -14,7 +14,8 @@ struct Counter {
 Counter counters[static_cast<unsigned>(OperationTiming::Kind::Count)];
 constexpr const char* names[] = {"dispatch-wait", "dispatch-run", "drain-interval", "cursor-lock", "cursor-read",
     "cursor-resolve", "cursor-registry", "cursor-scan", "cursor-sample", "direct-resolve", "direct-run",
-    "membership", "membership-slots(count, shown as ms/1000)", "sample-copy", "page-query"};
+    "membership", "membership-slots(count, shown as ms/1000)", "sample-copy", "page-query",
+    "writer-resolve"};
 std::atomic<int> caller_priority{-99};
 }
 

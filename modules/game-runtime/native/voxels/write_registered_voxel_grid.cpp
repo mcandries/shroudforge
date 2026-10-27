@@ -4,6 +4,7 @@
 #include "impact/resolve_registered_operation.h"
 #include "code-inventory/resolve_original_call_graph.h"
 #include "named-services/named_service_contract.h"
+#include "game-thread/operation_timing.h"
 #include <atomic>
 #include <deque>
 #include <map>
@@ -236,6 +237,10 @@ bool code_unchanged(const WriterCode& code) {
 bool resolve_writer(std::uintptr_t root, WriterCode& output) {
     std::scoped_lock lock(resolution_mutex);
     if (cached.root == root && cached.writer && code_unchanged(cached)) { output = cached; return true; }
+    struct Timed {
+        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        ~Timed() { OperationTiming::Record(OperationTiming::Kind::WriterResolve, OperationTiming::MicrosecondsSince(started)); }
+    } timed;
     WriterCode result; result.root = root;
     if (!OriginalCode::FindUniqueReachable(root, 6, writer_contract, result.writer)) return false;
     Procedure writer, commit, dirty;
