@@ -24,7 +24,9 @@ pub(crate) mod resource_values;
 pub(crate) mod values;
 pub(crate) mod shroudforge {
     pub(crate) mod v1 {
+        mod build_voxel_view;
         mod create_mod_api;
+        mod create_voxel_view_api;
         mod dispatch_mod_ui_actions;
         pub(crate) mod game_overlay;
         mod read_monotonic_clock;
