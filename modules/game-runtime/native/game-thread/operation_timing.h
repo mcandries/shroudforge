@@ -23,6 +23,7 @@ enum class Kind : unsigned {
     MembershipSlots, // Slots visited by one id lookup (recorded as a count, not microseconds).
     SampleCopy,    // The copy of the local input (both copies).
     PageQuery,     // One VirtualQuery of a page before a read (readable()).
+    WriterResolve, // A full resolution of the voxel writer (not the cached one).
     Count
 };
 
