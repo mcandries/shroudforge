@@ -246,6 +246,8 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
             size.y = std::max(size.y, child_size.y);
         }
         if (item.children.size() > 1) size.x += item.spacing * c.scale * (item.children.size() - 1);
+        size.x += item.frame_padding.x * 2.0f * c.scale;
+        size.y += item.frame_padding.y * 2.0f * c.scale;
         return size;
     }
     case ItemKind::Flow:
@@ -939,11 +941,11 @@ void draw_drum(const Context& c, const Item& item, ImVec2 position, ImVec2 size)
             if (facing <= 0.15f) continue;
             const float away = std::min(1.0f, std::fabs(d));
             TextStyle style = item.style;
-            style.size = item.style.size * (1.0f - 0.32f * away);
+            style.size = item.style.size * (1.0f - 0.5f * away);
             style.color = mix(item.style.color, item.drum_dim, away);
             const char* text = item.drum_options[static_cast<size_t>(i)].c_str();
             const ImVec2 extent = text_size(c, style, text, nullptr, 0.0f);
-            const float y = min.y + size.y * 0.5f + std::sin(angle) * size.y * 0.62f - extent.y * 0.5f;
+            const float y = min.y + size.y * 0.5f + std::sin(angle) * size.y * 0.4f - extent.y * 0.5f;
             draw_text_run(c, style, ImVec2(min.x + (size.x - extent.x) * 0.5f, y), text, nullptr, 0.0f);
         }
     // Shaded towards the top and the bottom, as a cylinder.
@@ -972,6 +974,20 @@ void draw_icon(const Context& c, const Item& item, ImVec2 position, ImVec2 size)
 }
 
 void draw_row(const Context& c, const Item& item, ImVec2 position, ImVec2 size, float content_width) {
+    // Its frame, then its content inside the padding.
+    const float width = content_width < FLT_MAX ? content_width : size.x;
+    if (visible_color(item.background) || visible_color(item.frame_border)) {
+        const ImVec2 min = snap(position);
+        const ImVec2 max(min.x + width, min.y + size.y);
+        const float rounding = item.rounding * c.scale;
+        if (visible_color(item.background)) c.list.AddRectFilled(min, max, fade(c, item.background), rounding);
+        if (visible_color(item.frame_border))
+            c.list.AddRect(min, max, fade(c, item.frame_border), rounding, std::max(1.0f, c.scale));
+    }
+    const ImVec2 padding(item.frame_padding.x * c.scale, item.frame_padding.y * c.scale);
+    position = ImVec2(position.x + padding.x, position.y + padding.y);
+    size = ImVec2(size.x - padding.x * 2.0f, size.y - padding.y * 2.0f);
+    if (content_width < FLT_MAX) content_width -= padding.x * 2.0f;
     std::vector<ImVec2> sizes;
     float natural = 0.0f;
     int grows = 0;
