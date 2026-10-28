@@ -264,8 +264,30 @@ ImVec2 measure(const Context& c, const Item& item, float width) {
         return {item.size.x * c.scale, item.size.y * c.scale};
     case ItemKind::Grow:
         return {0.0f, 0.0f};
+    case ItemKind::Grid: {
+        size_t columns = 0;
+        for (const std::string& row : item.cells) columns = std::max(columns, row.size());
+        auto span = [&](size_t count) {
+            return count == 0 ? 0.0f : (count * item.cell + (count - 1) * item.gap) * c.scale;
+        };
+        return {span(columns), span(item.cells.size())};
+    }
     }
     return {0.0f, 0.0f};
+}
+
+void draw_grid(const Context& c, const Item& item, ImVec2 position) {
+    const float step = (item.cell + item.gap) * c.scale;
+    const float side = std::max(1.0f, item.cell * c.scale);
+    for (size_t y = 0; y < item.cells.size(); ++y) {
+        const std::string& row = item.cells[y];
+        for (size_t x = 0; x < row.size(); ++x) {
+            const ImU32 color = item.cell_colors[static_cast<unsigned char>(row[x])];
+            if (!visible_color(color)) continue;
+            const ImVec2 min = snap(ImVec2(position.x + x * step, position.y + y * step));
+            c.list.AddRectFilled(min, ImVec2(min.x + side, min.y + side), fade(c, color), item.rounding * c.scale);
+        }
+    }
 }
 
 void draw_icon(const Context& c, const Item& item, ImVec2 position, ImVec2 size) {
@@ -369,6 +391,9 @@ void draw_item(const Context& c, const Item& item, ImVec2 position, ImVec2 size,
         c.list.AddCircleFilled(ImVec2(x, min.y + radius), std::max(1.0f, knob), fade(c, item.knob), 16);
         break;
     }
+    case ItemKind::Grid:
+        draw_grid(c, item, position);
+        break;
     }
 }
 

@@ -23,6 +23,7 @@ constexpr size_t kMaxItemsPerZone = 256;
 constexpr size_t kMaxTextLength = 4096;
 constexpr size_t kMaxImages = 100;
 constexpr int kMaxDepth = 3;
+constexpr size_t kMaxGridSide = 64;
 
 std::mutex scene_mutex;
 std::map<std::pair<std::string, std::string>, std::shared_ptr<const Zone>> zones;
@@ -209,6 +210,27 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("color")) item.color = parse_color(value["color"], "color");
         if (value.contains("on_color")) item.on_color = parse_color(value["on_color"], "on_color");
         if (value.contains("knob")) item.knob = parse_color(value["knob"], "knob");
+    } else if (type == "grid") {
+        item.kind = ItemKind::Grid;
+        if (!value.contains("rows") || !value["rows"].is_array()) fail("grid: expected rows (strings)");
+        if (value["rows"].size() > kMaxGridSide) fail("grid: 64 rows at most");
+        for (const json& row : value["rows"]) {
+            if (!row.is_string()) fail("grid: each row is a string");
+            std::string text = row.get<std::string>();
+            if (text.size() > kMaxGridSide) fail("grid: 64 cells per row at most");
+            for (const char ch : text)
+                if (static_cast<unsigned char>(ch) >= 128) fail("grid: rows use ASCII characters");
+            item.cells.push_back(std::move(text));
+        }
+        if (!value.contains("colors") || !value["colors"].is_object()) fail("grid: expected colors (character -> color)");
+        for (const auto& [key, color] : value["colors"].items()) {
+            if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128)
+                fail("grid: color keys are single ASCII characters");
+            item.cell_colors[static_cast<unsigned char>(key[0])] = parse_color(color, "colors");
+        }
+        if (value.contains("cell")) item.cell = std::clamp(parse_number(value["cell"], "cell"), 1.0f, 64.0f);
+        if (value.contains("gap")) item.gap = std::clamp(parse_number(value["gap"], "gap"), 0.0f, 16.0f);
+        if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
     } else if (type == "grow") {
         item.kind = ItemKind::Grow;
     } else if (type == "spacer") {
