@@ -2,11 +2,21 @@ use crate::lua::LuaValue;
 /// Diagnostic reports contain detached finite scalars, arrays and string-keyed
 /// objects. Reject cycles, mixed tables and excessive nesting before persistence.
 pub(crate) fn lua_to_json(value: LuaValue) -> mlua::Result<serde_json::Value> {
+    lua_to_json_with(value, &mut |_| Ok(None))
+}
+
+/// `lua_to_json`, each string first given to `strings`, which may convert it
+/// itself (`Some`) or leave it as a JSON string (`None`).
+pub(crate) fn lua_to_json_with(
+    value: LuaValue,
+    strings: &mut dyn FnMut(&mlua::String) -> mlua::Result<Option<serde_json::Value>>,
+) -> mlua::Result<serde_json::Value> {
     fn convert(
         value: LuaValue,
         depth: usize,
         budget: &mut usize,
         tables: &mut std::collections::HashSet<usize>,
+        strings: &mut dyn FnMut(&mlua::String) -> mlua::Result<Option<serde_json::Value>>,
     ) -> mlua::Result<serde_json::Value> {
         use serde_json::Value;
         if depth > 32 || *budget == 0 {
@@ -24,7 +34,10 @@ pub(crate) fn lua_to_json(value: LuaValue) -> mlua::Result<serde_json::Value> {
                     mlua::Error::runtime("diagnostic report contains a nonfinite number")
                 })?)
             }
-            LuaValue::String(value) => Value::String(value.to_str()?.to_string()),
+            LuaValue::String(value) => match strings(&value)? {
+                Some(converted) => converted,
+                None => Value::String(value.to_str()?.to_string()),
+            },
             LuaValue::Table(table) => {
                 let identity = table.to_pointer() as usize;
                 if !tables.insert(identity) {
@@ -42,7 +55,7 @@ pub(crate) fn lua_to_json(value: LuaValue) -> mlua::Result<serde_json::Value> {
                         };
                         object.insert(
                             key.to_str()?.to_string(),
-                            convert(value, depth + 1, budget, tables)?,
+                            convert(value, depth + 1, budget, tables, strings)?,
                         );
                     }
                     Value::Object(object)
@@ -68,7 +81,7 @@ pub(crate) fn lua_to_json(value: LuaValue) -> mlua::Result<serde_json::Value> {
                     }
                     let mut values = Vec::with_capacity(length);
                     for index in 1..=length {
-                        values.push(convert(table.raw_get(index)?, depth + 1, budget, tables)?);
+                        values.push(convert(table.raw_get(index)?, depth + 1, budget, tables, strings)?);
                     }
                     Value::Array(values)
                 };
@@ -82,7 +95,7 @@ pub(crate) fn lua_to_json(value: LuaValue) -> mlua::Result<serde_json::Value> {
             }
         })
     }
-    convert(value, 0, &mut 100_000, &mut Default::default())
+    convert(value, 0, &mut 100_000, &mut Default::default(), strings)
 }
 
 /// JSON objects are detached Lua tables, never mutable access to provider state.
