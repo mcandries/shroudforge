@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use mlua::{UserData, UserDataMethods, Value};
 
 use super::build_voxel_view::{ChunkCells, CHUNK};
+use super::reuse_voxel_view_base::ViewBases;
 
 /// Chunks a mod keeps on the native side for its voxel views: set once when
 /// read (`set`), then taken by every view or world build without copying them
@@ -12,6 +13,8 @@ use super::build_voxel_view::{ChunkCells, CHUNK};
 #[derive(Clone, Default)]
 pub(crate) struct VoxelChunkStore {
     chunks: Arc<Mutex<HashMap<[i32; 3], ChunkCells>>>,
+    /// The last base of the views built from it (reuse_voxel_view_base).
+    pub(crate) bases: ViewBases,
 }
 
 impl VoxelChunkStore {
