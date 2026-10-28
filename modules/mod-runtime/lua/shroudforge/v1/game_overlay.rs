@@ -21,6 +21,33 @@ pub(crate) fn set_zone(owner: &str, id: &str, zone: &serde_json::Value) -> Resul
     Err(unsafe { std::ffi::CStr::from_ptr(error.as_ptr()) }.to_string_lossy().into_owned())
 }
 
+/// Whether the layer takes blobs (`ShroudforgeOverlay_SetBlob`, our build).
+pub(crate) fn blobs_available() -> bool {
+    layer::get().is_some_and(|layer| layer.set_blob.is_some() && layer.drop_blob.is_some())
+}
+
+/// Gives `data` to the layer as the blob `id` of `owner`, for its zones to
+/// name by `{"blob": id}`. False when the layer cannot take it.
+pub(crate) fn set_blob(owner: &str, id: u64, data: &[u8]) -> bool {
+    let (Some(layer), Ok(owner)) = (layer::get(), text(owner)) else {
+        return false;
+    };
+    let Some(set_blob) = layer.set_blob else {
+        return false;
+    };
+    // SAFETY: a valid NUL-terminated string and `data.len()` readable bytes.
+    unsafe { set_blob(owner.as_ptr(), id, data.as_ptr().cast(), data.len() as u64) == 0 }
+}
+
+pub(crate) fn drop_blob(owner: &str, id: u64) {
+    if let (Some(layer), Ok(owner)) = (layer::get(), text(owner)) {
+        if let Some(drop_blob) = layer.drop_blob {
+            // SAFETY: a valid NUL-terminated string.
+            unsafe { drop_blob(owner.as_ptr(), id) };
+        }
+    }
+}
+
 pub(crate) fn remove_zone(owner: &str, id: &str) {
     if let (Some(layer), Ok(owner), Ok(id)) = (layer::get(), text(owner), text(id)) {
         // SAFETY: valid NUL-terminated strings.
@@ -41,7 +68,7 @@ pub(crate) fn status() -> serde_json::Value {
     let Some(layer) = layer::get() else {
         return serde_json::json!({ "available": false, "active": false });
     };
-    let mut buffer = [0 as c_char; 256];
+    let mut buffer = [0 as c_char; 1024];
     // SAFETY: a writable buffer of the given size.
     if unsafe { (layer.get_status)(buffer.as_mut_ptr(), buffer.len() as u32) } != 0 {
         return serde_json::json!({ "available": true, "active": false });
@@ -67,6 +94,8 @@ mod layer {
         pub(super) remove_zone: unsafe extern "C" fn(*const c_char, *const c_char),
         pub(super) clear_owner: unsafe extern "C" fn(*const c_char),
         pub(super) get_status: unsafe extern "C" fn(*mut c_char, u32) -> i32,
+        pub(super) set_blob: Option<unsafe extern "C" fn(*const c_char, u64, *const c_char, u64) -> i32>,
+        pub(super) drop_blob: Option<unsafe extern "C" fn(*const c_char, u64)>,
     }
 
     /// The layer's exports, looked up at each call: the DLL is mapped when the
@@ -91,6 +120,11 @@ mod layer {
                 remove_zone: std::mem::transmute(GetProcAddress(module, c"ShroudforgeOverlay_RemoveZone".as_ptr().cast())?),
                 clear_owner: std::mem::transmute(GetProcAddress(module, c"ShroudforgeOverlay_ClearOwner".as_ptr().cast())?),
                 get_status: std::mem::transmute(GetProcAddress(module, c"ShroudforgeOverlay_GetStatus".as_ptr().cast())?),
+                // Optional: a layer of our build only.
+                set_blob: GetProcAddress(module, c"ShroudforgeOverlay_SetBlob".as_ptr().cast())
+                    .map(|function| std::mem::transmute(function)),
+                drop_blob: GetProcAddress(module, c"ShroudforgeOverlay_DropBlob".as_ptr().cast())
+                    .map(|function| std::mem::transmute(function)),
             })
         }
     }
@@ -105,6 +139,8 @@ mod layer {
         pub(super) remove_zone: unsafe extern "C" fn(*const c_char, *const c_char),
         pub(super) clear_owner: unsafe extern "C" fn(*const c_char),
         pub(super) get_status: unsafe extern "C" fn(*mut c_char, u32) -> i32,
+        pub(super) set_blob: Option<unsafe extern "C" fn(*const c_char, u64, *const c_char, u64) -> i32>,
+        pub(super) drop_blob: Option<unsafe extern "C" fn(*const c_char, u64)>,
     }
 
     pub(super) fn get() -> Option<Layer> {

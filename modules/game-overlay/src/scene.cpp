@@ -35,6 +35,14 @@ bool hidden = false;
 bool menu_open = false;
 std::map<std::string, std::shared_ptr<Image>> images;  // Kept for the session: textures are never released mid-game.
 
+// Long texts a mod gave once (ShroudforgeOverlay_SetBlob), named in its zones
+// by {"blob": id} instead of the text: a 3D view of a few megabytes is not
+// copied through JSON at every change of its zone.
+std::mutex blobs_mutex;
+std::map<std::pair<std::string, std::uint64_t>, std::shared_ptr<const std::string>> blobs;
+// The mod whose zone is being parsed, for its blobs.
+thread_local const std::string* parsing_owner = nullptr;
+
 std::mutex output_mutex;
 bool output_active = false;
 int output_width = 0;
@@ -106,9 +114,21 @@ void add_box_edges(std::vector<WorldLine>& lines, const WorldLine& box, int dash
     }
 }
 
-// The text of a `cells` or `data` field, shared by the slot and its job.
+// The text of a `cells` or `data` field, shared by the slot and its job: a
+// string, or {"blob": id}, a text the mod gave before.
 std::shared_ptr<const std::string> cells_text(const json& value) {
-    return std::make_shared<const std::string>(value.get_ref<const std::string&>());
+    if (value.is_string()) return std::make_shared<const std::string>(value.get_ref<const std::string&>());
+    if (!value.is_object() || !value.contains("blob") || !value["blob"].is_number_unsigned() || !parsing_owner)
+        fail("cells: expected a text or {blob = id}");
+    const auto id = value["blob"].get<std::uint64_t>();
+    std::lock_guard lock(blobs_mutex);
+    const auto found = blobs.find({*parsing_owner, id});
+    if (found == blobs.end()) fail("unknown blob " + std::to_string(id));
+    return found->second;
+}
+
+bool is_text(const json& value) {
+    return value.is_string() || (value.is_object() && value.contains("blob"));
 }
 
 // A slot to build from these cells once the zone is kept (start_meshes).
@@ -377,7 +397,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (!value["box"][i].is_number_integer()) fail("voxels: box sides are integers");
             box[i] = value["box"][i].get<int>();
         }
-        if (!value.contains("cells") || !value["cells"].is_string()) fail("voxels: expected cells (text)");
+        if (!value.contains("cells") || !is_text(value["cells"])) fail("voxels: expected cells (text)");
         if (!value.contains("colors") || !value["colors"].is_object()) fail("voxels: expected colors (character -> color)");
         for (const auto& [key, color] : value["colors"].items()) {
             if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128 || (key[0] >= '0' && key[0] <= '9'))
@@ -392,12 +412,13 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 item.cell_marks[static_cast<unsigned char>(key[0])] = parse_color(color, "marks");
             }
         }
+        auto text = cells_text(value["cells"]);
         try {
-            check_voxel_cells(box[0], box[1], box[2], value["cells"].get_ref<const std::string&>());
+            check_voxel_cells(box[0], box[1], box[2], *text);
         } catch (const std::runtime_error& error) {
             fail(error.what());
         }
-        item.voxels = slot_for(box[0], box[1], box[2], cells_text(value["cells"]), item.cell_colors, item.cell_marks, true);
+        item.voxels = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, true);
         item.size = {240.0f, 180.0f};
         if (value.contains("size")) item.size = parse_pair(value["size"], "size");
         if (value.contains("yaw")) item.yaw = parse_number(value["yaw"], "yaw");
@@ -485,7 +506,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells")) {
             const auto& cells = value["cells"];
             if (!cells.is_object() || !cells.contains("box") || !cells["box"].is_array() || cells["box"].size() != 3 ||
-                !cells.contains("data") || !cells["data"].is_string() || !cells.contains("colors") ||
+                !cells.contains("data") || !is_text(cells["data"]) || !cells.contains("colors") ||
                 !cells["colors"].is_object() || !cells.contains("origin"))
                 fail("world: cells needs box = {x, y, z}, data (text), colors and origin = {x, y, z}");
             int box[3];
@@ -506,18 +527,18 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (cells.contains("edge_opacity"))
                 item.world_cells_edge_opacity =
                     std::clamp(parse_number(cells["edge_opacity"], "cells.edge_opacity"), 0.0f, 1.0f);
+            auto text = cells_text(cells["data"]);
             try {
-                check_voxel_cells(box[0], box[1], box[2], cells["data"].get_ref<const std::string&>());
+                check_voxel_cells(box[0], box[1], box[2], *text);
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
-            item.world_cells =
-                slot_for(box[0], box[1], box[2], cells_text(cells["data"]), item.cell_colors, item.cell_marks, false);
+            item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false);
         }
         if (value.contains("solids")) {
             const auto& solids = value["solids"];
             if (!solids.is_object() || !solids.contains("box") || !solids["box"].is_array() || solids["box"].size() != 3 ||
-                !solids.contains("data") || !solids["data"].is_string() || !solids.contains("origin"))
+                !solids.contains("data") || !is_text(solids["data"]) || !solids.contains("origin"))
                 fail("world: solids needs box = {x, y, z}, data (text) and origin = {x, y, z}");
             int box[3];
             for (int i = 0; i < 3; ++i) {
@@ -609,6 +630,10 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
 std::shared_ptr<Zone> parse_zone(const std::string& owner, const std::string& id, const json& value) {
     if (!value.is_object()) fail("zone: expected a table");
     auto zone = std::make_shared<Zone>();
+    parsing_owner = &owner;
+    struct Done {
+        ~Done() { parsing_owner = nullptr; }
+    } done;
     zone->owner = owner;
     zone->id = id;
     if (value.contains("anchor")) zone->anchor = parse_point(value["anchor"], "anchor");
@@ -815,6 +840,26 @@ OVERLAY_EXPORT void ShroudforgeOverlay_ClearOwner(const char* owner) {
     if (!owner) return;
     std::lock_guard lock(scene_mutex);
     std::erase_if(zones, [&](auto& entry) { return entry.first.first == owner; });
+    std::lock_guard blobs_lock(blobs_mutex);
+    std::erase_if(blobs, [&](auto& entry) { return entry.first.first == owner; });
+}
+
+// Keeps `size` bytes of `data` as the blob `id` of `owner` (a mod id), for its
+// zones to name: {"blob": id} where a `cells` or `data` text is expected. A
+// zone keeps the texts it was set with; a blob dropped is only not named
+// again. Returns 0, or -1 without an owner.
+OVERLAY_EXPORT int ShroudforgeOverlay_SetBlob(const char* owner, std::uint64_t id, const char* data, std::uint64_t size) {
+    if (!owner || !*owner || (!data && size)) return -1;
+    auto text = std::make_shared<const std::string>(data ? data : "", static_cast<size_t>(size));
+    std::lock_guard lock(blobs_mutex);
+    blobs[{owner, id}] = std::move(text);
+    return 0;
+}
+
+OVERLAY_EXPORT void ShroudforgeOverlay_DropBlob(const char* owner, std::uint64_t id) {
+    if (!owner) return;
+    std::lock_guard lock(blobs_mutex);
+    blobs.erase({owner, id});
 }
 
 // Writes {"active": bool, "width": n, "height": n, "scale": n} into `out`.
@@ -831,7 +876,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh"});
+    status["features"] = json::array({"dashes", "same_mesh", "blobs"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
