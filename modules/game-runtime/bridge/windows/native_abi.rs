@@ -122,6 +122,7 @@ pub struct GridSpec {
 pub(super) type WorldGridGetSpecForSession =
     unsafe extern "C" fn(u64, *const c_char, *mut GridSpec) -> u32;
 pub(super) type WorldCursorRead = unsafe extern "C" fn(*mut u8, usize, *mut u64) -> bool;
+pub(super) type OperationTiming = unsafe extern "C" fn(*mut u8, usize) -> usize;
 pub(super) type WorldCursorReadInput =
     unsafe extern "C" fn(usize, u64, *mut u8, usize, *mut u64) -> u32;
 pub(super) type WorldCursorInputDetail = unsafe extern "C" fn(*mut u8, usize) -> usize;
@@ -181,6 +182,7 @@ pub(super) struct Provider {
     pub(super) world_entity_identity: WorldEntityIdentity,
     pub(super) world_entity_set_scale: WorldEntitySetScale,
     pub(super) world_cursor_read: Option<WorldCursorRead>,
+    pub(super) operation_timing: Option<OperationTiming>,
     pub(super) world_cursor_read_input: Option<WorldCursorReadInput>,
     pub(super) world_cursor_input_detail: Option<WorldCursorInputDetail>,
     pub(super) world_voxel_read_for_session: Option<WorldVoxelReadForSession>,

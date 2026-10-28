@@ -156,6 +156,10 @@ pub(in crate::windows) fn provider() -> Option<&'static Provider> {
                             "KfcRuntimeWorldCursorRead",
                             WorldCursorRead
                         ),
+                        operation_timing: optional_symbol!(
+                            "KfcRuntimeOperationTiming",
+                            OperationTiming
+                        ),
                         world_cursor_read_input: optional_symbol!(
                             "KfcRuntimeWorldCursorReadInput",
                             WorldCursorReadInput
