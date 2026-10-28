@@ -166,6 +166,10 @@ fn read_plan(params: &Table) -> mlua::Result<Option<ViewPlan>> {
 fn read_input(params: &Table) -> mlua::Result<ViewInput> {
     let (lo, hi) = read_box(params)?;
     let chunks = read_chunks(params, lo, hi)?;
+    let bases = match params.raw_get::<Value>("chunks")? {
+        Value::UserData(data) => Some(data.borrow::<VoxelChunkStore>()?.bases.clone()),
+        _ => None,
+    };
     let plan = read_plan(params)?;
     let mut roofs = HashSet::new();
     if let Some(list) = params.raw_get::<Option<Table>>("roofs")? {
@@ -184,6 +188,7 @@ fn read_input(params: &Table) -> mlua::Result<ViewInput> {
         roofs,
         surface: params.raw_get::<Option<bool>>("surface")?.unwrap_or(false),
         depth: params.raw_get::<Option<i32>>("depth")?.unwrap_or(3).clamp(1, 32),
+        bases,
     })
 }
 
