@@ -94,6 +94,11 @@ struct Item {
     float rounding = 0.0f;
     // Row, flow
     std::vector<Item> children;
+    // Row: an optional frame around it (`background` filled, this border,
+    // `rounding`), its content `frame_padding` inside; in a flow, a row is
+    // kept whole on one line.
+    ImU32 frame_border = IM_COL32(0, 0, 0, 0);
+    ImVec2 frame_padding{0.0f, 0.0f};
     float spacing = 6.0f;
     float line_gap = 2.0f;  // Flow: space between wrapped lines.
     // Separator, progress, toggle track (off)
