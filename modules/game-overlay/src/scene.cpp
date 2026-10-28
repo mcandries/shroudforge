@@ -24,6 +24,9 @@ constexpr size_t kMaxTextLength = 4096;
 constexpr size_t kMaxImages = 100;
 constexpr int kMaxDepth = 3;
 constexpr size_t kMaxGridSide = 64;
+// Lines of an item once its dashed lines and boxes are cut into segments.
+constexpr size_t kMaxWorldLines = 16384;
+constexpr int kMaxDashes = 256;
 
 std::mutex scene_mutex;
 std::map<std::pair<std::string, std::string>, std::shared_ptr<const Zone>> zones;
@@ -64,6 +67,45 @@ float parse_number(const json& value, const char* field) {
 }
 
 // {x, y}, [x, y] or a single number for both.
+// `line` as `dashes` segments of equal length with gaps as long between
+// them, the first at `from`, the last ending at `to` (1: the whole line).
+void add_dashed(std::vector<WorldLine>& lines, const WorldLine& line, int dashes) {
+    if (lines.size() + static_cast<size_t>(dashes) > kMaxWorldLines)
+        fail("lines: at most " + std::to_string(kMaxWorldLines) + " segments with the dashes and boxes");
+    const double step = 1.0 / (2 * dashes - 1);
+    for (int k = 0; k < dashes; ++k) {
+        WorldLine dash = line;
+        for (int i = 0; i < 3; ++i) {
+            dash.from[i] = line.from[i] + (line.to[i] - line.from[i]) * (2 * k) * step;
+            dash.to[i] = line.from[i] + (line.to[i] - line.from[i]) * (2 * k + 1) * step;
+        }
+        lines.push_back(dash);
+    }
+}
+
+int parse_dashes(const json& entry) {
+    if (!entry.contains("dashes")) return 1;
+    if (!entry["dashes"].is_number_integer()) fail("dashes: expected a whole number");
+    return std::clamp(entry["dashes"].get<int>(), 1, kMaxDashes);
+}
+
+// The 12 edges of the box between the corners `from` and `to`, each cut into
+// `dashes`.
+void add_box_edges(std::vector<WorldLine>& lines, const WorldLine& box, int dashes) {
+    for (int axis = 0; axis < 3; ++axis) {
+        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+        for (int side = 0; side < 4; ++side) {
+            WorldLine edge = box;
+            const bool high_u = side == 1 || side == 2, high_v = side >= 2;
+            edge.from[u] = edge.to[u] = high_u ? box.to[u] : box.from[u];
+            edge.from[v] = edge.to[v] = high_v ? box.to[v] : box.from[v];
+            edge.from[axis] = box.from[axis];
+            edge.to[axis] = box.to[axis];
+            add_dashed(lines, edge, dashes);
+        }
+    }
+}
+
 ImVec2 parse_pair(const json& value, const char* field) {
     if (value.is_number()) return {value.get<float>(), value.get<float>()};
     if (value.is_array() && value.size() == 2 && value[0].is_number() && value[1].is_number())
@@ -347,7 +389,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 if (entry.contains("color")) segment.color = parse_color(entry["color"], "color");
                 if (entry.contains("width"))
                     segment.width = std::clamp(parse_number(entry["width"], "width"), 0.5f, 16.0f);
-                item.world_lines.push_back(segment);
+                add_dashed(item.world_lines, segment, parse_dashes(entry));
             }
         }
     } else if (type == "world") {
@@ -478,7 +520,24 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 }
                 if (entry.contains("color")) segment.color = parse_color(entry["color"], "color");
                 if (entry.contains("width")) segment.width = std::clamp(parse_number(entry["width"], "width"), 0.5f, 32.0f);
-                item.world_lines.push_back(segment);
+                add_dashed(item.world_lines, segment, parse_dashes(entry));
+            }
+        }
+        if (value.contains("boxes")) {
+            if (!value["boxes"].is_array() || value["boxes"].size() > 1024) fail("world: boxes: at most 1024");
+            for (const auto& entry : value["boxes"]) {
+                if (!entry.is_object() || !entry.contains("from") || !entry.contains("to"))
+                    fail("world: a box needs from and to = {x, y, z}, two opposite corners");
+                WorldLine box;
+                const auto from = position(entry["from"], "from");
+                const auto to = position(entry["to"], "to");
+                for (int i = 0; i < 3; ++i) {
+                    box.from[i] = from[i];
+                    box.to[i] = to[i];
+                }
+                if (entry.contains("color")) box.color = parse_color(entry["color"], "color");
+                if (entry.contains("width")) box.width = std::clamp(parse_number(entry["width"], "width"), 0.5f, 32.0f);
+                add_box_edges(item.world_lines, box, parse_dashes(entry));
             }
         }
     } else if (type == "grow") {
@@ -707,6 +766,9 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
         status["scale"] = (status["height"].get<int>() / kReferenceHeight) * options.scale;
         status["menu"] = menu_open;
     }
+    // What this overlay knows beyond API version 1, for mods that fall back
+    // without it (an older overlay ignores the fields it does not know).
+    status["features"] = json::array({"dashes"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
