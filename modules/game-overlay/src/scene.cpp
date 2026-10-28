@@ -106,6 +106,59 @@ void add_box_edges(std::vector<WorldLine>& lines, const WorldLine& box, int dash
     }
 }
 
+// The text of a `cells` or `data` field, shared by the slot and its job.
+std::shared_ptr<const std::string> cells_text(const json& value) {
+    return std::make_shared<const std::string>(value.get_ref<const std::string&>());
+}
+
+// A slot to build from these cells once the zone is kept (start_meshes).
+std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<const std::string> cells,
+    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels) {
+    auto source = std::make_shared<VoxelSource>();
+    source->sx = sx;
+    source->sy = sy;
+    source->sz = sz;
+    source->cells = std::move(cells);
+    source->colors = colors;
+    source->marks = marks;
+    source->levels = levels;
+    auto slot = std::make_shared<VoxelSlot>();
+    slot->source = std::move(source);
+    return slot;
+}
+
+// Solids decoded lately: the items of a zone often share them (a world item
+// per tile of a build, each with the filled cells around it), and a zone set
+// again keeps them while its build does not move (decoded on the mods loop).
+std::mutex solids_mutex;
+std::vector<std::weak_ptr<const WorldSolids>> recent_solids;
+
+std::shared_ptr<const WorldSolids> decoded_solids(const int box[3], const std::array<double, 3>& origin, double cell,
+    std::shared_ptr<const std::string> data) {
+    std::lock_guard lock(solids_mutex);
+    std::erase_if(recent_solids, [](const auto& entry) { return entry.expired(); });
+    for (const auto& entry : recent_solids) {
+        const auto known = entry.lock();
+        if (known && known->sx == box[0] && known->sy == box[1] && known->sz == box[2] && known->cell == cell &&
+            known->origin[0] == origin[0] && known->origin[1] == origin[1] && known->origin[2] == origin[2] &&
+            (known->data == data || *known->data == *data))
+            return known;
+    }
+    auto shape = std::make_shared<WorldSolids>();
+    shape->sx = box[0];
+    shape->sy = box[1];
+    shape->sz = box[2];
+    for (int i = 0; i < 3; ++i) shape->origin[i] = origin[i];
+    shape->cell = cell;
+    const std::vector<unsigned char> grid = decode_voxel_cells(box[0], box[1], box[2], *data);
+    shape->filled.resize(grid.size());
+    for (size_t i = 0; i < grid.size(); ++i) shape->filled[i] = grid[i] == '#' ? 1 : 0;
+    shape->data = std::move(data);
+    if (recent_solids.size() >= 16) recent_solids.erase(recent_solids.begin());
+    recent_solids.push_back(shape);
+    return shape;
+}
+
 ImVec2 parse_pair(const json& value, const char* field) {
     if (value.is_number()) return {value.get<float>(), value.get<float>()};
     if (value.is_array() && value.size() == 2 && value[0].is_number() && value[1].is_number())
@@ -344,9 +397,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         } catch (const std::runtime_error& error) {
             fail(error.what());
         }
-        item.voxels = std::make_shared<VoxelSlot>();
-        build_voxel_mesh_later(item.voxels, box[0], box[1], box[2], value["cells"].get<std::string>(), item.cell_colors,
-            item.cell_marks, true);
+        item.voxels = slot_for(box[0], box[1], box[2], cells_text(value["cells"]), item.cell_colors, item.cell_marks, true);
         item.size = {240.0f, 180.0f};
         if (value.contains("size")) item.size = parse_pair(value["size"], "size");
         if (value.contains("yaw")) item.yaw = parse_number(value["yaw"], "yaw");
@@ -460,36 +511,27 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
-            item.world_cells = std::make_shared<VoxelSlot>();
-            build_voxel_mesh_later(item.world_cells, box[0], box[1], box[2], cells["data"].get<std::string>(),
-                item.cell_colors, item.cell_marks, false);
+            item.world_cells =
+                slot_for(box[0], box[1], box[2], cells_text(cells["data"]), item.cell_colors, item.cell_marks, false);
         }
         if (value.contains("solids")) {
             const auto& solids = value["solids"];
             if (!solids.is_object() || !solids.contains("box") || !solids["box"].is_array() || solids["box"].size() != 3 ||
                 !solids.contains("data") || !solids["data"].is_string() || !solids.contains("origin"))
                 fail("world: solids needs box = {x, y, z}, data (text) and origin = {x, y, z}");
-            auto shape = std::make_shared<WorldSolids>();
             int box[3];
             for (int i = 0; i < 3; ++i) {
                 if (!solids["box"][i].is_number_integer()) fail("world: solids: box sides are integers");
                 box[i] = solids["box"][i].get<int>();
             }
-            shape->sx = box[0];
-            shape->sy = box[1];
-            shape->sz = box[2];
             const auto origin = position(solids["origin"], "solids.origin");
-            for (int i = 0; i < 3; ++i) shape->origin[i] = origin[i];
-            if (solids.contains("cell")) shape->cell = std::clamp(parse_number(solids["cell"], "solids.cell"), 0.05f, 16.0f);
+            double cell = 0.5;
+            if (solids.contains("cell")) cell = std::clamp(parse_number(solids["cell"], "solids.cell"), 0.05f, 16.0f);
             try {
-                const std::vector<unsigned char> grid =
-                    decode_voxel_cells(box[0], box[1], box[2], solids["data"].get<std::string>());
-                shape->filled.resize(grid.size());
-                for (size_t i = 0; i < grid.size(); ++i) shape->filled[i] = grid[i] == '#' ? 1 : 0;
+                item.world_solids = decoded_solids(box, origin, cell, cells_text(solids["data"]));
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
-            item.world_solids = std::move(shape);
         }
         if (value.contains("quads")) {
             if (!value["quads"].is_array() || value["quads"].size() > 64) fail("world: quads: at most 64");
@@ -620,23 +662,43 @@ std::shared_ptr<Zone> parse_zone(const std::string& owner, const std::string& id
 }
 
 // The meshes of a zone's items, in order: voxels views, then world cells.
-void collect_slots(const std::vector<Item>& items, std::vector<VoxelSlot*>& voxels, std::vector<VoxelSlot*>& world) {
-    for (const Item& item : items) {
-        if (item.voxels) voxels.push_back(item.voxels.get());
-        if (item.world_cells) world.push_back(item.world_cells.get());
+template <typename Items, typename Slot>
+void collect_slots(Items& items, std::vector<Slot*>& voxels, std::vector<Slot*>& world) {
+    for (auto& item : items) {
+        if (item.voxels) voxels.push_back(&item.voxels);
+        if (item.world_cells) world.push_back(&item.world_cells);
         collect_slots(item.children, voxels, world);
     }
 }
 
-// A zone replacing another: each of its meshes being built shows meanwhile
-// the one at the same place in the other (the n-th voxels view, the n-th
-// world cells), so the view does not blink at every change.
-void keep_meshes_shown(const Zone& old_zone, Zone& zone) {
-    std::vector<VoxelSlot*> old_voxels, old_world, voxels, world;
-    collect_slots(old_zone.items, old_voxels, old_world);
+// The meshes of a zone set, replacing `old_zone` (or none). A mesh of the
+// same source as one of the old zone (a 3D view whose text or labels
+// changed, a tile of a build that did not) takes its slot: nothing is built
+// again. Every other is built on the overlay's thread, showing meanwhile the
+// one at the same place in the old zone (the n-th voxels view, the n-th world
+// cells), so that the view does not blink at every change.
+void start_meshes(const Zone* old_zone, Zone& zone) {
+    using Old = const std::shared_ptr<VoxelSlot>;
+    std::vector<Old*> old_voxels, old_world;
+    std::vector<std::shared_ptr<VoxelSlot>*> voxels, world;
+    if (old_zone) collect_slots(old_zone->items, old_voxels, old_world);
     collect_slots(zone.items, voxels, world);
-    for (size_t i = 0; i < voxels.size() && i < old_voxels.size(); ++i) voxels[i]->previous = old_voxels[i]->shown();
-    for (size_t i = 0; i < world.size() && i < old_world.size(); ++i) world[i]->previous = old_world[i]->shown();
+    const auto start = [](std::vector<std::shared_ptr<VoxelSlot>*>& slots, const std::vector<Old*>& old_slots) {
+        for (size_t i = 0; i < slots.size(); ++i) {
+            std::shared_ptr<VoxelSlot>& slot = *slots[i];
+            const auto same = std::find_if(old_slots.begin(), old_slots.end(), [&](Old* old) {
+                return (*old)->source && slot->source && (*old)->source->same(*slot->source);
+            });
+            if (same != old_slots.end()) {
+                slot = **same;
+                continue;
+            }
+            if (i < old_slots.size()) slot->previous = (*old_slots[i])->shown();
+            build_voxel_mesh_later(slot);
+        }
+    };
+    start(voxels, old_voxels);
+    start(world, old_world);
 }
 
 void write_error(const std::string& message, char* error, uint32_t error_size) {
@@ -728,11 +790,12 @@ OVERLAY_EXPORT int ShroudforgeOverlay_SetZone(const char* owner, const char* id,
         auto zone = parse_zone(owner, id, json::parse(zone_json));
         std::lock_guard lock(scene_mutex);
         const auto key = std::make_pair(std::string(owner), std::string(id));
-        if (const auto old = zones.find(key); old != zones.end()) keep_meshes_shown(*old->second, *zone);
-        if (!zones.count(key)) {
+        const auto old = zones.find(key);
+        if (old == zones.end()) {
             const auto owned = std::count_if(zones.begin(), zones.end(), [&](auto& entry) { return entry.first.first == owner; });
             if (static_cast<size_t>(owned) >= kMaxZonesPerOwner) fail("too many zones for this mod (32 at most)");
         }
+        start_meshes(old != zones.end() ? old->second.get() : nullptr, *zone);
         zones[key] = std::move(zone);
         return 0;
     } catch (const std::exception& exception) {
@@ -768,7 +831,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes"});
+    status["features"] = json::array({"dashes", "same_mesh"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);

@@ -11,10 +11,7 @@ namespace {
 
 struct Job {
     std::weak_ptr<VoxelSlot> slot;
-    int sx = 0, sy = 0, sz = 0;
-    std::string cells;
-    std::array<ImU32, 128> colors{}, marks{};
-    bool levels = false;
+    std::shared_ptr<const VoxelSource> source;
 };
 
 std::mutex jobs_mutex;
@@ -24,8 +21,8 @@ bool working = false;
 void run(const Job& job) {
     if (job.slot.expired()) return;
     try {
-        auto mesh = std::make_shared<const VoxelMesh>(
-            build_voxel_mesh(job.sx, job.sy, job.sz, job.cells, job.colors, job.marks, job.levels));
+        const VoxelSource& s = *job.source;
+        auto mesh = std::make_shared<const VoxelMesh>(build_voxel_mesh(s.sx, s.sy, s.sz, *s.cells, s.colors, s.marks, s.levels));
         if (auto slot = job.slot.lock()) slot->ready.store(std::move(mesh));
     } catch (const std::exception& error) {
         log_line("voxels: %s", error.what());
@@ -57,11 +54,11 @@ DWORD WINAPI work(void* module) {
 
 }  // namespace
 
-void build_voxel_mesh_later(const std::shared_ptr<VoxelSlot>& slot, int sx, int sy, int sz, std::string cells,
-    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels) {
+void build_voxel_mesh_later(const std::shared_ptr<VoxelSlot>& slot) {
+    if (!slot || !slot->source) return;
     {
         std::lock_guard lock(jobs_mutex);
-        jobs.push_back({slot, sx, sy, sz, std::move(cells), colors, marks, levels});
+        jobs.push_back({slot, slot->source});
         if (working) return;
         working = true;
     }
