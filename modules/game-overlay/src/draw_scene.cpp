@@ -10,6 +10,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 namespace overlay {
 
@@ -86,7 +87,43 @@ struct Token {
     const char* end = nullptr;
     ImVec2 size;
     bool word = false;
+    bool tight = false;  // Continues the previous word, without a space.
 };
+
+// Reads one UTF-8 character and moves past it.
+unsigned next_char(const char*& at) {
+    const unsigned char lead = static_cast<unsigned char>(*at);
+    const int length = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    unsigned c = length == 1 ? lead : lead & (0xFF >> (length + 1));
+    int read = 1;
+    for (; read < length && (static_cast<unsigned char>(at[read]) & 0xC0) == 0x80; ++read)
+        c = (c << 6) | (static_cast<unsigned char>(at[read]) & 0x3F);
+    at += read;
+    return c;
+}
+
+// Chinese and Japanese text has no spaces: a line may break between any two
+// of its characters, except before closing punctuation, small kana or the
+// long vowel mark, and after an opening bracket.
+bool is_cjk(unsigned c) {
+    return (c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFF00 && c <= 0xFFEF);
+}
+
+bool cannot_start_line(unsigned c) {
+    static constexpr unsigned kChars[] = {0x3001, 0x3002, 0xFF0C, 0xFF0E, 0xFF1A, 0xFF1B, 0xFF01, 0xFF1F,
+        0xFF09, 0x3009, 0x300B, 0x300D, 0x300F, 0x3011, 0x30FB, 0x30FC, 0x2026, 0x3041, 0x3043, 0x3045,
+        0x3047, 0x3049, 0x3063, 0x3083, 0x3085, 0x3087, 0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9, 0x30C3,
+        0x30E3, 0x30E5, 0x30E7};
+    return std::find(std::begin(kChars), std::end(kChars), c) != std::end(kChars);
+}
+
+bool cannot_end_line(unsigned c) {
+    return c == 0xFF08 || c == 0x3008 || c == 0x300A || c == 0x300C || c == 0x300E || c == 0x3010;
+}
+
+bool can_break(unsigned before, unsigned after) {
+    return (is_cjk(before) || is_cjk(after)) && !cannot_end_line(before) && !cannot_start_line(after);
+}
 
 struct FlowLine {
     size_t first = 0;
@@ -102,21 +139,36 @@ std::vector<Token> flow_tokens(const Context& c, const Item& flow) {
             tokens.push_back({&child, nullptr, nullptr, measure(c, child, FLT_MAX), false});
             continue;
         }
+        auto add_word = [&](const char* begin, const char* end, bool tight) {
+            tokens.push_back({&child, begin, end, text_size(c, child.style, begin, end, 0.0f), true, tight});
+        };
         const char* at = child.text.c_str();
         while (*at) {
             while (*at == ' ') ++at;
             const char* begin = at;
-            while (*at && *at != ' ') ++at;
-            if (at > begin) tokens.push_back({&child, begin, at, text_size(c, child.style, begin, at, 0.0f), true});
+            bool tight = false;
+            unsigned previous = 0;
+            while (*at && *at != ' ') {
+                const char* here = at;
+                const unsigned ch = next_char(at);
+                if (here > begin && can_break(previous, ch)) {
+                    add_word(begin, here, tight);
+                    begin = here;
+                    tight = true;
+                }
+                previous = ch;
+            }
+            if (at > begin) add_word(begin, at, tight);
         }
     }
     return tokens;
 }
 
-// Gap before a token: none before punctuation, a space between two words,
-// the flow spacing otherwise.
+// Gap before a token: none before punctuation or inside a word cut between
+// Chinese or Japanese characters, a space between two words, the flow
+// spacing otherwise.
 float flow_gap(const Context& c, const Item& flow, const Token& previous, const Token& token) {
-    if (token.word && std::strchr(",.;:!?)", token.begin[0])) return 0.0f;
+    if (token.word && (token.tight || std::strchr(",.;:!?)", token.begin[0]))) return 0.0f;
     if (previous.word && token.word)
         return text_size(c, token.item->style, " ", nullptr, 0.0f).x;
     return flow.spacing * c.scale;
