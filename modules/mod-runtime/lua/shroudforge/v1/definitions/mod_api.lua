@@ -195,7 +195,8 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field height? integer
 --- @field scale? number Screen pixels per reference pixel (1080 reference, with the player's size option).
 --- @field menu? boolean A game menu is open (the game shows the mouse cursor).
---- @field features? string[] What the layer knows beyond its first version (`dashes`, `same_mesh`, `blobs`); see modules/game-overlay/README.md.
+--- @field frame_ms? number The game's average frame time in milliseconds over about the last second (0 before; when no frame for over a second, the time since the last one). With the `frame_time` feature.
+--- @field features? string[] What the layer knows beyond its first version (`dashes`, `same_mesh`, `blobs`, `frame_time`); see modules/game-overlay/README.md.
 
 --- Zones drawn over the game image. Each mod only sees its own zones; they are
 --- removed when the mod stops. The player can hide the overlay.

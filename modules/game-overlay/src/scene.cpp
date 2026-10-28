@@ -9,6 +9,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -47,6 +49,15 @@ std::mutex output_mutex;
 bool output_active = false;
 int output_width = 0;
 int output_height = 0;
+// The game's frame time, measured between its successive presents
+// (count_frame) and guarded by output_mutex: the frames of the current
+// window, and the average of the last complete one.
+using FrameClock = std::chrono::steady_clock;
+constexpr auto kFrameWindow = std::chrono::seconds(1);
+FrameClock::time_point frame_window_start{};
+FrameClock::time_point last_frame{};
+int frames_in_window = 0;
+double average_frame_ms = 0.0;
 
 [[noreturn]] void fail(const std::string& message) {
     throw std::runtime_error(message);
@@ -797,6 +808,22 @@ void set_output(bool active, int width, int height) {
     output_height = height;
 }
 
+void count_frame() {
+    const auto now = FrameClock::now();
+    std::lock_guard lock(output_mutex);
+    if (frame_window_start == FrameClock::time_point{}) {
+        frame_window_start = now;
+    } else {
+        ++frames_in_window;
+        if (now - frame_window_start >= kFrameWindow) {
+            average_frame_ms = std::chrono::duration<double, std::milli>(now - frame_window_start).count() / frames_in_window;
+            frame_window_start = now;
+            frames_in_window = 0;
+        }
+    }
+    last_frame = now;
+}
+
 }  // namespace overlay
 
 using namespace overlay;
@@ -862,12 +889,20 @@ OVERLAY_EXPORT void ShroudforgeOverlay_DropBlob(const char* owner, std::uint64_t
     blobs.erase({owner, id});
 }
 
-// Writes {"active": bool, "width": n, "height": n, "scale": n} into `out`.
+// Writes {"active": bool, "width": n, "height": n, "scale": n, "menu": bool,
+// "frame_ms": n, "features": [...]} into `out`.
 OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     json status;
     {
+        const auto now = FrameClock::now();
         std::lock_guard lock(output_mutex);
         status = {{"active", output_active}, {"width", output_width}, {"height", output_height}};
+        // The average over the last second of frames, 0 before it. When the
+        // game has shown no frame for longer, the time since its last frame.
+        double frame_ms = average_frame_ms;
+        if (last_frame != FrameClock::time_point{} && now - last_frame > kFrameWindow)
+            frame_ms = std::chrono::duration<double, std::milli>(now - last_frame).count();
+        status["frame_ms"] = std::round(frame_ms * 100.0) / 100.0;
     }
     {
         std::lock_guard lock(scene_mutex);
@@ -876,7 +911,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh", "blobs"});
+    status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
