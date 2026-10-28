@@ -383,11 +383,13 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let mut loaded_settings_revision = live_settings_revision(&arguments.root);
     let mut keybind_layout_revision = shroudforge_hotkeys::layout_revision();
     let mut pending_window_geometry_save: Option<Instant> = None;
+    let mut timing = RefreshTiming::default();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { .. })
             | Event::NewEvents(StartCause::Init) => {
+                let tick_started = Instant::now();
                 if pending_window_geometry_save
                     .is_some_and(|deadline| Instant::now() >= deadline)
                 {
@@ -1039,6 +1041,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             .is_ok()
                     {
                         last_window_state = payload;
+                        timing.window_states += 1;
                     }
                     next_window_state_refresh = Instant::now() + Duration::from_millis(250);
                 }
@@ -1118,6 +1121,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                     if let Some(payload) = refreshed.payload {
                         latest_snapshot = payload;
                     }
+                    timing.refreshes += 1;
                 }
                 if visible
                     && !latest_snapshot.is_empty()
@@ -1127,7 +1131,9 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         .is_ok()
                 {
                     last_snapshot = latest_snapshot.clone();
+                    timing.pushes += 1;
                 }
+                timing.end_tick(&arguments.root, tick_started, visible);
             }
             Event::MainEventsCleared => {
                 let current_layout_revision = shroudforge_hotkeys::layout_revision();
@@ -1280,4 +1286,52 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
             _ => {}
         }
     });
+}
+
+/// Diagnostic of our builds (not proposed upstream): how long the window's
+/// own thread is busy, since WebView2 input and scrolling wait for it, and
+/// how many refreshes it received from the refresher thread. Logged every 30
+/// seconds; read by Architect Line's tools\perf-report.ps1 (PERF.md).
+#[derive(Default)]
+struct RefreshTiming {
+    since: Option<Instant>,
+    ticks: u32,
+    tick_total: Duration,
+    tick_max: Duration,
+    refreshes: u32,
+    pushes: u32,
+    window_states: u32,
+    visible_ticks: u32,
+}
+
+impl RefreshTiming {
+    fn end_tick(&mut self, root: &std::path::Path, started: Instant, visible: bool) {
+        let elapsed = started.elapsed();
+        self.ticks += 1;
+        self.tick_total += elapsed;
+        self.tick_max = self.tick_max.max(elapsed);
+        if visible {
+            self.visible_ticks += 1;
+        }
+        let since = *self.since.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        let ms = |value: Duration| value.as_secs_f64() * 1000.0;
+        let average = if self.ticks == 0 { 0.0 } else { ms(self.tick_total) / f64::from(self.ticks) };
+        let details = format!(
+            "window thread busy {:.0} ms in {:.0} s: {} ticks avg {:.1} ms max {:.0} ms ({} visible); {} refreshes received from the refresher thread; {} snapshot and {} window state pushes",
+            ms(self.tick_total),
+            since.elapsed().as_secs_f64(),
+            self.ticks,
+            average,
+            ms(self.tick_max),
+            self.visible_ticks,
+            self.refreshes,
+            self.pushes,
+            self.window_states,
+        );
+        write_activity(root, "modloader-ui", "Thread timing", "Measured", Some(&details), "info");
+        *self = Self { since: Some(Instant::now()), ..Self::default() };
+    }
 }
