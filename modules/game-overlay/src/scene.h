@@ -263,6 +263,8 @@ bool scene_has_visible_zones();
 
 // Current output, reported back to mods by ShroudforgeOverlay_GetStatus.
 void set_output(bool active, int width, int height);
+// Counts a frame of the game, at each present of its image (frame_ms in the status).
+void count_frame();
 
 // Drops the GPU textures of cached images (their renderer was destroyed).
 void forget_textures();
