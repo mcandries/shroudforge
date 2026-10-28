@@ -26,6 +26,7 @@ add_library(shroudforge_overlay SHARED
     src/draw_scene.cpp
     src/load_image.cpp
     src/parse_icon_path.cpp
+    src/build_voxel_mesh.cpp
     src/player_options.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
