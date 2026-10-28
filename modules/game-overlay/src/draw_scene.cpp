@@ -610,7 +610,8 @@ void draw_world_cells(const Context& c, const Item& item, const WorldView& view)
         std::memcpy(entry.corners, in, sizeof in);
         entry.depth = centre[2];
         entry.fill = fade(c, shade(color, kLight[face.direction], 1.0f));
-        entry.edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 230));
+        entry.edge = fade(c, (color & ~IM_COL32_A_MASK) |
+            IM_COL32(0, 0, 0, static_cast<int>(item.world_cells_edge_opacity * 255.0f + 0.5f)));
         entry.edges = item.world_cells_smooth ? face.creases : std::uint8_t{0xF};
         shown.push_back(entry);
     }
