@@ -93,7 +93,9 @@ struct Item {
     // colors and marks by character as for a grid (cell_colors, cell_marks).
     // The camera turns around the box: yaw (0 looks along +z) plus `spin`
     // degrees per second, pitch looking down, zoom (1 = the box fits).
-    // X-ray: inner faces too, and the faces of `ghost` characters see-through.
+    // Solid: only the faces seen from the camera, all at `opacity` (the view
+    // over the game). X-ray: every face turned to the camera, inner ones
+    // included, those of `ghost` characters at `ghost_alpha`, then `opacity`.
     std::shared_ptr<const VoxelMesh> voxels;
     float yaw = 0.0f;
     float pitch = 30.0f;
@@ -101,6 +103,8 @@ struct Item {
     float spin = 0.0f;
     bool xray = false;
     std::string ghost;
+    float ghost_alpha = 0.6f;
+    float opacity = 1.0f;
     ImU32 edge = IM_COL32(0, 0, 0, 110);
     int floor_grid = 0;  // Lines on the floor of the box every this many cells, 0 = none.
     ImU32 grid_color = IM_COL32(255, 255, 255, 40);

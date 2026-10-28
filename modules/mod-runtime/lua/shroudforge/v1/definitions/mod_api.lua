@@ -145,7 +145,9 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field pitch? number Voxels: camera tilt in degrees, looking down when positive. Default 30.
 --- @field zoom? number Voxels: 1 fits the box in the view. Default 1.
 --- @field spin? number Voxels: degrees per second added to the yaw, turned by the overlay itself. Default 0.
---- @field xray? boolean Voxels: also draw the faces between cells of different characters, and see through `ghost`.
+--- @field xray? boolean Voxels: draw every face turned to the camera, inner ones included, `ghost` ones at `ghost_alpha`.
+--- @field ghost_alpha? number Voxels: opacity of the `ghost` characters' faces in X-ray, 0 to 1. Default 0.6.
+--- @field opacity? number Voxels: opacity of the view over the game, 0 to 1; see-through, hidden faces stay hidden. Default 1.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.
 --- @field edge? ShroudForgeOverlayColor Voxels: outline of each face (when cells are 3 pixels or more).
 --- @field grid? number Voxels: lines on the floor of the box every this many cells. Default 0 (none).
