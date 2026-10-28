@@ -44,6 +44,18 @@ pub(super) fn lua_world_voxel_read(
     args: FunctionArgs,
     r#mod: &Mod,
 ) -> mlua::Result<(LuaValue, Option<String>)> {
+    let started = std::time::Instant::now();
+    let result = lua_world_voxel_read_impl(lua, args, r#mod);
+    crate::lua::ingame::report_operation_timing::record_call("voxel.read", started);
+    crate::lua::ingame::report_operation_timing::report_operation_timing();
+    result
+}
+
+fn lua_world_voxel_read_impl(
+    lua: &mlua::Lua,
+    args: FunctionArgs,
+    r#mod: &Mod,
+) -> mlua::Result<(LuaValue, Option<String>)> {
     let state = lua.app_data_ref::<AppState>().unwrap();
     if let Some(reason) = runtime_denial_reason(&state, r#mod, "runtime.world.voxel.read") {
         return Ok((LuaValue::Nil, Some(reason)));
@@ -72,7 +84,10 @@ pub(super) fn lua_world_voxel_read(
             Some("voxel read must contain between 1 and 65,536 cells".into()),
         ));
     };
-    let values = match runtime_provider::world_voxel_read(origin, dimensions, count) {
+    let native_started = std::time::Instant::now();
+    let values = runtime_provider::world_voxel_read(origin, dimensions, count);
+    crate::lua::ingame::report_operation_timing::record_call("voxel.native_read", native_started);
+    let values = match values {
         Ok(values) => values,
         Err(reason) => return Ok((LuaValue::Nil, Some(reason))),
     };
