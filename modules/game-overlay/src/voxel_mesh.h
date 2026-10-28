@@ -69,10 +69,26 @@ struct VoxelMesh {
     std::vector<std::shared_ptr<const VoxelMesh>> coarser;
 };
 
+// What a mesh is built from: the same source gives the same mesh.
+struct VoxelSource {
+    int sx = 0, sy = 0, sz = 0;
+    std::shared_ptr<const std::string> cells;
+    std::array<ImU32, 128> colors{}, marks{};
+    bool levels = false;
+    bool same(const VoxelSource& other) const {
+        return sx == other.sx && sy == other.sy && sz == other.sz && levels == other.levels &&
+               colors == other.colors && marks == other.marks &&
+               (cells == other.cells || (cells && other.cells && *cells == *other.cells));
+    }
+};
+
 // A mesh built on the overlay's own thread (build_voxel_mesh_later): until it
 // is ready, the item shows the one it replaces (`previous`, set when its zone
-// replaces another), so a mod setting its zone never waits for the faces.
+// replaces another), so a mod setting its zone never waits for the faces. A
+// zone setting the same source again keeps the slot of the one it replaces
+// (scene.cpp): nothing is built again.
 struct VoxelSlot {
+    std::shared_ptr<const VoxelSource> source;
     std::atomic<std::shared_ptr<const VoxelMesh>> ready;
     std::shared_ptr<const VoxelMesh> previous;
     std::shared_ptr<const VoxelMesh> shown() const {
@@ -103,11 +119,11 @@ void check_voxel_cells(int sx, int sy, int sz, const std::string& cells);
 VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, const std::array<ImU32, 128>& colors,
     const std::array<ImU32, 128>& marks, bool levels = false);
 
-// build_voxel_mesh on the overlay's thread, then `slot` filled, unless its
-// item is gone meanwhile (its zone replaced again: not built). Checked
-// input only (check_voxel_cells); an error goes to the log (27/10: 24 to 40
-// ms for 256 x 64 x 256, in overlay.set, on the game's mods loop).
-void build_voxel_mesh_later(const std::shared_ptr<VoxelSlot>& slot, int sx, int sy, int sz, std::string cells,
-    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels);
+// build_voxel_mesh of `slot->source` on the overlay's thread, then `slot`
+// filled, unless its item is gone meanwhile (its zone replaced again: not
+// built). Checked input only (check_voxel_cells); an error goes to the log
+// (27/10: 24 to 40 ms for 256 x 64 x 256, in overlay.set, on the game's mods
+// loop).
+void build_voxel_mesh_later(const std::shared_ptr<VoxelSlot>& slot);
 
 }  // namespace overlay
