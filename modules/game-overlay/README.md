@@ -67,7 +67,7 @@ Sizes and offsets are reference pixels of a screen 1080 pixels high, or `referen
 | `offset` | `[x, y]` moved from that position. |
 | `size` | `[width, height]`; 0 fits the content. With a width, text wraps. |
 | `reference` | Screen height the zone's pixel values are designed for (240 to 4320). Default 1080. |
-| `order` | Drawing order, lower first. |
+| `order` | Drawing order, lower first. Zones holding only `world` items are drawn before all others, under the panels. |
 | `visible` | `false` hides the zone without removing it. |
 | `background`, `border`, `border_width`, `rounding` | Plain background and border. |
 | `frame` | Nine-slice image: `{image, slice = n or [left, top, right, bottom] (image pixels), scale, tint}`. |
