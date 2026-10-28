@@ -332,6 +332,33 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
             if (face.contains("cell")) item.aim_cell = std::clamp(parse_number(face["cell"], "aim_face.cell"), 0.05f, 16.0f);
         }
+        if (value.contains("cells")) {
+            const auto& cells = value["cells"];
+            if (!cells.is_object() || !cells.contains("box") || !cells["box"].is_array() || cells["box"].size() != 3 ||
+                !cells.contains("data") || !cells["data"].is_string() || !cells.contains("colors") ||
+                !cells["colors"].is_object() || !cells.contains("origin"))
+                fail("world: cells needs box = {x, y, z}, data (text), colors and origin = {x, y, z}");
+            int box[3];
+            for (int i = 0; i < 3; ++i) {
+                if (!cells["box"][i].is_number_integer()) fail("world: cells: box sides are integers");
+                box[i] = cells["box"][i].get<int>();
+            }
+            for (const auto& [key, color] : cells["colors"].items()) {
+                if (key.size() != 1 || static_cast<unsigned char>(key[0]) >= 128 || (key[0] >= '0' && key[0] <= '9'))
+                    fail("world: cells: color keys are single ASCII characters, not digits");
+                item.cell_colors[static_cast<unsigned char>(key[0])] = parse_color(color, "colors");
+            }
+            const auto origin = position(cells["origin"], "cells.origin");
+            for (int i = 0; i < 3; ++i) item.world_cells_origin[i] = origin[i];
+            if (cells.contains("cell"))
+                item.world_cells_size = std::clamp(parse_number(cells["cell"], "cells.cell"), 0.05f, 16.0f);
+            try {
+                item.world_cells = std::make_shared<const VoxelMesh>(build_voxel_mesh(
+                    box[0], box[1], box[2], cells["data"].get<std::string>(), item.cell_colors, item.cell_marks));
+            } catch (const std::runtime_error& error) {
+                fail(error.what());
+            }
+        }
         if (value.contains("quads")) {
             if (!value["quads"].is_array() || value["quads"].size() > 64) fail("world: quads: at most 64");
             for (const auto& entry : value["quads"]) {
