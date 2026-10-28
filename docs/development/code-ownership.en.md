@@ -113,7 +113,7 @@ Native DLL handles are process-owned. `modules/modloader/dll_manager.rs` detects
 ## The two mod information files
 
 - **mod.json** follows the EML format. It contains the mod's identity, version, dependencies, and permissions.
-- **extended.mod.json** is an optional ShroudForge file. It contains the enabled state, setting values, groups, actions, links, short update notes, and optional `launcher` provenance (`EML` or `SF`).
+- **extended.mod.json** is an optional ShroudForge file. It contains the enabled state, setting values, groups, actions, setting presets, links, short update notes, and optional `launcher` provenance (`EML` or `SF`). `validate_setting_presets.rs` checks presets when the manifest is read. `ui/apply-setting-presets.ts` applies a chosen preset, or selects its custom value, when a setting changes in the Modloader.
 
 The UI treats a package without **extended.mod.json** as EML; ShroudForge mods always include the extension. If ShroudForge adds an extension to an EML package, it writes `launcher: "EML"` so the package keeps its original identity. When an extension exists, only that explicit marker is shown as EML; a missing or non-EML marker is shown as SF. The loader checks the extension against its schema before accepting the package.
 
