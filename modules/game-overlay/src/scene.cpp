@@ -278,6 +278,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         item.xray = value.value("xray", false);
         item.plain = value.value("plain", false);
         if (value.contains("ease")) item.ease = std::clamp(parse_number(value["ease"], "ease"), 0.0f, 5.0f);
+        if (value.contains("perspective"))
+            item.perspective = std::clamp(parse_number(value["perspective"], "perspective"), 0.0f, 1.0f);
         if (value.contains("ghost")) {
             if (!value["ghost"].is_string()) fail("voxels: ghost: expected characters");
             item.ghost = value["ghost"].get<std::string>();
