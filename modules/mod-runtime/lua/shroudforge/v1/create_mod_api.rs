@@ -13,6 +13,7 @@ use std::{
 
 use super::game_overlay;
 use super::read_ui_locale::read_ui_locale;
+use super::pass_overlay_blobs::OverlayBlobs;
 use super::read_monotonic_clock::read_monotonic_clock;
 use super::resolve_overlay_paths::resolve_overlay_paths;
 use super::set_mod_settings::set_settings;
@@ -213,15 +214,36 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     let overlay = lua.create_table()?;
     let overlay_mod = r#mod.clone();
     let overlay_paths = std::sync::Mutex::new(std::collections::HashMap::new());
+    let overlay_blobs = std::rc::Rc::new(std::cell::RefCell::new(OverlayBlobs::default()));
+    let set_blobs = overlay_blobs.clone();
     overlay.raw_set(
         "set",
         lua.create_function(move |_, (id, zone): (String, LuaValue)| {
             if !valid_identifier(&id) {
                 return Ok((None, Some("invalid zone id".to_owned())));
             }
-            let mut zone = lua_to_json(zone)?;
-            let result = resolve_overlay_paths(&mut zone, &overlay_mod, &overlay_paths)
-                .and_then(|()| game_overlay::set_zone(&overlay_mod.info().id, &id, &zone));
+            let owner = overlay_mod.info().id.clone();
+            let send = |zone: LuaValue, blobs: bool| -> mlua::Result<Result<(), String>> {
+                let mut zone = if blobs {
+                    set_blobs.borrow_mut().zone_json(
+                        zone,
+                        &id,
+                        &mut |blob, data| game_overlay::set_blob(&owner, blob, data),
+                        &mut |blob| game_overlay::drop_blob(&owner, blob),
+                    )?
+                } else {
+                    lua_to_json(zone)?
+                };
+                Ok(resolve_overlay_paths(&mut zone, &overlay_mod, &overlay_paths)
+                    .and_then(|()| game_overlay::set_zone(&owner, &id, &zone)))
+            };
+            let blobs = game_overlay::blobs_available();
+            let mut result = send(zone.clone(), blobs)?;
+            // The layer lost blobs it was given (loaded again): all given anew.
+            if blobs && matches!(&result, Err(reason) if reason.contains("unknown blob")) {
+                set_blobs.borrow_mut().forget_all(&mut |blob| game_overlay::drop_blob(&owner, blob));
+                result = send(zone, true)?;
+            }
             Ok(match result {
                 Ok(()) => (Some(true), None),
                 Err(reason) => (None, Some(reason)),
@@ -229,10 +251,12 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
         })?,
     )?;
     let remove_mod_id = mod_id.clone();
+    let remove_blobs = overlay_blobs.clone();
     overlay.raw_set(
         "remove",
         lua.create_function(move |_, id: String| {
             game_overlay::remove_zone(&remove_mod_id, &id);
+            remove_blobs.borrow_mut().forget_zone(&id, &mut |blob| game_overlay::drop_blob(&remove_mod_id, blob));
             Ok(())
         })?,
     )?;
@@ -241,6 +265,7 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
         "clear",
         lua.create_function(move |_, ()| {
             game_overlay::clear_owner(&clear_mod_id);
+            overlay_blobs.borrow_mut().forget_all(&mut |_| {});
             Ok(())
         })?,
     )?;

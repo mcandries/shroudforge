@@ -30,6 +30,7 @@ pub(crate) mod shroudforge {
         mod create_voxel_view_api;
         mod dispatch_mod_ui_actions;
         pub(crate) mod game_overlay;
+        mod pass_overlay_blobs;
         mod read_monotonic_clock;
         pub(crate) mod read_runtime_operations;
         mod read_ui_locale;
