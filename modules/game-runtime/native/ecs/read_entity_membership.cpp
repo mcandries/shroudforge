@@ -1,3 +1,4 @@
+#include "game-thread/operation_timing.h"
 #include "ecs/ecs_session_state.h"
 
 namespace EcsImplementation {
@@ -134,8 +135,13 @@ IdObservation observe_original_id(std::uint32_t id, const ResolvedLayout& layout
     hash = ((hash >> 16) ^ hash) * 0x45d9f3bu;
     hash = (hash >> 16) ^ hash;
     auto slot = static_cast<std::size_t>(hash & (table.count - 1));
+    struct SlotCount {
+        std::size_t visited{};
+        ~SlotCount() { OperationTiming::Record(OperationTiming::Kind::MembershipSlots, visited); }
+    } slots;
     for (std::size_t visited = 0; visited < (std::min)(table.count, std::uint64_t{8192});
          ++visited, slot = (slot + 1) & (table.count - 1)) {
+        slots.visited = visited + 1;
         std::uint64_t bits{};
         std::uint32_t key{};
         if (!read(table.occupancy + (slot / 64) * 8, bits)) return {};
@@ -163,7 +169,9 @@ IdObservation stable_original_id(std::uint32_t id, const ResolvedLayout& layout)
 // Erased buckets may retain plausible objects. Both handle membership and
 // native queued-ID verification share the same original occupied ID lookup.
 EntityMembership entity_membership(const EntityView& entity, const ResolvedLayout& layout){
+    const auto started = std::chrono::steady_clock::now();
     const auto current = stable_original_id(entity.id, layout);
+    OperationTiming::Record(OperationTiming::Kind::Membership, OperationTiming::MicrosecondsSince(started));
     if (current.membership != EntityMembership::Present) return current.membership;
     if (current.generation != entity.generation) return EntityMembership::Absent;
     return current.pointer == entity.pointer ? EntityMembership::Present : EntityMembership::Unresolved;
