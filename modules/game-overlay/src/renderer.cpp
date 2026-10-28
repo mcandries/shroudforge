@@ -426,6 +426,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     }
     if (!target || family == UINT32_MAX) return VK_NULL_HANDLE;
     set_output(true, static_cast<int>(target->extent.width), static_cast<int>(target->extent.height));
+    count_frame();
     if (!scene_has_visible_zones()) return VK_NULL_HANDLE;
 
     if (!d.renderer) {
