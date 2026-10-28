@@ -47,7 +47,22 @@ struct Polyline {
     bool closed = false;
 };
 
-enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid, Voxels };
+enum class ItemKind { Text, Image, Row, Spacer, Separator, Progress, Chip, Icon, Toggle, Grow, Flow, Grid, Voxels, World };
+enum class WorldShape { Ring, Cross, Dot };
+
+// A point or a segment in the game world (meters), drawn where the game's
+// camera puts it on the screen at every frame.
+struct WorldPoint {
+    double at[3]{};
+    ImU32 color = IM_COL32(255, 255, 255, 255);
+    float size = 12.0f;  // Reference pixels.
+    WorldShape shape = WorldShape::Ring;
+};
+struct WorldLine {
+    double from[3]{}, to[3]{};
+    ImU32 color = IM_COL32(255, 255, 255, 255);
+    float width = 2.0f;  // Reference pixels.
+};
 enum class Align { Start, Center, End };
 
 struct Item {
@@ -97,6 +112,9 @@ struct Item {
     // over the game). X-ray: every face turned to the camera, inner ones
     // included, those of `ghost` characters at `ghost_alpha`, then `opacity`.
     std::shared_ptr<const VoxelMesh> voxels;
+    // World: points and segments in the world, over the whole screen.
+    std::vector<WorldPoint> world_points;
+    std::vector<WorldLine> world_lines;
     float yaw = 0.0f;
     float pitch = 30.0f;
     float zoom = 1.0f;
