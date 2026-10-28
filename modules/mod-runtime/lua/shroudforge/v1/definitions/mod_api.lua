@@ -148,6 +148,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field xray? boolean Voxels: draw every face turned to the camera, inner ones included, `ghost` ones at `ghost_alpha`.
 --- @field ghost_alpha? number Voxels: opacity of the `ghost` characters' faces in X-ray, 0 to 1. Default 0.6.
 --- @field opacity? number Voxels: opacity of the view over the game, 0 to 1; see-through, hidden faces stay hidden. Default 1.
+--- @field plain? boolean Voxels: solid view without outlines nor anti-aliased borders, one continuous surface.
 --- @field ghost? string Voxels: characters drawn see-through in X-ray.
 --- @field edge? ShroudForgeOverlayColor Voxels: outline of each face (when cells are 3 pixels or more).
 --- @field grid? number Voxels: lines on the floor of the box every this many cells. Default 0 (none).
