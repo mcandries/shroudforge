@@ -334,6 +334,50 @@ mod tests {
         assert_eq!(text, ".-^%#.");
     }
 
+    /// Cross-check with a mod's own Lua builder: VOXEL_VIEW_FIXTURE names a
+    /// JSON file of an input and the text that builder made from it
+    /// (Architect Line writes one with a random world). Ignored without it.
+    #[test]
+    #[ignore]
+    fn same_view_as_a_fixture() {
+        let path = std::env::var("VOXEL_VIEW_FIXTURE").expect("VOXEL_VIEW_FIXTURE");
+        let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cell = |value: &serde_json::Value| -> [i32; 3] {
+            let list = value.as_array().unwrap();
+            [list[0].as_i64().unwrap() as i32, list[1].as_i64().unwrap() as i32, list[2].as_i64().unwrap() as i32]
+        };
+        let mut view = input(cell(&fixture["lo"]), cell(&fixture["hi"]));
+        for chunk in fixture["chunks"].as_array().unwrap() {
+            let key = cell(chunk);
+            let cells = match &chunk[3] {
+                serde_json::Value::String(hex) => ChunkCells::Packed(
+                    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect(),
+                ),
+                value => ChunkCells::Uniform(value.as_i64().unwrap() as i32),
+            };
+            view.chunks.insert(key, cells);
+        }
+        let plan = &fixture["plan"];
+        let flat: Vec<i32> = plan["cells"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap() as i32).collect();
+        view.plan = Some(ViewPlan {
+            add: plan["add"].as_bool().unwrap(),
+            only_empty: plan["only_empty"].as_bool().unwrap(),
+            lo: cell(&plan["lo"]),
+            hi: cell(&plan["hi"]),
+            cells: Some(flat.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()),
+        });
+        view.start = Some(cell(&fixture["start"]));
+        view.finish = Some(cell(&fixture["finish"]));
+        view.player = Some(cell(&fixture["player"]));
+        view.roofs = fixture["roofs"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap() as i32).collect();
+        view.surface = fixture["surface"].as_bool().unwrap();
+        view.depth = fixture["depth"].as_i64().unwrap() as i32;
+        let started = std::time::Instant::now();
+        let (size, text) = build_voxel_view(&view);
+        eprintln!("{:?} in {:?}", size, started.elapsed());
+        assert_eq!(text, fixture["expected"].as_str().unwrap());
+    }
+
     #[test]
     fn surface_keeps_a_skin_of_terrain_and_the_player_above_ground() {
         // A column of terrain 10 high in a zone 1 x 12 x 1: only its top 3 show.
