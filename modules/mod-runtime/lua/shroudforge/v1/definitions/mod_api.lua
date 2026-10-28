@@ -298,5 +298,7 @@ function shroudforge.voxels.world(params) end
 --- copied; a missing chunk reads as not read. `plan`:
 --- {kind = "add"|"remove", only_empty, lo, hi, cells = {x1, y1, z1, ...} or nil for the whole box}.
 --- `surface`: terrain only `depth` cells deep under the open air, and around the plan.
+--- From a store, a view of the same box and chunks as the last one reuses what it read from them:
+--- one following the aimed cell only draws its new plan and marks.
 --- @return ShroudForgeVoxelViewJob
 function shroudforge.voxels.view3d(params) end
