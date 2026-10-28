@@ -212,6 +212,7 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
     // Zones drawn over the game image; see modules/game-overlay/README.md.
     let overlay = lua.create_table()?;
     let overlay_mod = r#mod.clone();
+    let overlay_paths = std::sync::Mutex::new(std::collections::HashMap::new());
     overlay.raw_set(
         "set",
         lua.create_function(move |_, (id, zone): (String, LuaValue)| {
@@ -219,7 +220,7 @@ pub fn create(lua: &mlua::Lua, r#mod: &Mod) -> mlua::Result<Table> {
                 return Ok((None, Some("invalid zone id".to_owned())));
             }
             let mut zone = lua_to_json(zone)?;
-            let result = resolve_overlay_paths(&mut zone, &overlay_mod)
+            let result = resolve_overlay_paths(&mut zone, &overlay_mod, &overlay_paths)
                 .and_then(|()| game_overlay::set_zone(&overlay_mod.info().id, &id, &zone));
             Ok(match result {
                 Ok(()) => (Some(true), None),
