@@ -241,3 +241,24 @@ function shroudforge.locale() end
 --- long a mod's own work takes: the Lua sandbox has no `os` library.
 --- @return number
 function shroudforge.clock() end
+
+--- @class ShroudForgeVoxelViewJob
+local VoxelViewJob = {}
+--- Nil while the view is being built, then its box, its cells and the build time.
+--- @return {box: integer[], cells: string, seconds: number}?
+function VoxelViewJob:result() end
+
+--- @class ShroudForgeVoxels
+shroudforge.voxels = {}
+--- Build a 3D view of cells lo..hi (256 a side, 8 388 608 cells at most) on a thread of its own,
+--- from the chunks a mod already read: run-length text, x fastest, then y, then z, a decimal count
+--- before a character repeating it. Characters: `.` air, `#` block, `%` terrain, `^` roof, `+`
+--- planned to build, `-` planned to remove, `S` start, `E` end, `P` the player, `?` not read.
+--- Ask the returned job at the next updates: the mod never waits.
+--- @param params {lo: integer[], hi: integer[], chunks: table[]?, plan: table?, start: integer[]?, finish: integer[]?, player: integer[]?, roofs: integer[]?, surface: boolean?, depth: integer?}
+--- `chunks`: {x, y, z, cells} per 16 x 16 x 16 chunk (origin divided by 16; cells 8192 bytes of
+--- little-endian u16, or one value for every cell); a missing chunk reads as not read. `plan`:
+--- {kind = "add"|"remove", only_empty, lo, hi, cells = {x1, y1, z1, ...} or nil for the whole box}.
+--- `surface`: terrain only `depth` cells deep under the open air, and around the plan.
+--- @return ShroudForgeVoxelViewJob
+function shroudforge.voxels.view3d(params) end
