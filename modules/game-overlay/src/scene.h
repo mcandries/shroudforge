@@ -139,7 +139,8 @@ struct Item {
     // Solid: only the faces seen from the camera, all at `opacity` (the view
     // over the game). X-ray: every face turned to the camera, inner ones
     // included, those of `ghost` characters at `ghost_alpha`, then `opacity`.
-    std::shared_ptr<const VoxelMesh> voxels;
+    // Its faces are built on the overlay's thread (VoxelSlot).
+    std::shared_ptr<VoxelSlot> voxels;
     // World: points and segments in the world, over the whole screen.
     std::vector<WorldPoint> world_points;
     std::vector<WorldLine> world_lines;
@@ -147,7 +148,7 @@ struct Item {
     // World: a box of cells in the world (`cells`), its faces built once
     // (colors by character in cell_colors); the corner of its first cell and
     // the cell side, in meters.
-    std::shared_ptr<const VoxelMesh> world_cells;
+    std::shared_ptr<VoxelSlot> world_cells;
     double world_cells_origin[3]{};
     double world_cells_size = 0.5;
     // Outlined only where its surface turns, not around each cell.
@@ -180,6 +181,9 @@ struct Item {
     bool follow_camera = false;
     float camera_offset = 0.0f;
     float perspective = 0.0f;  // 0 = parallel view, to 1 = a field of 90 degrees.
+    // Voxels: most faces of the mesh drawn; a larger box is drawn from a
+    // coarser mesh (VoxelMesh::coarser), to keep the game's frame rate.
+    int max_faces = kDefaultVoxelFaces;
     ImU32 edge = IM_COL32(0, 0, 0, 110);
     int floor_grid = 0;  // Lines on the floor of the box every this many cells, 0 = none.
     ImU32 grid_color = IM_COL32(255, 255, 255, 40);
