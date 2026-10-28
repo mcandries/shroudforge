@@ -127,7 +127,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field background? ShroudForgeOverlayColor Bar or chip background.
 --- @field thickness? number Separator thickness.
 --- @field value? number Bar fill, 0 to 1.
---- @field box? number[] Chip `{min width, height}`, default `{17, 17}`; voxels: `{x, y, z}` cells (1 to 128 each).
+--- @field box? number[] Chip `{min width, height}`, default `{17, 17}`; voxels: `{x, y, z}` cells (1 to 256 each).
 --- @field padding? number Chip horizontal padding. Default 4.
 --- @field path? string Icon: SVG path data (M L H V A Z), stroked.
 --- @field viewbox? number Icon box side. Default 24.

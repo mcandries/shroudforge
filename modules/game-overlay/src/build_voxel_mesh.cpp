@@ -14,7 +14,7 @@ bool drawn(const std::array<ImU32, 128>& colors, unsigned char ch) {
 
 std::vector<unsigned char> decode_voxel_cells(int sx, int sy, int sz, const std::string& cells) {
     if (sx < 1 || sy < 1 || sz < 1 || sx > kMaxVoxelSide || sy > kMaxVoxelSide || sz > kMaxVoxelSide)
-        throw std::runtime_error("voxels: box sides from 1 to 128");
+        throw std::runtime_error("voxels: box sides from 1 to 256");
     const size_t total = static_cast<size_t>(sx) * sy * sz;
     std::vector<unsigned char> grid;
     grid.reserve(total);
