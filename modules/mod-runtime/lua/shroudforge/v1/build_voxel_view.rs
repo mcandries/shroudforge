@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::reuse_voxel_view_base::{view_base, ViewBases};
+
 /// Side of the chunks a mod keeps its voxel reads in: 16 x 16 x 16 cells,
 /// x fastest, then y, then z.
 pub(crate) const CHUNK: i32 = 16;
@@ -60,6 +62,9 @@ pub(crate) struct ViewInput {
     /// Surface view: terrain only as a skin `depth` cells deep, and near the plan.
     pub surface: bool,
     pub depth: i32,
+    /// The last base built from the same chunks store, reused when only the
+    /// plan or the marks changed (reuse_voxel_view_base).
+    pub bases: Option<ViewBases>,
 }
 
 /// The characters of the view's categories (preview.CELL).
@@ -85,7 +90,7 @@ pub(crate) fn build_voxel_view(input: &ViewInput) -> ([usize; 3], String) {
     ];
     let (sx, sy, sz) = (size[0], size[1], size[2]);
     let total = sx * sy * sz;
-    let values = read_values(input, size);
+    let (values, skin) = view_base(input, size);
     let index_of = |cell: [i32; 3]| -> Option<usize> {
         for axis in 0..3 {
             if cell[axis] < input.lo[axis] || cell[axis] > input.hi[axis] {
@@ -99,7 +104,6 @@ pub(crate) fn build_voxel_view(input: &ViewInput) -> ([usize; 3], String) {
         ];
         Some(x + y * sx + z * sx * sy)
     };
-    let skin = if input.surface { Some(surface_skin(&values, size, input.depth)) } else { None };
     // The player's mark: on their cell, or the first empty cell above it.
     let player = input.player.map(|player| {
         for up in 0..=8 {
@@ -210,12 +214,37 @@ pub(crate) fn plan_contains(plan: &ViewPlan, cell: [i32; 3]) -> bool {
 }
 
 /// Every value of the zone, x fastest, then y, then z; -1 for a cell not read.
-fn read_values(input: &ViewInput, size: [usize; 3]) -> Vec<i32> {
-    let mut values = Vec::with_capacity(size[0] * size[1] * size[2]);
-    for z in input.lo[2]..=input.hi[2] {
-        for y in input.lo[1]..=input.hi[1] {
-            for x in input.lo[0]..=input.hi[0] {
-                values.push(chunk_value(&input.chunks, x, y, z));
+/// Chunk by chunk, a row of up to 16 cells at a time (27/10: a lookup per
+/// cell took most of the 100 to 170 ms of a 256 x 64 x 256 view).
+pub(crate) fn read_values(input: &ViewInput, size: [usize; 3]) -> Vec<i32> {
+    let (sx, sy) = (size[0], size[1]);
+    let mut values = vec![-1; size[0] * size[1] * size[2]];
+    for cz in input.lo[2].div_euclid(CHUNK)..=input.hi[2].div_euclid(CHUNK) {
+        for cy in input.lo[1].div_euclid(CHUNK)..=input.hi[1].div_euclid(CHUNK) {
+            for cx in input.lo[0].div_euclid(CHUNK)..=input.hi[0].div_euclid(CHUNK) {
+                let Some(cells) = input.chunks.get(&[cx, cy, cz]) else { continue };
+                let x0 = (cx * CHUNK).max(input.lo[0]);
+                let x1 = (cx * CHUNK + CHUNK - 1).min(input.hi[0]);
+                for z in (cz * CHUNK).max(input.lo[2])..=(cz * CHUNK + CHUNK - 1).min(input.hi[2]) {
+                    for y in (cy * CHUNK).max(input.lo[1])..=(cy * CHUNK + CHUNK - 1).min(input.hi[1]) {
+                        let row = (y - input.lo[1]) as usize * sx + (z - input.lo[2]) as usize * sx * sy;
+                        for x in x0..=x1 {
+                            values[row + (x - input.lo[0]) as usize] = match cells {
+                                ChunkCells::Uniform(value) => *value,
+                                ChunkCells::Packed(bytes) => {
+                                    let index = (x.rem_euclid(CHUNK)
+                                        + y.rem_euclid(CHUNK) * CHUNK
+                                        + z.rem_euclid(CHUNK) * CHUNK * CHUNK) as usize
+                                        * 2;
+                                    match bytes.get(index..index + 2) {
+                                        Some(pair) => i32::from(u16::from_le_bytes([pair[0], pair[1]])),
+                                        None => -1,
+                                    }
+                                }
+                            };
+                        }
+                    }
+                }
             }
         }
     }
@@ -225,7 +254,7 @@ fn read_values(input: &ViewInput, size: [usize; 3]) -> Vec<i32> {
 /// Surface view: the cells with an empty (or unknown) cell at most `depth`
 /// cells away along one of the six axes; above the zone's top counts as
 /// empty, its sides and bottom as solid. Six linear scans.
-fn surface_skin(values: &[i32], size: [usize; 3], depth: i32) -> Vec<bool> {
+pub(crate) fn surface_skin(values: &[i32], size: [usize; 3], depth: i32) -> Vec<bool> {
     let (sx, sy, sz) = (size[0], size[1], size[2]);
     let mut skin = vec![false; values.len()];
     let (stride_y, stride_z) = (sx as isize, (sx * sy) as isize);
@@ -286,6 +315,7 @@ mod tests {
             roofs: HashSet::new(),
             surface: false,
             depth: 3,
+            bases: None,
         }
     }
 
