@@ -77,6 +77,7 @@ struct WorldSolids {
     double origin[3]{};
     double cell = 0.5;
     std::vector<std::uint8_t> filled;
+    std::shared_ptr<const std::string> data;  // The run-length text they were decoded from.
 };
 enum class Align { Start, Center, End };
 

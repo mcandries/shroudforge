@@ -195,7 +195,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field height? integer
 --- @field scale? number Screen pixels per reference pixel (1080 reference, with the player's size option).
 --- @field menu? boolean A game menu is open (the game shows the mouse cursor).
---- @field features? string[] What the layer knows beyond its first version (`dashes`); see modules/game-overlay/README.md.
+--- @field features? string[] What the layer knows beyond its first version (`dashes`, `same_mesh`); see modules/game-overlay/README.md.
 
 --- Zones drawn over the game image. Each mod only sees its own zones; they are
 --- removed when the mod stops. The player can hide the overlay.
