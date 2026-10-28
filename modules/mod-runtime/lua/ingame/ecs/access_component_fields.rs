@@ -53,8 +53,10 @@ pub(super) fn ecs_fields(
     }
     let entity = args.get::<u32>(0).map_err(|e| e.to_string())?;
     let name = runtime_type_name(lua, &args, 1).map_err(|e| e.to_string())?;
+    let resolve_started = std::time::Instant::now();
     let component = runtime_provider::resolve(&name)
         .ok_or_else(|| format!("live ECS component unavailable: {name}"))?;
+    crate::lua::ingame::report_operation_timing::record_call("ecs.resolve", resolve_started);
     let registry = state.type_registry();
     let metadata = registry
         .get_by_name(kfc::reflection::LookupKey::Qualified(&name))
@@ -99,8 +101,10 @@ pub(super) fn ecs_fields(
     if fields.is_empty() || (!write && fields.len() != selections.raw_len()) {
         return Err("select a nonempty set of field paths".into());
     }
+    let read_started = std::time::Instant::now();
     let before = runtime_provider::read(entity, &name, component.size)
         .ok_or_else(|| format!("component read failed: {name}"))?;
+    crate::lua::ingame::report_operation_timing::record_call("ecs.native_read", read_started);
     if write {
         if !runtime_provider::can_write_component(&name) {
             return Err("component write context or original command phase is unavailable".into());
