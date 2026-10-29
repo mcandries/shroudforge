@@ -212,6 +212,25 @@ std::vector<Region> regions_of(const Recording& r) {
     return regions;
 }
 
+// The projection's centre: where rows 0, 1 and 3 all vanish.
+bool solve_eye(const float* m, double eye[3]) {
+    const double a[3][3] = {{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[12], m[13], m[14]}};
+    const double b[3] = {-m[3], -m[7], -m[15]};
+    const auto determinant = [](const double t[3][3]) {
+        return t[0][0] * (t[1][1] * t[2][2] - t[1][2] * t[2][1]) - t[0][1] * (t[1][0] * t[2][2] - t[1][2] * t[2][0]) +
+            t[0][2] * (t[1][0] * t[2][1] - t[1][1] * t[2][0]);
+    };
+    const double det = determinant(a);
+    if (std::fabs(det) < 1e-9) return false;
+    for (int c = 0; c < 3; ++c) {
+        double t[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k) t[r][k] = k == c ? b[r] : a[r][k];
+        eye[c] = determinant(t) / det;
+    }
+    return true;
+}
+
 bool same_place(const Place& a, const Place& b) {
     if (a.push != b.push) return false;
     if (a.push) return a.push_index == b.push_index && a.push_byte == b.push_byte;
@@ -395,19 +414,25 @@ bool submitted(VkCommandBuffer buffer, Camera& camera, const double input_eye[3]
     }
     if (got) {
         std::memcpy(camera.matrix, block, sizeof camera.matrix);
-        for (int i = 0; i < 3; ++i) camera.eye[i] = block[16 + i];
+        for (int i = 0; i < 3; ++i) camera.block_eye[i] = block[16 + i];
+        // 30/10: the block's eye made world items slide as the view turned.
+        if (!solve_eye(block, camera.eye))
+            for (int i = 0; i < 3; ++i) camera.eye[i] = camera.block_eye[i];
         camera.valid = true;
     }
     if (now - last_report >= 5000) {
         last_report = now;
-        double gap = -1.0;
+        double gap = -1.0, block_gap = -1.0;
         if (got) {
             const double d[3] = {camera.eye[0] - input_eye[0], camera.eye[1] - input_eye[1], camera.eye[2] - input_eye[2]};
             gap = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            const double e[3] = {camera.eye[0] - camera.block_eye[0], camera.eye[1] - camera.block_eye[1],
+                camera.eye[2] - camera.block_eye[2]};
+            block_gap = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
         }
         log_line("gpu camera: %s; %zu regions given to the scene, %zu sets and %zu mappings known, %d searches (%.1f ms), "
-            "%d follows, %d lost; eye %.3f m from the input camera's", found ? "found" : "searching", last_regions,
-            set_entries.size(), mappings.size(), searches, search_ms, follows, follow_misses, gap);
+            "%d follows, %d lost; eye %.3f m from the input camera's, %.3f m from the block's", found ? "found" : "searching",
+            last_regions, set_entries.size(), mappings.size(), searches, search_ms, follows, follow_misses, gap, block_gap);
         searches = follows = follow_misses = 0;
         search_ms = 0.0;
     }

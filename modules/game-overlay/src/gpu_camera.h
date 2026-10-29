@@ -13,7 +13,8 @@ namespace overlay::depth::gpu {
 // translation; reversed infinite depth: row 2 is 0, 0, 0, near) and the eye.
 struct Camera {
     float matrix[16]{};
-    double eye[3]{};
+    double eye[3]{};         // the projection's centre, solved from the matrix
+    double block_eye[3]{};   // the 3 floats after it in the block (not quite the centre)
     bool valid = false;
 };
 
