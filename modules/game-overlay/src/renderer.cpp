@@ -941,8 +941,7 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.to_clip[1] = 2.0f / screen.height;
     constants.depth_scale[0] = static_cast<float>(scene.extent.width) / screen.width;
     constants.depth_scale[1] = static_cast<float>(scene.extent.height) / screen.height;
-    const double margin = r.world_draw.remove ? settings.margin_remove : settings.margin;
-    constants.margin = static_cast<float>(margin / r.world_draw.near_distance);
+    constants.margin = static_cast<float>(settings.margin / r.world_draw.near_distance);
     d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
         &constants);
     const VkDeviceSize offset = 0;
@@ -1117,11 +1116,11 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     const depth::Settings depth_settings = depth::enabled() ? depth::settings() : depth::Settings{};
     r.world_draw.vertices.clear();
     r.world_draw.indices.clear();
-    r.world_draw.remove = false;
-    // The scene's camera from the GPU: its near distance too.
+    // The scene's camera from the GPU, when found: its near distance whatever
+    // camera draws.
     LocalCamera gpu_camera;
-    const bool gpu_known = depth_settings.camera == depth::CameraMode::Gpu && scene_depth.gpu_camera.valid &&
-        scene_depth.has_camera && camera_of(scene_depth.gpu_camera, scene_depth.camera, gpu_camera);
+    const bool gpu_known = scene_depth.gpu_camera.valid && scene_depth.has_camera &&
+        camera_of(scene_depth.gpu_camera, scene_depth.camera, gpu_camera);
     r.world_draw.near_distance = gpu_known ? scene_depth.gpu_camera.matrix[11] : depth_settings.near_distance;
     const bool world_ready = scene_depth.image && scene_depth.format == VK_FORMAT_D32_SFLOAT &&
         scene_depth.layout != VK_IMAGE_LAYOUT_UNDEFINED && scene_depth.layout != VK_IMAGE_LAYOUT_PREINITIALIZED &&
@@ -1143,12 +1142,13 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
             if (x < 0 || y < 0 || x >= static_cast<int>(e.width) || y >= static_cast<int>(e.height)) return -1.0f;
             return r.depth_values[static_cast<size_t>(y) * e.width + x];
         },
-        [&](LocalCamera& camera) {
-            if (gpu_known) {
+        [&](LocalCamera& camera, int mode) {
+            const auto chosen = mode >= 0 ? static_cast<depth::CameraMode>(mode) : depth_settings.camera;
+            if (chosen == depth::CameraMode::Gpu && gpu_known) {
                 camera = gpu_camera;
                 return true;
             }
-            if (!scene_depth.has_camera || depth_settings.camera == depth::CameraMode::Present) return false;
+            if (!scene_depth.has_camera || chosen == depth::CameraMode::Present) return false;
             camera = scene_depth.camera;
             return true;
         },
