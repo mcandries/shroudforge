@@ -7,6 +7,7 @@
 // and nothing is paid.
 
 #include "overlay.h"
+#include "game_depth.h"
 #include "render_probe.h"
 
 #include <atomic>
@@ -517,7 +518,8 @@ bool read_enabled() {
 }  // namespace
 
 bool enabled() {
-    static const bool on = is_game_process() && read_enabled();
+    // Not with the game depth: both would take the same functions.
+    static const bool on = is_game_process() && read_enabled() && !depth::enabled();
     return on;
 }
 

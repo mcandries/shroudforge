@@ -8,6 +8,7 @@
 // as the screen runs first (clear, draw), and the zones show it as a texture.
 
 #include "draw_scene.h"
+#include "game_depth.h"
 #include "overlay.h"
 #include "scene.h"
 
@@ -15,6 +16,9 @@
 #include <imgui_impl_vulkan.h>
 #include <imgui_internal.h>
 
+#include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -50,6 +54,31 @@ struct OffscreenTarget {
     bool failed = false;  // Not created for this extent and format: views are drawn directly.
 };
 
+// The game's scene depth read back (game-depth.on): reduced on the GPU to
+// kDepthWidth across (a blit, nearest), copied into a host buffer of the
+// frame slot, read when the slot comes back (kFrames presents later) and
+// shown in a corner as a picture, near cells bright. D32 only.
+constexpr uint32_t kDepthWidth = 640;
+constexpr ULONGLONG kDepthLogMilliseconds = 5000;
+
+struct DepthReadback {
+    bool failed = false;
+    VkExtent2D source{};  // the game's depth it was made for
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkExtent2D extent{};  // reduced
+    VkImage image{};
+    VkDeviceMemory image_memory{};
+    VkBuffer buffers[kFrames]{};
+    VkDeviceMemory buffer_memory[kFrames]{};
+    const float* mapped[kFrames]{};
+    bool pending[kFrames]{};
+    depth::SceneDepth read_from[kFrames];
+    ImTextureData* texture{};
+    depth::SceneDepth shown;
+    ULONGLONG last_log = 0;
+    bool skip_logged = false;
+};
+
 }  // namespace
 
 struct Renderer {
@@ -73,6 +102,7 @@ struct Renderer {
     ULONGLONG last_tick = 0;
     bool other_queue_logged = false;
     bool first_frame_logged = false;
+    DepthReadback depth;
 };
 
 namespace {
@@ -404,6 +434,223 @@ bool ensure_offscreen(DeviceData& d, Renderer& r, VkExtent2D extent, VkFormat fo
     return false;
 }
 
+uint32_t memory_type(DeviceData& d, uint32_t bits, VkMemoryPropertyFlags flags) {
+    auto memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        d.instance->next_gipa(d.instance->instance, "vkGetPhysicalDeviceMemoryProperties"));
+    if (!memory_properties) return UINT32_MAX;
+    VkPhysicalDeviceMemoryProperties properties{};
+    memory_properties(d.physical_device, &properties);
+    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & flags) == flags) return i;
+    return UINT32_MAX;
+}
+
+void release_depth(DeviceData& d, Renderer& r) {
+    DepthReadback& b = r.depth;
+    wait_frames(d, r);
+    for (uint32_t i = 0; i < kFrames; ++i) {
+        if (b.buffers[i]) d.fn.DestroyBuffer(d.device, b.buffers[i], nullptr);
+        if (b.buffer_memory[i]) d.fn.FreeMemory(d.device, b.buffer_memory[i], nullptr);
+        b.buffers[i] = VK_NULL_HANDLE;
+        b.buffer_memory[i] = VK_NULL_HANDLE;
+        b.mapped[i] = nullptr;
+        b.pending[i] = false;
+    }
+    if (b.image) d.fn.DestroyImage(d.device, b.image, nullptr);
+    if (b.image_memory) d.fn.FreeMemory(d.device, b.image_memory, nullptr);
+    b.image = VK_NULL_HANDLE;
+    b.image_memory = VK_NULL_HANDLE;
+}
+
+bool create_depth(DeviceData& d, Renderer& r, const depth::SceneDepth& scene) {
+    DepthReadback& b = r.depth;
+    if (scene.format != VK_FORMAT_D32_SFLOAT) {
+        log_line("game depth: format %d not read (D32 only)", static_cast<int>(scene.format));
+        return false;
+    }
+    auto format_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(
+        d.instance->next_gipa(d.instance->instance, "vkGetPhysicalDeviceFormatProperties"));
+    VkFormatProperties features{};
+    if (format_properties) format_properties(d.physical_device, scene.format, &features);
+    const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if ((features.optimalTilingFeatures & blit) != blit) {
+        log_line("game depth: format %d cannot be blitted (features 0x%x)", static_cast<int>(scene.format),
+            features.optimalTilingFeatures);
+        return false;
+    }
+    b.source = scene.extent;
+    b.format = scene.format;
+    const uint32_t width = std::min(kDepthWidth, scene.extent.width);
+    b.extent = {width, std::max(1u, static_cast<uint32_t>(
+        static_cast<uint64_t>(scene.extent.height) * width / scene.extent.width))};
+    VkImageCreateInfo image_info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = scene.format;
+    image_info.extent = {b.extent.width, b.extent.height, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (d.fn.CreateImage(d.device, &image_info, nullptr, &b.image) != VK_SUCCESS) return false;
+    VkMemoryRequirements requirements{};
+    d.fn.GetImageMemoryRequirements(d.device, b.image, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocate.memoryTypeIndex == UINT32_MAX) return false;
+    if (d.fn.AllocateMemory(d.device, &allocate, nullptr, &b.image_memory) != VK_SUCCESS) return false;
+    if (d.fn.BindImageMemory(d.device, b.image, b.image_memory, 0) != VK_SUCCESS) return false;
+    for (uint32_t i = 0; i < kFrames; ++i) {
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = static_cast<VkDeviceSize>(b.extent.width) * b.extent.height * sizeof(float);
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (d.fn.CreateBuffer(d.device, &buffer_info, nullptr, &b.buffers[i]) != VK_SUCCESS) return false;
+        d.fn.GetBufferMemoryRequirements(d.device, b.buffers[i], &requirements);
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (allocate.memoryTypeIndex == UINT32_MAX) return false;
+        if (d.fn.AllocateMemory(d.device, &allocate, nullptr, &b.buffer_memory[i]) != VK_SUCCESS) return false;
+        if (d.fn.BindBufferMemory(d.device, b.buffers[i], b.buffer_memory[i], 0) != VK_SUCCESS) return false;
+        void* mapped = nullptr;
+        if (d.fn.MapMemory(d.device, b.buffer_memory[i], 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) return false;
+        b.mapped[i] = static_cast<const float*>(mapped);
+    }
+    log_line("game depth: read back from img#%d %ux%u to %ux%u", scene.id, scene.extent.width, scene.extent.height,
+        b.extent.width, b.extent.height);
+    return true;
+}
+
+// The reduced depth of this frame's scene, recorded before the zones' pass:
+// the game's image goes from the layout it left it in to a transfer source
+// and back, untouched otherwise.
+void record_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene) {
+    DepthReadback& b = r.depth;
+    if (b.failed || !scene.image) return;
+    if (scene.layout == VK_IMAGE_LAYOUT_UNDEFINED || scene.layout == VK_IMAGE_LAYOUT_PREINITIALIZED) {
+        if (!b.skip_logged) log_line("game depth: img#%d in layout %d, not read", scene.id, static_cast<int>(scene.layout));
+        b.skip_logged = true;
+        return;
+    }
+    if (b.source.width != scene.extent.width || b.source.height != scene.extent.height || b.format != scene.format) {
+        release_depth(d, r);
+        if (!create_depth(d, r, scene)) {
+            release_depth(d, r);
+            b.failed = true;
+            log_line("game depth: not read back");
+            return;
+        }
+    }
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = scene.layout;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = scene.image;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = b.image;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(scene.extent.width), static_cast<int32_t>(scene.extent.height), 1};
+    blit.dstSubresource = blit.srcSubresource;
+    blit.dstOffsets[1] = {static_cast<int32_t>(b.extent.width), static_cast<int32_t>(b.extent.height), 1};
+    d.fn.CmdBlitImage(cb, scene.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = scene.layout;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, after);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    copy.imageExtent = {b.extent.width, b.extent.height, 1};
+    d.fn.CmdCopyImageToBuffer(cb, b.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b.buffers[slot], 1, &copy);
+    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    host.buffer = b.buffers[slot];
+    host.size = VK_WHOLE_SIZE;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &host, 0,
+        nullptr);
+    b.pending[slot] = true;
+    b.read_from[slot] = scene;
+}
+
+// A slot's depth, back from the GPU: as a picture (log scale between its
+// nearest and farthest cells, near bright, nothing drawn there dark blue),
+// and a line in the log now and then.
+void take_depth(Renderer& r, uint32_t slot) {
+    DepthReadback& b = r.depth;
+    if (!b.pending[slot] || !b.mapped[slot]) return;
+    b.pending[slot] = false;
+    const uint32_t width = b.extent.width, height = b.extent.height;
+    const float* values = b.mapped[slot];
+    float nearest = 0.0f, farthest = FLT_MAX;
+    size_t empty = 0;
+    for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
+        const float value = values[i];
+        if (value <= 0.0f) {
+            ++empty;
+            continue;
+        }
+        nearest = std::max(nearest, value);
+        farthest = std::min(farthest, value);
+    }
+    if (!b.texture || b.texture->Width != static_cast<int>(width) || b.texture->Height != static_cast<int>(height)) {
+        b.texture = IM_NEW(ImTextureData)();
+        b.texture->Create(ImTextureFormat_RGBA32, static_cast<int>(width), static_cast<int>(height));
+        ImGui::RegisterUserTexture(b.texture);
+        r.textures.push_back(b.texture);
+    }
+    // Reversed depth: larger is nearer; the distance goes as 1 / value.
+    const double span = nearest > farthest && farthest > 0.0f ? std::log(nearest / farthest) : 1.0;
+    unsigned char* pixels = static_cast<unsigned char*>(b.texture->Pixels);
+    for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
+        const float value = values[i];
+        unsigned char* p = pixels + i * 4;
+        if (value <= 0.0f) {
+            p[0] = 20, p[1] = 30, p[2] = 70, p[3] = 255;
+            continue;
+        }
+        const double t = farthest > 0.0f ? std::clamp(std::log(value / farthest) / span, 0.0, 1.0) : 0.0;
+        const auto grey = static_cast<unsigned char>(40.0 + 215.0 * t);
+        p[0] = p[1] = p[2] = grey, p[3] = 255;
+    }
+    if (b.texture->Status == ImTextureStatus_OK) {
+        b.texture->UpdateRect = {0, 0, static_cast<unsigned short>(width), static_cast<unsigned short>(height)};
+        b.texture->Updates.clear();
+        b.texture->Updates.push_back(b.texture->UpdateRect);
+        b.texture->SetStatus(ImTextureStatus_WantUpdates);
+    }
+    b.shown = b.read_from[slot];
+    const ULONGLONG now = GetTickCount64();
+    if (now - b.last_log < kDepthLogMilliseconds) return;
+    b.last_log = now;
+    const float centre = values[(height / 2) * width + width / 2];
+    log_line("game depth: img#%d %ux%u layout %d; centre %.6g, nearest %.6g, farthest %.6g, nothing drawn %.1f%%",
+        b.shown.id, b.shown.extent.width, b.shown.extent.height, static_cast<int>(b.shown.layout), centre, nearest,
+        farthest == FLT_MAX ? 0.0f : farthest, 100.0 * empty / (static_cast<double>(width) * height));
+}
+
 }  // namespace
 
 VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& present) {
@@ -426,7 +673,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     }
     if (!target || family == UINT32_MAX) return VK_NULL_HANDLE;
     set_output(true, static_cast<int>(target->extent.width), static_cast<int>(target->extent.height));
-    if (!scene_has_visible_zones()) return VK_NULL_HANDLE;
+    // The game's depth shown in a corner (game-depth.on): drawn without zones too.
+    if (!scene_has_visible_zones() && !depth::enabled()) return VK_NULL_HANDLE;
 
     if (!d.renderer) {
         d.renderer = new Renderer{};
@@ -459,7 +707,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         return VK_NULL_HANDLE;
     }
 
-    FrameSlot& frame = r.frames[r.next_frame++ % kFrames];
+    const uint32_t slot = r.next_frame++ % kFrames;
+    FrameSlot& frame = r.frames[slot];
     if (frame.submitted) {
         if (d.fn.WaitForFences(d.device, 1, &frame.fence, VK_TRUE, 1'000'000'000ull) != VK_SUCCESS) {
             log_line("frame fence timeout, drawing disabled");
@@ -468,6 +717,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         }
         d.fn.ResetFences(d.device, 1, &frame.fence);
         frame.submitted = false;
+        take_depth(r, slot);
     }
 
     // Build this frame's draw lists.
@@ -496,6 +746,19 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         },
     };
     draw_scene(*ImGui::GetForegroundDrawList(), scene, io.DisplaySize, resources);
+    if (r.depth.texture && r.depth.texture->Status != ImTextureStatus_WantCreate) {
+        // Bottom left, a quarter of the screen across.
+        ImDrawList& list = *ImGui::GetForegroundDrawList();
+        const float width = io.DisplaySize.x / 4.0f;
+        const float height = width * r.depth.texture->Height / std::max(1, r.depth.texture->Width);
+        const ImVec2 from(16.0f, io.DisplaySize.y - 16.0f - height), to(16.0f + width, io.DisplaySize.y - 16.0f);
+        list.AddImage(r.depth.texture->GetTexRef(), from, to);
+        list.AddRect(from, to, IM_COL32(255, 255, 255, 160));
+        char label[96];
+        snprintf(label, sizeof label, "game depth img#%d %ux%u, layout %d", r.depth.shown.id, r.depth.shown.extent.width,
+            r.depth.shown.extent.height, static_cast<int>(r.depth.shown.layout));
+        list.AddText(ImVec2(from.x + 6.0f, from.y + 4.0f), IM_COL32(255, 255, 160, 255), label);
+    }
     ImGui::Render();
     // Textures first: the off-screen pass may use the font atlas before the
     // zones' pass would upload it.
@@ -510,6 +773,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     d.fn.BeginCommandBuffer(cb, &begin);
+    if (depth::enabled()) record_depth(d, r, cb, slot, depth::scene_depth(target->extent));
     if (r.offscreen_used) {
         ImDrawData data;
         data.Valid = true;
@@ -575,6 +839,7 @@ void destroy_renderer(DeviceData& d) {
     if (r->context) {
         ImGui::SetCurrentContext(r->context);
         if (r->backend_ready) release_offscreen(d, *r);
+        release_depth(d, *r);
         r->offscreen_list.reset();
         if (r->backend_ready) ImGui_ImplVulkan_Shutdown();
         for (ImTextureData* texture : r->textures) ImGui::UnregisterUserTexture(texture);
