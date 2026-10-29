@@ -8,6 +8,7 @@
 // With no zone, or anything unexpected, the game presents untouched.
 
 #include "overlay.h"
+#include "game_depth.h"
 #include "render_probe.h"
 
 #include <intrin.h>
@@ -119,6 +120,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
         devices[dispatch_key(*device)] = d;
     }
     probe::start(*device, next_gdpa);
+    depth::start(*device, next_gdpa);
     log_line("device %p created, called from %s, layers below: %s", static_cast<void*>(*device),
         module_name(_ReturnAddress()).c_str(), below.c_str());
     return VK_SUCCESS;
@@ -203,6 +205,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
         std::lock_guard render(d->render_mutex);
         done = render_frame(*d, queue, *info);
     }
+    depth::presented();
     if (!done) return d->fn.QueuePresentKHR(queue, info);
     VkPresentInfoKHR patched = *info;
     patched.waitSemaphoreCount = 1;
@@ -220,6 +223,7 @@ PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(CreateSwapchainKHR);
     INTERCEPT(DestroySwapchainKHR);
     INTERCEPT(QueuePresentKHR);
+    if (PFN_vkVoidFunction own = depth::function(requested)) return own;
     return probe::function(requested);
 }
 
