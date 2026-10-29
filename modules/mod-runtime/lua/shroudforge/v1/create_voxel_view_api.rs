@@ -194,8 +194,9 @@ fn read_input(params: &Table) -> mlua::Result<ViewInput> {
 
 /// The input of a build in the world: lo, hi (the build's box, or the start
 /// cell), chunks, plan, tile (256), total (1048576), margin (8), solids_max
-/// (262144). Chunks are taken around the box by the margin, capped as the
-/// solids are.
+/// (262144), and solids_lo, solids_hi: the box of the solids instead of the
+/// margin (256 a side at most). Chunks are taken around the box by the
+/// margin, or in the solids' box, capped as the solids are.
 fn read_world_input(params: &Table) -> mlua::Result<WorldInput> {
     let lo = required_cell(params, "lo")?;
     let hi = required_cell(params, "hi")?;
@@ -207,8 +208,21 @@ fn read_world_input(params: &Table) -> mlua::Result<WorldInput> {
     let margin = params.raw_get::<Option<i32>>("margin")?.unwrap_or(8).clamp(0, 64);
     let around = |cell: [i32; 3], sign: i32| [cell[0] + sign * margin, cell[1] + sign * margin, cell[2] + sign * margin];
     let plan = read_plan(params)?;
+    let solids_box = match (
+        params.raw_get::<Option<Table>>("solids_lo")?,
+        params.raw_get::<Option<Table>>("solids_hi")?,
+    ) {
+        (Some(_), Some(_)) => {
+            let (from, to) = (required_cell(params, "solids_lo")?, required_cell(params, "solids_hi")?);
+            if (0..3).any(|axis| to[axis] < from[axis] || to[axis] - from[axis] >= 256) {
+                return Err(mlua::Error::runtime("world cells: solids_lo..solids_hi of 1 to 256 cells a side"));
+            }
+            Some((from, to))
+        }
+        _ => None,
+    };
     // The plan's box and the solids' box, whichever is larger.
-    let (mut from, mut to) = (around(lo, -1), around(hi, 1));
+    let (mut from, mut to) = solids_box.unwrap_or((around(lo, -1), around(hi, 1)));
     if let Some(plan) = &plan {
         for axis in 0..3 {
             from[axis] = from[axis].min(plan.lo[axis]);
@@ -224,6 +238,7 @@ fn read_world_input(params: &Table) -> mlua::Result<WorldInput> {
         total: params.raw_get::<Option<usize>>("total")?.unwrap_or(1 << 20).min(1 << 24),
         margin,
         solids_max: params.raw_get::<Option<usize>>("solids_max")?.unwrap_or(1 << 18).min(1 << 24),
+        solids_box,
     })
 }
 
