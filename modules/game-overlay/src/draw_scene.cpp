@@ -422,9 +422,20 @@ struct WorldView {
     double eye[3]{}, right[3]{}, up[3]{}, forward[3]{};
     double focal_x = 1.0, focal_y = 1.0;
     ImVec2 screen;
+    // With the GPU camera's matrix: camera space is its clip x, y and w (w the
+    // distance along the gaze, in meters), focal_x 1 and focal_y -1 (Vulkan's
+    // y goes down): the very projection of the image.
+    bool matrix = false;
+    double m[16]{};
 
     // Camera space of a world point: x right, y up, z forward (meters).
     void to_camera(const double point[3], double out[3]) const {
+        if (matrix) {
+            out[0] = m[0] * point[0] + m[1] * point[1] + m[2] * point[2] + m[3];
+            out[1] = m[4] * point[0] + m[5] * point[1] + m[6] * point[2] + m[7];
+            out[2] = m[12] * point[0] + m[13] * point[1] + m[14] * point[2] + m[15];
+            return;
+        }
         const double d[3] = {point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
         out[0] = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
         out[1] = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
@@ -447,6 +458,8 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
         for (int i = 0; i < 4; ++i) camera.orientation[i] = drawn->orientation[i];
         camera.fov_y = drawn->fov_y;
         camera.fov_x = drawn->fov_x;
+        camera.has_matrix = drawn->has_matrix;
+        for (int i = 0; i < 16; ++i) camera.matrix[i] = drawn->matrix[i];
     }
     const double* q = camera.orientation;
     const auto rotate = [&](double x, double y, double z, double out[3]) {
@@ -462,6 +475,13 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
     rotate(0.0, 0.0, 1.0, view.forward);
     view.screen = ImGui::GetIO().DisplaySize;
     if (view.screen.x <= 0.0f || view.screen.y <= 0.0f) return false;
+    if (camera.has_matrix) {
+        view.matrix = true;
+        for (int i = 0; i < 16; ++i) view.m[i] = camera.matrix[i];
+        view.focal_x = 1.0;
+        view.focal_y = -1.0;
+        return true;
+    }
     view.focal_y = std::tan(camera.fov_y * 0.5);
     view.focal_x = camera.fov_x > 0.0 ? std::tan(camera.fov_x * 0.5) : view.focal_y * view.screen.x / view.screen.y;
     return view.focal_y > 0.0;
