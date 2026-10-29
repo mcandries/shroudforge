@@ -896,13 +896,17 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
             return false;
         }
     }
-    VkDescriptorImageInfo image{w.sampler, view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+    // Our copy is already sampled as it is; the game's own image goes read-only.
+    const bool as_is = scene.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo image{w.sampler, view,
+        as_is ? scene.layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = w.sets[slot];
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo = &image;
     d.fn.UpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
+    if (as_is) return true;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -947,6 +951,7 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
 
 // After the zones' pass: the game's depth back in its layout.
 void finish_world(DeviceData& d, VkCommandBuffer cb, const depth::SceneDepth& scene) {
+    if (scene.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
