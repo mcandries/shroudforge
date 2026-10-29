@@ -13,6 +13,11 @@ struct LocalCamera {
     double fov_y = 0.0;        // Radians.
     double aspect = 0.0;
     double fov_x = 0.0;        // Radians, when known (the GPU camera); else from the screen's shape.
+    // The GPU camera's view-projection (row-major, world translation; Vulkan
+    // clip space), when `has_matrix`: world items are projected with it as
+    // the GPU does, no axes or focal worked out from it.
+    bool has_matrix = false;
+    double matrix[16]{};
     // The building cursor, when the runtime gives it: the corner of the
     // placement cube (meters), its orientation, and its flags (bit 0: no
     // valid position, aiming at nothing).
