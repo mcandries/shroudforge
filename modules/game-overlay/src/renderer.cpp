@@ -1011,6 +1011,25 @@ bool camera_of(const depth::gpu::Camera& gpu, const LocalCamera& reference, Loca
     for (int i = 0; i < 3; ++i) out.position[i] = gpu.eye[i];
     out.fov_y = 2.0 * std::atan(1.0 / row1);
     out.fov_x = row0 > 1e-9 ? 2.0 * std::atan(1.0 / row0) : 0.0;
+    // Projected with the matrix itself (30/10: axes and focals worked out
+    // from it still made world items slide as the view turned).
+    out.has_matrix = true;
+    for (int i = 0; i < 16; ++i) out.matrix[i] = m[i];
+    // How it compares with the input camera, now and then (for the KB).
+    static ULONGLONG last_log = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last_log >= 10000) {
+        last_log = now;
+        const double tx2 = 2.0 * (q[1] * 1.0 - q[2] * 0.0), ty2 = 2.0 * (q[2] * 0.0 - q[0] * 1.0), tz2 = 0.0;
+        const double ref_forward[3] = {q[3] * tx2 + (q[1] * tz2 - q[2] * ty2), q[3] * ty2 + (q[2] * tx2 - q[0] * tz2),
+            1.0 + q[3] * tz2 + (q[0] * ty2 - q[1] * tx2)};
+        double row_right[3] = {side[0] / std::max(row0, 1e-9), side[1] / std::max(row0, 1e-9), side[2] / std::max(row0, 1e-9)};
+        log_line("gpu camera: vs the input camera: gaze %.3f deg apart, right %.3f (row 0 %.3f), up %.3f; fov y %.2f deg "
+            "(input %.2f), fov x %.2f deg, aspect %.4f (input %.4f)",
+            std::acos(std::clamp(dot(forward, ref_forward), -1.0, 1.0)) * 57.29578, dot(right, row_right),
+            dot(row_right, right), dot(up, ref_up), out.fov_y * 57.29578, reference.fov_y * 57.29578,
+            out.fov_x * 57.29578, row1 / std::max(row0, 1e-9), reference.aspect);
+    }
     return true;
 }
 
