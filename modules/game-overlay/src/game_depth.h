@@ -24,6 +24,16 @@ struct SceneDepth {
     int id = 0;  // The image's number, for the logs.
 };
 SceneDepth scene_depth(VkExtent2D screen);
+
+// Read from game-depth.on (`near=0.01 margin=0.15`), again when it changes:
+// the game's near distance (its depth is near / distance) and how far behind
+// the game's surface (meters) a world cell still shows.
+struct Settings {
+    double near_distance = 0.01;
+    double margin = 0.15;
+    bool show_picture = true;  // `picture=0`: no picture of the depth in a corner
+};
+Settings settings();
 // At each present, after the overlay drew: a frame ends.
 void presented();
 

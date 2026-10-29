@@ -18,6 +18,8 @@
 
 namespace overlay {
 
+void log_line(const char* format, ...);  // log.cpp
+
 namespace {
 
 struct Context {
@@ -725,14 +727,19 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         double depth;
         double corners[4][3];  // Camera space.
         ImVec2 points[8];
+        float point_depths[8];  // As the game's: near / distance.
         int count;
         ImU32 fill, edge;
         std::uint8_t edges;
         bool dashed;  // Hidden, shown by its edges dashed only.
     };
+    // Against the game's depth (game-depth.on): every face sent to the
+    // renderer, which leaves out, pixel by pixel, what the game's surface
+    // hides; no test here.
+    WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
     // Hide hidden faces: their results kept per mesh, tested a part per frame.
     HiddenFaces* hidden = nullptr;
-    if (item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
+    if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
         hidden = &hidden_faces_for(item, shared_mesh);
         test_hidden_faces(item, mesh, view, *hidden);
     }
@@ -767,7 +774,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             for (int i = 0; i < 3; ++i) centre[i] += in[k][i] * 0.25;
         }
         ImU32 color = item.cell_colors[face.ch];
-        if (!hidden && item.world_solids && tests < kMaxHiddenTests) {
+        if (!gpu && !hidden && item.world_solids && tests < kMaxHiddenTests) {
             ++tests;
             double middle[3];
             for (int i = 0; i < 3; ++i) middle[i] = base[i] + 0.5 * s;
@@ -790,13 +797,18 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             for (int k = 0; k < 4; ++k)
                 for (int i = 0; i < 3; ++i)
                     entry.corners[k][i] = in[0][i] + (in[1][i] - in[0][i]) * at[k][0] + (in[3][i] - in[0][i]) * at[k][1];
+            const double near_distance = gpu ? gpu->near_distance : 1.0;
             for (int k = 0; k < 4; ++k) {
                 const double* a = entry.corners[k];
                 const double* b = entry.corners[(k + 1) % 4];
-                if (a[2] >= kNear) entry.points[entry.count++] = view.to_screen(a);
+                if (a[2] >= kNear) {
+                    entry.point_depths[entry.count] = static_cast<float>(near_distance / a[2]);
+                    entry.points[entry.count++] = view.to_screen(a);
+                }
                 if ((a[2] >= kNear) != (b[2] >= kNear)) {
                     const double t = (kNear - a[2]) / (b[2] - a[2]);
                     const double cut[3] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, kNear};
+                    entry.point_depths[entry.count] = static_cast<float>(near_distance / kNear);
                     entry.points[entry.count++] = view.to_screen(cut);
                 }
             }
@@ -806,6 +818,8 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             entry.depth = centre[2];
             entry.dashed = piece_hidden;
             entry.fill = fill;
+            // Against the game's depth, a hidden part of an edge shows dashed
+            // in this color (the renderer decides which part).
             entry.edge = piece_hidden ? dashed_edge : edge;
             entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges));
             shown.push_back(entry);
@@ -829,6 +843,49 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             }
     }
     std::sort(shown.begin(), shown.end(), [](const Shown& a, const Shown& b) { return a.depth > b.depth; });
+    if (gpu) {
+        // The fills, then the edges as thin quads, all with their depth.
+        for (const Shown& entry : shown) {
+            const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
+            for (int k = 0; k < entry.count; ++k)
+                gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f, entry.fill});
+            for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
+        }
+        const float half = std::max(0.75f, 0.75f * c.scale);
+        const float period = 10.0f * c.scale;  // 6 on, 4 off, as dashed_line
+        for (const Shown& entry : shown)
+            for (int k = 0; k < 4; ++k) {
+                if (!(entry.edges & (1 << k))) continue;
+                // Unseen edges (the solid style) only matter dashed.
+                if (!item.world_hidden_dashed && !(entry.edge & IM_COL32_A_MASK)) continue;
+                double a[3], b[3];
+                std::memcpy(a, entry.corners[k], sizeof a);
+                std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
+                if (a[2] < kNear && b[2] < kNear) continue;
+                if (a[2] < kNear || b[2] < kNear) {
+                    double* behind = a[2] < kNear ? a : b;
+                    const double* front = a[2] < kNear ? b : a;
+                    const double t = (kNear - front[2]) / (behind[2] - front[2]);
+                    for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
+                }
+                const ImVec2 pa = view.to_screen(a), pb = view.to_screen(b);
+                const float dx = pb.x - pa.x, dy = pb.y - pa.y;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length < 0.5f) continue;
+                const float nx = -dy / length * half, ny = dx / length * half;
+                const auto da = static_cast<float>(gpu->near_distance / a[2]), db = static_cast<float>(gpu->near_distance / b[2]);
+                // Dashes only where the edge is hidden, and only in Remove mode.
+                const float ua = item.world_hidden_dashed ? 0.0f : -1.0f;
+                const float ub = item.world_hidden_dashed ? length / period : -1.0f;
+                const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, entry.edge});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, entry.edge});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, entry.edge});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, entry.edge});
+                gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
+            }
+        return;
+    }
     // The fills without anti-aliased borders, whose overlaps would draw the
     // seams between faces; the edges after, so that no nearer fill covers
     // part of one.
@@ -907,8 +964,25 @@ void draw_world(const Context& c, const Item& item) {
         segment(line.from, line.to, behind_solids(item, view, middle) ? lighter(line.color) : line.color, line.width);
     }
     double corners[4][3];
-    if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners))
+    if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners)) {
         for (int k = 0; k < 4; ++k) segment(corners[k], corners[(k + 1) % 4], item.aim_face_color, item.aim_face_width);
+        // The game's depth read back at the aimed face's middle, times its
+        // distance: the game's near distance (depth = near / distance), to
+        // check the one assumed (game-depth.on).
+        static auto last_near_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (c.resources.game_depth_at && now - last_near_log >= std::chrono::seconds(5)) {
+            double middle[3] = {0.0, 0.0, 0.0}, p[3];
+            for (int k = 0; k < 4; ++k)
+                for (int i = 0; i < 3; ++i) middle[i] += corners[k][i] * 0.25;
+            view.to_camera(middle, p);
+            const float game = p[2] > kNear ? c.resources.game_depth_at(view.to_screen(p)) : -1.0f;
+            if (game > 0.0f) {
+                last_near_log = now;
+                log_line("game depth: at the aimed face, %.2f m away: depth %.6g, near %.5g m", p[2], game, game * p[2]);
+            }
+        }
+    }
     for (const WorldPoint& point : item.world_points) {
         double p[3];
         view.to_camera(point.at, p);
