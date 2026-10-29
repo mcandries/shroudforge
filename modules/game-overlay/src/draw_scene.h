@@ -29,6 +29,7 @@ struct WorldDepthVertex {
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
+    bool remove = false;  // cells to remove among them: the larger margin
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };

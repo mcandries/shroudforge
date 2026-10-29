@@ -3,6 +3,7 @@
 // the present.
 #pragma once
 
+#include "gpu_camera.h"
 #include "local_camera.h"
 
 #include <vulkan/vulkan.h>
@@ -34,19 +35,25 @@ struct SceneDepth {
     // the scene in the depth, when `has_camera`.
     LocalCamera camera;
     bool has_camera = false;
+    // The scene's camera as the game handed it to the GPU, when found.
+    gpu::Camera gpu_camera;
 };
 SceneDepth scene_depth(VkExtent2D screen);
 
 // Read from game-depth.on (`near=0.01 margin=0.15`), again when it changes:
 // the game's near distance (its depth is near / distance) and how far behind
 // the game's surface (meters) a world cell still shows.
+enum class CameraMode { Gpu, Copy, Present };
 struct Settings {
-    double near_distance = 0.01;
+    double near_distance = 0.01;  // the GPU camera's, when found
     double margin = 0.15;
-    // `camera=present`: the world items drawn with the camera read at the
-    // present, as without the game's depth; `camera=copy` (default): with the
-    // one read as the game recorded the scene.
-    bool camera_from_copy = true;
+    // Cells to remove sit in the game's blocks, whose relief juts out.
+    double margin_remove = 0.35;
+    // Which camera draws the world items: `camera=gpu` (default), the
+    // scene's as handed to the GPU (else as `copy`); `camera=copy`, the one
+    // read as the game recorded the scene; `camera=present`, the one read at
+    // the present, as without the game's depth.
+    CameraMode camera = CameraMode::Gpu;
 };
 Settings settings();
 // At each present, after the overlay drew: a frame ends.
