@@ -44,7 +44,12 @@ struct InstanceData {
     X(CmdBeginRenderPass) X(CmdEndRenderPass) X(DeviceWaitIdle) X(CreateImage) X(DestroyImage) \
     X(GetImageMemoryRequirements) X(AllocateMemory) X(FreeMemory) X(BindImageMemory) X(CmdPipelineBarrier) \
     X(CmdBlitImage) X(CmdCopyImageToBuffer) X(CreateBuffer) X(DestroyBuffer) X(GetBufferMemoryRequirements) \
-    X(BindBufferMemory) X(MapMemory)
+    X(BindBufferMemory) X(MapMemory) X(UnmapMemory) X(CreateShaderModule) X(DestroyShaderModule) \
+    X(CreateDescriptorSetLayout) X(DestroyDescriptorSetLayout) X(CreatePipelineLayout) X(DestroyPipelineLayout) \
+    X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreateSampler) X(DestroySampler) X(CreateDescriptorPool) \
+    X(DestroyDescriptorPool) X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(CmdBindPipeline) \
+    X(CmdBindDescriptorSets) X(CmdBindVertexBuffers) X(CmdBindIndexBuffer) X(CmdPushConstants) X(CmdSetViewport) \
+    X(CmdSetScissor) X(CmdDrawIndexed)
 
 struct DeviceFunctions {
 #define OVERLAY_DECLARE(name) PFN_vk##name name{};
