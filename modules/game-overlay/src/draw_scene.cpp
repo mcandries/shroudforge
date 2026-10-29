@@ -423,8 +423,10 @@ struct WorldView {
     double focal_x = 1.0, focal_y = 1.0;
     ImVec2 screen;
     // With the GPU camera's matrix: camera space is its clip x, y and w (w the
-    // distance along the gaze, in meters), focal_x 1 and focal_y -1 (Vulkan's
-    // y goes down): the very projection of the image.
+    // distance along the gaze, in meters), focal_x and focal_y 1: the very
+    // projection of the image. Its clip y goes up (30/10: taken as Vulkan's,
+    // down, world items mirrored as the view pitched): the game flips its
+    // viewport.
     bool matrix = false;
     double m[16]{};
 
@@ -479,7 +481,7 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
         view.matrix = true;
         for (int i = 0; i < 16; ++i) view.m[i] = camera.matrix[i];
         view.focal_x = 1.0;
-        view.focal_y = -1.0;
+        view.focal_y = 1.0;
         return true;
     }
     view.focal_y = std::tan(camera.fov_y * 0.5);
