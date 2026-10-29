@@ -12,6 +12,7 @@ struct LocalCamera {
     double orientation[4]{};   // x, y, z, w: takes the camera's axes to the world's.
     double fov_y = 0.0;        // Radians.
     double aspect = 0.0;
+    double fov_x = 0.0;        // Radians, when known (the GPU camera); else from the screen's shape.
     // The building cursor, when the runtime gives it: the corner of the
     // placement cube (meters), its orientation, and its flags (bit 0: no
     // valid position, aiming at nothing).

@@ -970,6 +970,10 @@ bool camera_of(const depth::gpu::Camera& gpu, const LocalCamera& reference, Loca
         return true;
     };
     if (!normalize(forward)) return false;
+    double side[3] = {m[0], m[1], m[2]};
+    const double side_along = dot(side, forward);
+    for (int i = 0; i < 3; ++i) side[i] -= side_along * forward[i];
+    const double row0 = std::sqrt(dot(side, side));
     double up[3] = {m[4], m[5], m[6]};
     const double along = dot(up, forward);
     for (int i = 0; i < 3; ++i) up[i] -= along * forward[i];
@@ -1006,6 +1010,7 @@ bool camera_of(const depth::gpu::Camera& gpu, const LocalCamera& reference, Loca
     out.orientation[0] = x, out.orientation[1] = y, out.orientation[2] = z, out.orientation[3] = w;
     for (int i = 0; i < 3; ++i) out.position[i] = gpu.eye[i];
     out.fov_y = 2.0 * std::atan(1.0 / row1);
+    out.fov_x = row0 > 1e-9 ? 2.0 * std::atan(1.0 / row0) : 0.0;
     return true;
 }
 

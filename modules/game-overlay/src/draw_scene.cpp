@@ -446,6 +446,7 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
         for (int i = 0; i < 3; ++i) camera.position[i] = drawn->position[i];
         for (int i = 0; i < 4; ++i) camera.orientation[i] = drawn->orientation[i];
         camera.fov_y = drawn->fov_y;
+        camera.fov_x = drawn->fov_x;
     }
     const double* q = camera.orientation;
     const auto rotate = [&](double x, double y, double z, double out[3]) {
@@ -462,7 +463,7 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
     view.screen = ImGui::GetIO().DisplaySize;
     if (view.screen.x <= 0.0f || view.screen.y <= 0.0f) return false;
     view.focal_y = std::tan(camera.fov_y * 0.5);
-    view.focal_x = view.focal_y * view.screen.x / view.screen.y;
+    view.focal_x = camera.fov_x > 0.0 ? std::tan(camera.fov_x * 0.5) : view.focal_y * view.screen.x / view.screen.y;
     return view.focal_y > 0.0;
 }
 
