@@ -941,7 +941,8 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.to_clip[1] = 2.0f / screen.height;
     constants.depth_scale[0] = static_cast<float>(scene.extent.width) / screen.width;
     constants.depth_scale[1] = static_cast<float>(scene.extent.height) / screen.height;
-    constants.margin = static_cast<float>(settings.margin / settings.near_distance);
+    const double margin = r.world_draw.remove ? settings.margin_remove : settings.margin;
+    constants.margin = static_cast<float>(margin / r.world_draw.near_distance);
     d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
         &constants);
     const VkDeviceSize offset = 0;
@@ -953,6 +954,60 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
         log_line("game depth: first world cells drawn against img#%d (%zu triangles)", scene.id,
             r.world_draw.indices.size() / 3);
     }
+}
+
+// The camera of a GPU camera block (row-major view-projection, world
+// translation; row 3 the gaze, rows 0 and 1 the screen's axes scaled, with
+// the anti-aliasing's jitter along the gaze), its axes turned like
+// `reference`'s (the input camera): right x up = gaze.
+bool camera_of(const depth::gpu::Camera& gpu, const LocalCamera& reference, LocalCamera& out) {
+    const float* m = gpu.matrix;
+    double forward[3] = {m[12], m[13], m[14]};
+    const auto dot = [](const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const auto normalize = [&](double* v) {
+        const double n = std::sqrt(dot(v, v));
+        if (n < 1e-9) return false;
+        for (int i = 0; i < 3; ++i) v[i] /= n;
+        return true;
+    };
+    if (!normalize(forward)) return false;
+    double up[3] = {m[4], m[5], m[6]};
+    const double along = dot(up, forward);
+    for (int i = 0; i < 3; ++i) up[i] -= along * forward[i];
+    const double row1 = std::sqrt(dot(up, up));
+    if (!normalize(up)) return false;
+    // The input camera's up: the row's sign follows the screen's y.
+    const double* q = reference.orientation;
+    // (0, 1, 0) turned by q: v + 2w (q x v) + 2 q x (q x v), as world_view.
+    const double tx = -2.0 * q[2], ty = 0.0, tz = 2.0 * q[0];
+    const double ref_up[3] = {q[3] * tx + (q[1] * tz - q[2] * ty), 1.0 + q[3] * ty + (q[2] * tx - q[0] * tz),
+        q[3] * tz + (q[0] * ty - q[1] * tx)};
+    if (dot(up, ref_up) < 0.0)
+        for (double& v : up) v = -v;
+    const double right[3] = {up[1] * forward[2] - up[2] * forward[1], up[2] * forward[0] - up[0] * forward[2],
+        up[0] * forward[1] - up[1] * forward[0]};
+    // The rotation with columns right, up, forward, as a quaternion.
+    const double r[3][3] = {{right[0], up[0], forward[0]}, {right[1], up[1], forward[1]}, {right[2], up[2], forward[2]}};
+    double x, y, z, w;
+    const double trace = r[0][0] + r[1][1] + r[2][2];
+    if (trace > 0.0) {
+        const double s = 0.5 / std::sqrt(trace + 1.0);
+        w = 0.25 / s, x = (r[2][1] - r[1][2]) * s, y = (r[0][2] - r[2][0]) * s, z = (r[1][0] - r[0][1]) * s;
+    } else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]);
+        w = (r[2][1] - r[1][2]) / s, x = 0.25 * s, y = (r[0][1] + r[1][0]) / s, z = (r[0][2] + r[2][0]) / s;
+    } else if (r[1][1] > r[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]);
+        w = (r[0][2] - r[2][0]) / s, x = (r[0][1] + r[1][0]) / s, y = 0.25 * s, z = (r[1][2] + r[2][1]) / s;
+    } else {
+        const double s = 2.0 * std::sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]);
+        w = (r[1][0] - r[0][1]) / s, x = (r[0][2] + r[2][0]) / s, y = (r[1][2] + r[2][1]) / s, z = 0.25 * s;
+    }
+    out = reference;
+    out.orientation[0] = x, out.orientation[1] = y, out.orientation[2] = z, out.orientation[3] = w;
+    for (int i = 0; i < 3; ++i) out.position[i] = gpu.eye[i];
+    out.fov_y = 2.0 * std::atan(1.0 / row1);
+    return true;
 }
 
 // After the zones' pass: the game's depth back in its layout.
@@ -1061,7 +1116,12 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     const depth::Settings depth_settings = depth::enabled() ? depth::settings() : depth::Settings{};
     r.world_draw.vertices.clear();
     r.world_draw.indices.clear();
-    r.world_draw.near_distance = depth_settings.near_distance;
+    r.world_draw.remove = false;
+    // The scene's camera from the GPU: its near distance too.
+    LocalCamera gpu_camera;
+    const bool gpu_known = depth_settings.camera == depth::CameraMode::Gpu && scene_depth.gpu_camera.valid &&
+        scene_depth.has_camera && camera_of(scene_depth.gpu_camera, scene_depth.camera, gpu_camera);
+    r.world_draw.near_distance = gpu_known ? scene_depth.gpu_camera.matrix[11] : depth_settings.near_distance;
     const bool world_ready = scene_depth.image && scene_depth.format == VK_FORMAT_D32_SFLOAT &&
         scene_depth.layout != VK_IMAGE_LAYOUT_UNDEFINED && scene_depth.layout != VK_IMAGE_LAYOUT_PREINITIALIZED &&
         ensure_world(d, r, pass);
@@ -1083,7 +1143,11 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
             return r.depth_values[static_cast<size_t>(y) * e.width + x];
         },
         [&](LocalCamera& camera) {
-            if (!scene_depth.has_camera || !depth_settings.camera_from_copy) return false;
+            if (gpu_known) {
+                camera = gpu_camera;
+                return true;
+            }
+            if (!scene_depth.has_camera || depth_settings.camera == depth::CameraMode::Present) return false;
             camera = scene_depth.camera;
             return true;
         },
