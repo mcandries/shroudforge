@@ -178,12 +178,16 @@ float flow_gap(const Context& c, const Item& flow, const Token& previous, const 
     return flow.spacing * c.scale;
 }
 
+// The lines of a flow within `width` (its content, inside the padding); the
+// lines after the first have `indent` less.
 std::vector<FlowLine> flow_lines(const Context& c, const Item& flow, const std::vector<Token>& tokens, float width) {
     std::vector<FlowLine> lines;
+    const float indent = flow.flow_indent * c.scale;
     for (size_t i = 0; i < tokens.size(); ++i) {
         const Token& token = tokens[i];
         const float gap = (lines.empty() || lines.back().count == 0) ? 0.0f : flow_gap(c, flow, tokens[i - 1], token);
-        if (lines.empty() || (lines.back().count > 0 && lines.back().width + gap + token.size.x > width)) {
+        const float available = lines.size() > 1 && width < FLT_MAX ? width - indent : width;
+        if (lines.empty() || (lines.back().count > 0 && lines.back().width + gap + token.size.x > available)) {
             lines.push_back({i, 0, 0.0f, 0.0f});
         }
         FlowLine& line = lines.back();
@@ -195,23 +199,38 @@ std::vector<FlowLine> flow_lines(const Context& c, const Item& flow, const std::
 }
 
 ImVec2 measure_flow(const Context& c, const Item& flow, float width) {
+    const ImVec2 padding(flow.frame_padding.x * c.scale, flow.frame_padding.y * c.scale);
+    const float inner = width < FLT_MAX ? std::max(1.0f, width - padding.x * 2.0f) : FLT_MAX;
     const auto tokens = flow_tokens(c, flow);
-    const auto lines = flow_lines(c, flow, tokens, width);
+    const auto lines = flow_lines(c, flow, tokens, inner);
     ImVec2 size{0.0f, 0.0f};
-    for (const FlowLine& line : lines) {
-        size.x = std::max(size.x, line.width);
-        size.y += line.height;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        size.x = std::max(size.x, lines[i].width + (i > 0 ? flow.flow_indent * c.scale : 0.0f));
+        size.y += lines[i].height;
     }
     if (lines.size() > 1) size.y += flow.line_gap * c.scale * (lines.size() - 1);
-    return size;
+    return ImVec2(size.x + padding.x * 2.0f, size.y + padding.y * 2.0f);
 }
 
 void draw_flow(const Context& c, const Item& flow, ImVec2 position, float width) {
+    // Its frame over the whole width, then its lines inside the padding.
+    const ImVec2 padding(flow.frame_padding.x * c.scale, flow.frame_padding.y * c.scale);
+    if (visible_color(flow.background) || visible_color(flow.frame_border)) {
+        const ImVec2 size = measure_flow(c, flow, width);
+        const ImVec2 min = snap(position);
+        const ImVec2 max(min.x + (width < FLT_MAX ? width : size.x), min.y + size.y);
+        const float rounding = flow.rounding * c.scale;
+        if (visible_color(flow.background)) c.list.AddRectFilled(min, max, fade(c, flow.background), rounding);
+        if (visible_color(flow.frame_border))
+            c.list.AddRect(min, max, fade(c, flow.frame_border), rounding, std::max(1.0f, c.scale));
+    }
+    position = ImVec2(position.x + padding.x, position.y + padding.y);
+    if (width < FLT_MAX) width = std::max(1.0f, width - padding.x * 2.0f);
     const auto tokens = flow_tokens(c, flow);
     const auto lines = flow_lines(c, flow, tokens, width);
     float y = position.y;
     for (const FlowLine& line : lines) {
-        float x = position.x;
+        float x = position.x + (&line != &lines.front() ? flow.flow_indent * c.scale : 0.0f);
         for (size_t i = line.first; i < line.first + line.count; ++i) {
             const Token& token = tokens[i];
             if (i > line.first) x += flow_gap(c, flow, tokens[i - 1], token);
