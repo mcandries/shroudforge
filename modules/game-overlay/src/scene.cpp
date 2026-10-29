@@ -547,6 +547,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
             item.world_hide_hidden = cells.value("hide_hidden", false);
             item.world_hidden_dashed = cells.value("hidden_dashed", false);
+            item.world_only_in_solids = cells.value("only_in_solids", false);
             if (cells.value("hide_own", false)) {
                 // Its own cells, those with a color, hide each other too.
                 auto own = std::make_shared<WorldSolids>();
@@ -929,7 +930,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time", "hide_hidden"});
+    status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time", "hide_hidden", "only_in_solids"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
