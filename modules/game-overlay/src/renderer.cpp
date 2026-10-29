@@ -136,6 +136,7 @@ struct Renderer {
     VkExtent2D depth_values_extent{};
     WorldDepthPipeline world;
     WorldDepthDraw world_draw;
+    uint32_t depth_picture_until = 0;  // asked by a world item up to this frame
 };
 
 namespace {
@@ -542,8 +543,13 @@ bool create_depth(DeviceData& d, Renderer& r, const depth::SceneDepth& scene) {
         if (d.fn.CreateBuffer(d.device, &buffer_info, nullptr, &b.buffers[i]) != VK_SUCCESS) return false;
         d.fn.GetBufferMemoryRequirements(d.device, b.buffers[i], &requirements);
         allocate.allocationSize = requirements.size;
+        // Read by the CPU: cached memory first (75 to 17 images a second
+        // reading uncached memory, 30/10).
         allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (allocate.memoryTypeIndex == UINT32_MAX)
+            allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (allocate.memoryTypeIndex == UINT32_MAX) return false;
         if (d.fn.AllocateMemory(d.device, &allocate, nullptr, &b.buffer_memory[i]) != VK_SUCCESS) return false;
         if (d.fn.BindBufferMemory(d.device, b.buffers[i], b.buffer_memory[i], 0) != VK_SUCCESS) return false;
@@ -628,10 +634,10 @@ void record_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot,
     b.read_from[slot] = scene;
 }
 
-// A slot's depth, back from the GPU: as a picture (log scale between its
-// nearest and farthest cells, near bright, nothing drawn there dark blue),
-// and a line in the log now and then.
-void take_depth(Renderer& r, uint32_t slot) {
+// A slot's depth, back from the GPU: as a picture (the distance, near /
+// depth, on a log scale from 0.5 m, bright, to 2 km, dark; nothing drawn
+// there dark blue), and a line in the log now and then.
+void take_depth(Renderer& r, uint32_t slot, double near_distance) {
     DepthReadback& b = r.depth;
     if (!b.pending[slot] || !b.mapped[slot]) return;
     b.pending[slot] = false;
@@ -654,8 +660,8 @@ void take_depth(Renderer& r, uint32_t slot) {
         ImGui::RegisterUserTexture(b.texture);
         r.textures.push_back(b.texture);
     }
-    // Reversed depth: larger is nearer; the distance goes as 1 / value.
-    const double span = nearest > farthest && farthest > 0.0f ? std::log(nearest / farthest) : 1.0;
+    // Reversed depth: larger is nearer; the distance is near / value.
+    const double span = std::log(2000.0 / 0.5);
     unsigned char* pixels = static_cast<unsigned char*>(b.texture->Pixels);
     for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) {
         const float value = values[i];
@@ -664,8 +670,8 @@ void take_depth(Renderer& r, uint32_t slot) {
             p[0] = 20, p[1] = 30, p[2] = 70, p[3] = 255;
             continue;
         }
-        const double t = farthest > 0.0f ? std::clamp(std::log(value / farthest) / span, 0.0, 1.0) : 0.0;
-        const auto grey = static_cast<unsigned char>(40.0 + 215.0 * t);
+        const double t = std::clamp(std::log(near_distance / value / 0.5) / span, 0.0, 1.0);
+        const auto grey = static_cast<unsigned char>(255.0 - 215.0 * t);
         p[0] = p[1] = p[2] = grey, p[3] = 255;
     }
     if (b.texture->Status == ImTextureStatus_OK) {
@@ -1031,7 +1037,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         }
         d.fn.ResetFences(d.device, 1, &frame.fence);
         frame.submitted = false;
-        take_depth(r, slot);
+        take_depth(r, slot, r.world_draw.near_distance);
     }
 
     // Build this frame's draw lists.
@@ -1077,14 +1083,23 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
             if (x < 0 || y < 0 || x >= static_cast<int>(e.width) || y >= static_cast<int>(e.height)) return -1.0f;
             return r.depth_values[static_cast<size_t>(y) * e.width + x];
         },
+        [&](LocalCamera& camera) {
+            if (!scene_depth.has_camera || !depth_settings.camera_from_copy) return false;
+            camera = scene_depth.camera;
+            return true;
+        },
+        [&]() { r.depth_picture_until = r.next_frame + 30; },
     };
     draw_scene(*ImGui::GetForegroundDrawList(), scene, io.DisplaySize, resources);
-    if (depth_settings.show_picture && r.depth.texture && r.depth.texture->Status != ImTextureStatus_WantCreate) {
-        // Bottom left, a quarter of the screen across.
+    // The picture of the game's depth, while a world item asks for it (a
+    // diagnostic): read back at most every 6th frame.
+    const bool picture = r.next_frame <= r.depth_picture_until;
+    if (picture && r.depth.texture && r.depth.texture->Status != ImTextureStatus_WantCreate) {
+        // Top right, a quarter of the screen across.
         ImDrawList& list = *ImGui::GetForegroundDrawList();
         const float width = io.DisplaySize.x / 4.0f;
         const float height = width * r.depth.texture->Height / std::max(1, r.depth.texture->Width);
-        const ImVec2 from(16.0f, io.DisplaySize.y - 16.0f - height), to(16.0f + width, io.DisplaySize.y - 16.0f);
+        const ImVec2 from(io.DisplaySize.x - 16.0f - width, 16.0f), to(io.DisplaySize.x - 16.0f, 16.0f + height);
         list.AddImage(r.depth.texture->GetTexRef(), from, to);
         list.AddRect(from, to, IM_COL32(255, 255, 255, 160));
         char label[96];
@@ -1106,7 +1121,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     d.fn.BeginCommandBuffer(cb, &begin);
-    if (depth::enabled()) record_depth(d, r, cb, slot, scene_depth);
+    if (picture && r.next_frame % 6 == 0) record_depth(d, r, cb, slot, scene_depth);
     const bool world_drawn = world_ready && prepare_world(d, r, cb, slot, scene_depth);
     if (r.offscreen_used) {
         ImDrawData data;

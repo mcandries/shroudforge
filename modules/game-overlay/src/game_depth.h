@@ -3,6 +3,8 @@
 // the present.
 #pragma once
 
+#include "local_camera.h"
+
 #include <vulkan/vulkan.h>
 
 namespace overlay {
@@ -28,6 +30,10 @@ struct SceneDepth {
     VkExtent2D extent{};
     VkImageLayout layout{};
     int id = 0;  // The image's number, for the logs.
+    // The camera read as the game recorded the pass copied: the camera of
+    // the scene in the depth, when `has_camera`.
+    LocalCamera camera;
+    bool has_camera = false;
 };
 SceneDepth scene_depth(VkExtent2D screen);
 
@@ -37,7 +43,10 @@ SceneDepth scene_depth(VkExtent2D screen);
 struct Settings {
     double near_distance = 0.01;
     double margin = 0.15;
-    bool show_picture = true;  // `picture=0`: no picture of the depth in a corner
+    // `camera=present`: the world items drawn with the camera read at the
+    // present, as without the game's depth; `camera=copy` (default): with the
+    // one read as the game recorded the scene.
+    bool camera_from_copy = true;
 };
 Settings settings();
 // At each present, after the overlay drew: a frame ends.

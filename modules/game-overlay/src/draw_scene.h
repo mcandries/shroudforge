@@ -1,5 +1,6 @@
 #pragma once
 
+#include "local_camera.h"
 #include "scene.h"
 
 #include <cstdint>
@@ -39,6 +40,10 @@ struct DrawResources {
     std::function<WorldDepthDraw*()> world_depth;                  // Null without the game's depth this frame.
     // The game's depth (as read back, a few frames late) at a screen point, or a negative value.
     std::function<float(ImVec2)> game_depth_at;
+    // The camera the game drew the scene with (read with its depth's copy), or false.
+    std::function<bool(LocalCamera&)> frame_camera;
+    // A world item asks for the picture of the game's depth (diagnostic).
+    std::function<void()> want_depth_picture;
 };
 
 // Lays out and draws every zone of the snapshot on the draw list.
