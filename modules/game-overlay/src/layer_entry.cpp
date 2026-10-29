@@ -8,6 +8,7 @@
 // With no zone, or anything unexpected, the game presents untouched.
 
 #include "overlay.h"
+#include "render_probe.h"
 
 #include <intrin.h>
 
@@ -117,6 +118,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
         std::lock_guard lock(state_mutex);
         devices[dispatch_key(*device)] = d;
     }
+    probe::start(*device, next_gdpa);
     log_line("device %p created, called from %s, layers below: %s", static_cast<void*>(*device),
         module_name(_ReturnAddress()).c_str(), below.c_str());
     return VK_SUCCESS;
@@ -167,6 +169,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapc
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, nullptr);
     data.images.resize(count);
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, data.images.data());
+    probe::note_swapchain(data.images, info->imageFormat, info->imageExtent);
     // The zones are drawn in a render pass, as a color attachment.
     const bool attachment = (info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
     data.drawable = attachment && drawable_format(info->imageFormat) && info->imageArrayLayers == 1;
@@ -194,6 +197,7 @@ VKAPI_ATTR void VKAPI_CALL DestroySwapchainKHR(VkDevice device, VkSwapchainKHR s
 
 VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     DeviceData* d = device_of(dispatch_key(queue));
+    probe::presented();
     VkSemaphore done = VK_NULL_HANDLE;
     {
         std::lock_guard render(d->render_mutex);
@@ -216,7 +220,7 @@ PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(CreateSwapchainKHR);
     INTERCEPT(DestroySwapchainKHR);
     INTERCEPT(QueuePresentKHR);
-    return nullptr;
+    return probe::function(requested);
 }
 
 }  // namespace
