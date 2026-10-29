@@ -9,6 +9,7 @@
 
 #include "draw_scene.h"
 #include "game_depth.h"
+#include "world_depth_spirv.h"
 #include "overlay.h"
 #include "scene.h"
 
@@ -79,6 +80,34 @@ struct DepthReadback {
     bool skip_logged = false;
 };
 
+// World cells drawn against the game's depth (game-depth.on): our pipeline
+// in the zones' pass, before the zones, sampling the game's depth image (in
+// a read-only layout for the pass, back to the game's after). Buffers and
+// descriptor set per frame slot.
+struct WorldDepthPipeline {
+    bool failed = false;
+    VkRenderPass pass{};
+    VkDescriptorSetLayout set_layout{};
+    VkPipelineLayout layout{};
+    VkPipeline pipeline{};
+    VkSampler sampler{};
+    VkDescriptorPool pool{};
+    VkDescriptorSet sets[kFrames]{};
+    VkBuffer vertex[kFrames]{}, index[kFrames]{};
+    VkDeviceMemory vertex_memory[kFrames]{}, index_memory[kFrames]{};
+    void* vertex_mapped[kFrames]{};
+    void* index_mapped[kFrames]{};
+    VkDeviceSize vertex_size[kFrames]{}, index_size[kFrames]{};
+    std::unordered_map<int, VkImageView> views;  // of the game's depth images, by their number
+    bool drawn_logged = false;
+};
+
+struct WorldDepthConstants {
+    float to_clip[2];
+    float depth_scale[2];
+    float margin;
+};
+
 }  // namespace
 
 struct Renderer {
@@ -103,6 +132,10 @@ struct Renderer {
     bool other_queue_logged = false;
     bool first_frame_logged = false;
     DepthReadback depth;
+    std::vector<float> depth_values;  // the last read back
+    VkExtent2D depth_values_extent{};
+    WorldDepthPipeline world;
+    WorldDepthDraw world_draw;
 };
 
 namespace {
@@ -642,6 +675,8 @@ void take_depth(Renderer& r, uint32_t slot) {
         b.texture->SetStatus(ImTextureStatus_WantUpdates);
     }
     b.shown = b.read_from[slot];
+    r.depth_values.assign(values, values + static_cast<size_t>(width) * height);
+    r.depth_values_extent = b.extent;
     const ULONGLONG now = GetTickCount64();
     if (now - b.last_log < kDepthLogMilliseconds) return;
     b.last_log = now;
@@ -649,6 +684,279 @@ void take_depth(Renderer& r, uint32_t slot) {
     log_line("game depth: img#%d %ux%u layout %d; centre %.6g, nearest %.6g, farthest %.6g, nothing drawn %.1f%%",
         b.shown.id, b.shown.extent.width, b.shown.extent.height, static_cast<int>(b.shown.layout), centre, nearest,
         farthest == FLT_MAX ? 0.0f : farthest, 100.0 * empty / (static_cast<double>(width) * height));
+}
+
+void release_world(DeviceData& d, Renderer& r) {
+    WorldDepthPipeline& w = r.world;
+    wait_frames(d, r);
+    for (uint32_t i = 0; i < kFrames; ++i) {
+        if (w.vertex[i]) d.fn.DestroyBuffer(d.device, w.vertex[i], nullptr);
+        if (w.vertex_memory[i]) d.fn.FreeMemory(d.device, w.vertex_memory[i], nullptr);
+        if (w.index[i]) d.fn.DestroyBuffer(d.device, w.index[i], nullptr);
+        if (w.index_memory[i]) d.fn.FreeMemory(d.device, w.index_memory[i], nullptr);
+    }
+    for (auto& [id, view] : w.views) d.fn.DestroyImageView(d.device, view, nullptr);
+    if (w.pool) d.fn.DestroyDescriptorPool(d.device, w.pool, nullptr);
+    if (w.sampler) d.fn.DestroySampler(d.device, w.sampler, nullptr);
+    if (w.pipeline) d.fn.DestroyPipeline(d.device, w.pipeline, nullptr);
+    if (w.layout) d.fn.DestroyPipelineLayout(d.device, w.layout, nullptr);
+    if (w.set_layout) d.fn.DestroyDescriptorSetLayout(d.device, w.set_layout, nullptr);
+    const bool failed = w.failed;
+    w = WorldDepthPipeline{};
+    w.failed = failed;
+}
+
+VkShaderModule shader_module(DeviceData& d, const uint32_t* words, size_t size) {
+    VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    info.codeSize = size;
+    info.pCode = words;
+    VkShaderModule module{};
+    return d.fn.CreateShaderModule(d.device, &info, nullptr, &module) == VK_SUCCESS ? module : VK_NULL_HANDLE;
+}
+
+bool create_world(DeviceData& d, Renderer& r, VkRenderPass pass) {
+    WorldDepthPipeline& w = r.world;
+    w.pass = pass;
+    VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = 1;
+    set_info.pBindings = &binding;
+    if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.set_layout) != VK_SUCCESS) return false;
+    VkPushConstantRange constants{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        sizeof(WorldDepthConstants)};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &w.set_layout;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &constants;
+    if (d.fn.CreatePipelineLayout(d.device, &layout_info, nullptr, &w.layout) != VK_SUCCESS) return false;
+
+    VkShaderModule vert = shader_module(d, kWorldDepthVert, sizeof(kWorldDepthVert));
+    VkShaderModule frag = shader_module(d, kWorldDepthFrag, sizeof(kWorldDepthFrag));
+    if (!vert || !frag) {
+        if (vert) d.fn.DestroyShaderModule(d.device, vert, nullptr);
+        if (frag) d.fn.DestroyShaderModule(d.device, frag, nullptr);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+    VkVertexInputBindingDescription vertex_binding{0, sizeof(WorldDepthVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription attributes[4] = {
+        {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(WorldDepthVertex, x)},
+        {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, depth)},
+        {2, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, dash)},
+        {3, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(WorldDepthVertex, color)},
+    };
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertex_input.vertexBindingDescriptionCount = 1;
+    vertex_input.pVertexBindingDescriptions = &vertex_binding;
+    vertex_input.vertexAttributeDescriptionCount = 4;
+    vertex_input.pVertexAttributeDescriptions = attributes;
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.colorBlendOp = VK_BLEND_OP_ADD;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+        VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend_state{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend_state.attachmentCount = 1;
+    blend_state.pAttachments = &blend;
+    const VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+    VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend_state;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = w.layout;
+    pipeline_info.renderPass = pass;
+    const VkResult made = d.fn.CreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &w.pipeline);
+    d.fn.DestroyShaderModule(d.device, vert, nullptr);
+    d.fn.DestroyShaderModule(d.device, frag, nullptr);
+    if (made != VK_SUCCESS) return false;
+
+    VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sampler_info.magFilter = sampler_info.minFilter = VK_FILTER_NEAREST;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (d.fn.CreateSampler(d.device, &sampler_info, nullptr, &w.sampler) != VK_SUCCESS) return false;
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kFrames};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.maxSets = kFrames;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    if (d.fn.CreateDescriptorPool(d.device, &pool_info, nullptr, &w.pool) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout layouts[kFrames];
+    for (auto& layout : layouts) layout = w.set_layout;
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = w.pool;
+    allocate.descriptorSetCount = kFrames;
+    allocate.pSetLayouts = layouts;
+    if (d.fn.AllocateDescriptorSets(d.device, &allocate, w.sets) != VK_SUCCESS) return false;
+    log_line("game depth: world pipeline ready");
+    return true;
+}
+
+// The world pipeline for the zones' pass, created once (or again for another
+// pass); false when it cannot be (then not tried again).
+bool ensure_world(DeviceData& d, Renderer& r, VkRenderPass pass) {
+    WorldDepthPipeline& w = r.world;
+    if (w.failed) return false;
+    if (w.pipeline && w.pass == pass) return true;
+    release_world(d, r);
+    if (create_world(d, r, pass)) return true;
+    release_world(d, r);
+    r.world.failed = true;
+    log_line("game depth: world pipeline not created, world cells drawn as before");
+    return false;
+}
+
+// A host buffer of the slot holding at least `needed` bytes.
+bool ensure_buffer(DeviceData& d, VkBuffer& buffer, VkDeviceMemory& memory, void*& mapped, VkDeviceSize& size,
+        VkDeviceSize needed, VkBufferUsageFlags usage) {
+    if (buffer && size >= needed) return true;
+    if (buffer) d.fn.DestroyBuffer(d.device, buffer, nullptr);
+    if (memory) d.fn.FreeMemory(d.device, memory, nullptr);
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    mapped = nullptr;
+    size = std::max<VkDeviceSize>(needed + needed / 2, 64 * 1024);
+    VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    info.size = size;
+    info.usage = usage;
+    if (d.fn.CreateBuffer(d.device, &info, nullptr, &buffer) != VK_SUCCESS) return false;
+    VkMemoryRequirements requirements{};
+    d.fn.GetBufferMemoryRequirements(d.device, buffer, &requirements);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (allocate.memoryTypeIndex == UINT32_MAX) return false;
+    if (d.fn.AllocateMemory(d.device, &allocate, nullptr, &memory) != VK_SUCCESS) return false;
+    if (d.fn.BindBufferMemory(d.device, buffer, memory, 0) != VK_SUCCESS) return false;
+    return d.fn.MapMemory(d.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS;
+}
+
+// Before the zones' pass: the slot's buffers filled, its set pointing at the
+// game's depth, which goes to a read-only layout. False: nothing to draw.
+bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene) {
+    WorldDepthPipeline& w = r.world;
+    const WorldDepthDraw& draw = r.world_draw;
+    if (!w.pipeline || draw.indices.empty()) return false;
+    const VkDeviceSize vertex_bytes = draw.vertices.size() * sizeof(WorldDepthVertex);
+    const VkDeviceSize index_bytes = draw.indices.size() * sizeof(std::uint32_t);
+    if (!ensure_buffer(d, w.vertex[slot], w.vertex_memory[slot], w.vertex_mapped[slot], w.vertex_size[slot],
+            vertex_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+        !ensure_buffer(d, w.index[slot], w.index_memory[slot], w.index_mapped[slot], w.index_size[slot], index_bytes,
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+        log_line("game depth: world buffers unavailable");
+        return false;
+    }
+    std::memcpy(w.vertex_mapped[slot], draw.vertices.data(), vertex_bytes);
+    std::memcpy(w.index_mapped[slot], draw.indices.data(), index_bytes);
+    VkImageView& view = w.views[scene.id];
+    if (!view) {
+        VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        info.image = scene.image;
+        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        info.format = scene.format;
+        info.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &info, nullptr, &view) != VK_SUCCESS) {
+            view = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    VkDescriptorImageInfo image{w.sampler, view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = w.sets[slot];
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image;
+    d.fn.UpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = scene.layout;
+    barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = scene.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+        0, nullptr, 1, &barrier);
+    return true;
+}
+
+// In the zones' pass, before the zones.
+void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene,
+        VkExtent2D screen, const depth::Settings& settings) {
+    WorldDepthPipeline& w = r.world;
+    d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.pipeline);
+    d.fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.layout, 0, 1, &w.sets[slot], 0, nullptr);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(screen.width), static_cast<float>(screen.height), 0.0f, 1.0f};
+    d.fn.CmdSetViewport(cb, 0, 1, &viewport);
+    const VkRect2D scissor{{0, 0}, screen};
+    d.fn.CmdSetScissor(cb, 0, 1, &scissor);
+    WorldDepthConstants constants{};
+    constants.to_clip[0] = 2.0f / screen.width;
+    constants.to_clip[1] = 2.0f / screen.height;
+    constants.depth_scale[0] = static_cast<float>(scene.extent.width) / screen.width;
+    constants.depth_scale[1] = static_cast<float>(scene.extent.height) / screen.height;
+    constants.margin = static_cast<float>(settings.margin / settings.near_distance);
+    d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
+        &constants);
+    const VkDeviceSize offset = 0;
+    d.fn.CmdBindVertexBuffers(cb, 0, 1, &w.vertex[slot], &offset);
+    d.fn.CmdBindIndexBuffer(cb, w.index[slot], 0, VK_INDEX_TYPE_UINT32);
+    d.fn.CmdDrawIndexed(cb, static_cast<uint32_t>(r.world_draw.indices.size()), 1, 0, 0, 0);
+    if (!w.drawn_logged) {
+        w.drawn_logged = true;
+        log_line("game depth: first world cells drawn against img#%d (%zu triangles)", scene.id,
+            r.world_draw.indices.size() / 3);
+    }
+}
+
+// After the zones' pass: the game's depth back in its layout.
+void finish_world(DeviceData& d, VkCommandBuffer cb, const depth::SceneDepth& scene) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    barrier.newLayout = scene.layout;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = scene.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+        0, nullptr, 1, &barrier);
 }
 
 }  // namespace
@@ -737,6 +1045,16 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     offscreen.PushTexture(io.Fonts->TexRef);
     offscreen.PushClipRectFullScreen();
     r.offscreen_used = false;
+    // The game's depth (game-depth.on): this frame's scene depth, and the
+    // world pipeline when it can be read.
+    const depth::SceneDepth scene_depth = depth::enabled() ? depth::scene_depth(target->extent) : depth::SceneDepth{};
+    const depth::Settings depth_settings = depth::enabled() ? depth::settings() : depth::Settings{};
+    r.world_draw.vertices.clear();
+    r.world_draw.indices.clear();
+    r.world_draw.near_distance = depth_settings.near_distance;
+    const bool world_ready = scene_depth.image && scene_depth.format == VK_FORMAT_D32_SFLOAT &&
+        scene_depth.layout != VK_IMAGE_LAYOUT_UNDEFINED && scene_depth.layout != VK_IMAGE_LAYOUT_PREINITIALIZED &&
+        ensure_world(d, r, pass);
     DrawResources resources{
         [&](const std::string& path) { return font_for(r, path); },
         [&](Image& image) { return texture_for(r, image); },
@@ -745,9 +1063,18 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
             r.offscreen_used = true;
             return {&offscreen, ImTextureRef(reinterpret_cast<ImTextureID>(r.offscreen.texture)), io.DisplaySize};
         },
+        [&]() -> WorldDepthDraw* { return world_ready ? &r.world_draw : nullptr; },
+        [&](ImVec2 at) -> float {
+            const VkExtent2D e = r.depth_values_extent;
+            if (r.depth_values.empty() || !e.width) return -1.0f;
+            const int x = static_cast<int>(at.x / io.DisplaySize.x * e.width);
+            const int y = static_cast<int>(at.y / io.DisplaySize.y * e.height);
+            if (x < 0 || y < 0 || x >= static_cast<int>(e.width) || y >= static_cast<int>(e.height)) return -1.0f;
+            return r.depth_values[static_cast<size_t>(y) * e.width + x];
+        },
     };
     draw_scene(*ImGui::GetForegroundDrawList(), scene, io.DisplaySize, resources);
-    if (r.depth.texture && r.depth.texture->Status != ImTextureStatus_WantCreate) {
+    if (depth_settings.show_picture && r.depth.texture && r.depth.texture->Status != ImTextureStatus_WantCreate) {
         // Bottom left, a quarter of the screen across.
         ImDrawList& list = *ImGui::GetForegroundDrawList();
         const float width = io.DisplaySize.x / 4.0f;
@@ -774,7 +1101,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     d.fn.BeginCommandBuffer(cb, &begin);
-    if (depth::enabled()) record_depth(d, r, cb, slot, depth::scene_depth(target->extent));
+    if (depth::enabled()) record_depth(d, r, cb, slot, scene_depth);
+    const bool world_drawn = world_ready && prepare_world(d, r, cb, slot, scene_depth);
     if (r.offscreen_used) {
         ImDrawData data;
         data.Valid = true;
@@ -798,8 +1126,10 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     pass_begin.framebuffer = target->framebuffers[image_index];
     pass_begin.renderArea.extent = target->extent;
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+    if (world_drawn) draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings);
     ImGui_ImplVulkan_RenderDrawData(zones, cb);
     d.fn.CmdEndRenderPass(cb);
+    if (world_drawn) finish_world(d, cb, scene_depth);
     d.fn.EndCommandBuffer(cb);
 
     std::vector<VkPipelineStageFlags> stages(present.waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -841,6 +1171,7 @@ void destroy_renderer(DeviceData& d) {
         ImGui::SetCurrentContext(r->context);
         if (r->backend_ready) release_offscreen(d, *r);
         release_depth(d, *r);
+        release_world(d, *r);
         r->offscreen_list.reset();
         if (r->backend_ready) ImGui_ImplVulkan_Shutdown();
         for (ImTextureData* texture : r->textures) ImGui::UnregisterUserTexture(texture);
