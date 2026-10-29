@@ -492,6 +492,10 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("camera_lead"))
             item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), -0.2f, 0.2f);
         item.world_depth_picture = value.value("depth_picture", false);
+        if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
+            const std::string mode = value["depth_camera"].get<std::string>();
+            item.world_depth_camera = mode == "gpu" ? 0 : mode == "copy" ? 1 : mode == "present" ? 2 : -1;
+        }
         if (value.contains("aim_face")) {
             const auto& face = value["aim_face"];
             if (!face.is_object()) fail("world: aim_face: expected {color, width, origin, cell}");

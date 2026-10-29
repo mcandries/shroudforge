@@ -29,7 +29,6 @@ struct WorldDepthVertex {
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
-    bool remove = false;  // cells to remove among them: the larger margin
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };
@@ -41,8 +40,9 @@ struct DrawResources {
     std::function<WorldDepthDraw*()> world_depth;                  // Null without the game's depth this frame.
     // The game's depth (as read back, a few frames late) at a screen point, or a negative value.
     std::function<float(ImVec2)> game_depth_at;
-    // The camera the game drew the scene with (read with its depth's copy), or false.
-    std::function<bool(LocalCamera&)> frame_camera;
+    // The camera the game drew the scene with, as `mode` asks (an item's
+    // world_depth_camera), or false: then the one read at the present.
+    std::function<bool(LocalCamera&, int mode)> frame_camera;
     // A world item asks for the picture of the game's depth (diagnostic).
     std::function<void()> want_depth_picture;
 };
