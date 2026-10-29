@@ -57,6 +57,8 @@ struct Recording {
     bool stored = false;     // its depth is written and kept
     bool suspending = false;  // resumed in another command buffer: no copy between
     bool copied = false;      // a copy recorded in this command buffer
+    LocalCamera camera;       // read as the copy was recorded
+    bool has_camera = false;
 };
 
 std::mutex depth_mutex;
@@ -75,6 +77,8 @@ struct Copy {
     int id = 0;
     bool failed = false;
     uint64_t submitted_at = 0;  // the present count when a copy was last submitted
+    LocalCamera camera;  // of the last copy submitted
+    bool has_camera = false;
 };
 Copy copy;
 uint64_t presents = 0;
@@ -269,6 +273,7 @@ void end_rendering(VkCommandBuffer buffer) {
     if (!make_copy(found->second.extent, found->second.format)) return;
     record_copy(buffer, image, recording.layout);
     recording.copied = true;
+    recording.has_camera = local_camera_now(recording.camera);
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdEndRendering(VkCommandBuffer buffer) {
@@ -284,7 +289,10 @@ VKAPI_ATTR void VKAPI_CALL CmdEndRenderingKHR(VkCommandBuffer buffer) {
 void submitted(VkCommandBuffer buffer) {
     // Called under depth_mutex.
     auto found = recordings.find(buffer);
-    if (found != recordings.end() && found->second.copied) copy.submitted_at = presents;
+    if (found == recordings.end() || !found->second.copied) return;
+    copy.submitted_at = presents;
+    copy.camera = found->second.camera;
+    copy.has_camera = found->second.has_camera;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
@@ -378,7 +386,8 @@ SceneDepth scene_depth(VkExtent2D) {
     std::lock_guard lock(depth_mutex);
     // A copy submitted since the last present or the one before.
     if (!copy.image || presents - copy.submitted_at > 1) return found;
-    return {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id};
+    return {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id, copy.camera,
+        copy.has_camera};
 }
 
 Settings settings() {
@@ -404,11 +413,11 @@ Settings settings() {
         const double value = std::atof(word.c_str() + equals + 1);
         if (name == "near" && value > 0.0) read.near_distance = value;
         if (name == "margin" && value >= 0.0) read.margin = value;
-        if (name == "picture") read.show_picture = value != 0.0;
+        if (name == "camera") read.camera_from_copy = word.substr(equals + 1) != "present";
     }
     current = read;
-    log_line("game depth: near %.4g m, margin %.3g m, picture %s", current.near_distance, current.margin,
-        current.show_picture ? "shown" : "hidden");
+    log_line("game depth: near %.4g m, margin %.3g m, camera %s", current.near_distance, current.margin,
+        current.camera_from_copy ? "read with the copy" : "read at the present");
     return current;
 }
 

@@ -169,6 +169,8 @@ struct Item {
     // the eye is outside it: elsewhere what hides them is not known, and they
     // would show in front of the world.
     bool world_only_in_solids = false;
+    // World: asks for the picture of the game's depth (game-depth.on), a diagnostic.
+    bool world_depth_picture = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
