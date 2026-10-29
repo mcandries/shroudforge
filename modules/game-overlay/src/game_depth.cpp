@@ -14,6 +14,7 @@
 
 #include "overlay.h"
 #include "game_depth.h"
+#include "gpu_camera.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -29,7 +30,13 @@ namespace {
     X(BeginCommandBuffer, vkBeginCommandBuffer) X(CmdBeginRendering, vkCmdBeginRendering) \
     X(CmdBeginRenderingKHR, vkCmdBeginRenderingKHR) X(CmdEndRendering, vkCmdEndRendering) \
     X(CmdEndRenderingKHR, vkCmdEndRenderingKHR) X(QueueSubmit, vkQueueSubmit) X(QueueSubmit2, vkQueueSubmit2) \
-    X(QueueSubmit2KHR, vkQueueSubmit2KHR)
+    X(QueueSubmit2KHR, vkQueueSubmit2KHR) X(CreateBuffer, vkCreateBuffer) X(DestroyBuffer, vkDestroyBuffer) \
+    X(BindBufferMemory, vkBindBufferMemory) X(BindBufferMemory2, vkBindBufferMemory2) \
+    X(BindBufferMemory2KHR, vkBindBufferMemory2KHR) X(AllocateMemory, vkAllocateMemory) X(MapMemory, vkMapMemory) \
+    X(UnmapMemory, vkUnmapMemory) X(FreeMemory, vkFreeMemory) X(UpdateDescriptorSets, vkUpdateDescriptorSets) \
+    X(CmdBindDescriptorSets, vkCmdBindDescriptorSets) X(CmdPushConstants, vkCmdPushConstants) \
+    X(GetBufferDeviceAddress, vkGetBufferDeviceAddress) X(GetBufferDeviceAddressKHR, vkGetBufferDeviceAddressKHR) \
+    X(GetBufferDeviceAddressEXT, vkGetBufferDeviceAddressEXT)
 
 struct Next {
 #define DEPTH_DECLARE(name, type) PFN_##type name{};
@@ -59,12 +66,14 @@ struct Recording {
     bool copied = false;      // a copy recorded in this command buffer
     LocalCamera camera;       // read as the copy was recorded
     bool has_camera = false;
+    bool scene = false;       // the pass recording is the scene's (its depth cleared)
 };
 
 std::mutex depth_mutex;
 std::unordered_map<VkImage, Followed> followed;
 std::unordered_map<VkImageView, VkImage> views;
 std::unordered_map<VkCommandBuffer, Recording> recordings;
+std::unordered_map<VkDeviceMemory, VkDeviceSize> memory_sizes;
 VkExtent2D screen{};  // the swapchain's
 int next_id = 1;
 
@@ -79,6 +88,7 @@ struct Copy {
     uint64_t submitted_at = 0;  // the present count when a copy was last submitted
     LocalCamera camera;  // of the last copy submitted
     bool has_camera = false;
+    gpu::Camera gpu_camera;  // the scene's, as the game handed it to the GPU
 };
 Copy copy;
 uint64_t presents = 0;
@@ -235,20 +245,31 @@ VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer buffer, const 
         std::lock_guard lock(depth_mutex);
         recording_of(buffer) = Recording{};
     }
+    gpu::command_buffer_begun(buffer);
     return next.BeginCommandBuffer(buffer, info);
 }
 
 void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
-    std::lock_guard lock(depth_mutex);
-    Recording& recording = recording_of(buffer);
-    recording.depth = VK_NULL_HANDLE;
-    if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
-    auto view = views.find(info->pDepthAttachment->imageView);
-    if (view == views.end()) return;
-    recording.depth = view->second;
-    recording.layout = info->pDepthAttachment->imageLayout;
-    recording.stored = info->pDepthAttachment->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
-    recording.suspending = (info->flags & VK_RENDERING_SUSPENDING_BIT) != 0;
+    bool scene = false;
+    {
+        std::lock_guard lock(depth_mutex);
+        Recording& recording = recording_of(buffer);
+        recording.depth = VK_NULL_HANDLE;
+        recording.scene = false;
+        if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
+        auto view = views.find(info->pDepthAttachment->imageView);
+        if (view == views.end()) return;
+        recording.depth = view->second;
+        recording.layout = info->pDepthAttachment->imageLayout;
+        recording.stored = info->pDepthAttachment->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+        recording.suspending = (info->flags & VK_RENDERING_SUSPENDING_BIT) != 0;
+        // The scene's first pass: the screen-shaped depth cleared.
+        auto image = followed.find(view->second);
+        scene = image != followed.end() && scene_shaped(image->second) &&
+            info->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        recording.scene = scene;
+    }
+    if (scene) gpu::scene_begun(buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdBeginRendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
@@ -265,6 +286,10 @@ VKAPI_ATTR void VKAPI_CALL CmdBeginRenderingKHR(VkCommandBuffer buffer, const Vk
 void end_rendering(VkCommandBuffer buffer) {
     std::lock_guard lock(depth_mutex);
     Recording& recording = recording_of(buffer);
+    if (recording.scene) {
+        recording.scene = false;
+        gpu::scene_ended(buffer);
+    }
     const VkImage image = recording.depth;
     recording.depth = VK_NULL_HANDLE;
     if (!image || !recording.stored || recording.suspending) return;
@@ -293,6 +318,11 @@ void submitted(VkCommandBuffer buffer) {
     copy.submitted_at = presents;
     copy.camera = found->second.camera;
     copy.has_camera = found->second.has_camera;
+    gpu::Camera camera;
+    if (found->second.has_camera && gpu::submitted(buffer, camera, found->second.camera.position))
+        copy.gpu_camera = camera;
+    else
+        copy.gpu_camera.valid = false;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
@@ -320,6 +350,115 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit2KHR(VkQueue queue, uint32_t count, co
         VkFence fence) {
     submitted2(count, submits);
     return next.QueueSubmit2KHR(queue, count, submits, fence);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL CreateBuffer(VkDevice device, const VkBufferCreateInfo* info,
+        const VkAllocationCallbacks* allocator, VkBuffer* buffer) {
+    const VkResult result = next.CreateBuffer(device, info, allocator, buffer);
+    if (result == VK_SUCCESS) gpu::buffer_created(*buffer, info->size);
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL DestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* allocator) {
+    gpu::buffer_destroyed(buffer);
+    next.DestroyBuffer(device, buffer, allocator);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory,
+        VkDeviceSize offset) {
+    const VkResult result = next.BindBufferMemory(device, buffer, memory, offset);
+    if (result == VK_SUCCESS) gpu::buffer_bound(buffer, memory, offset);
+    return result;
+}
+
+void bound2(uint32_t count, const VkBindBufferMemoryInfo* infos) {
+    for (uint32_t i = 0; i < count; ++i) gpu::buffer_bound(infos[i].buffer, infos[i].memory, infos[i].memoryOffset);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory2(VkDevice device, uint32_t count, const VkBindBufferMemoryInfo* infos) {
+    const VkResult result = next.BindBufferMemory2(device, count, infos);
+    if (result == VK_SUCCESS) bound2(count, infos);
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL BindBufferMemory2KHR(VkDevice device, uint32_t count, const VkBindBufferMemoryInfo* infos) {
+    const VkResult result = next.BindBufferMemory2KHR(device, count, infos);
+    if (result == VK_SUCCESS) bound2(count, infos);
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL AllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
+        const VkAllocationCallbacks* allocator, VkDeviceMemory* memory) {
+    const VkResult result = next.AllocateMemory(device, info, allocator, memory);
+    if (result == VK_SUCCESS) {
+        std::lock_guard lock(depth_mutex);
+        memory_sizes[*memory] = info->allocationSize;
+    }
+    return result;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL MapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size,
+        VkMemoryMapFlags flags, void** data) {
+    const VkResult result = next.MapMemory(device, memory, offset, size, flags, data);
+    if (result != VK_SUCCESS || !data || !*data) return result;
+    if (size == VK_WHOLE_SIZE) {
+        std::lock_guard lock(depth_mutex);
+        auto known = memory_sizes.find(memory);
+        size = known != memory_sizes.end() && known->second > offset ? known->second - offset : 0;
+    }
+    if (size) gpu::memory_mapped(memory, *data, offset, size);
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL UnmapMemory(VkDevice device, VkDeviceMemory memory) {
+    gpu::memory_unmapped(memory);
+    next.UnmapMemory(device, memory);
+}
+
+VKAPI_ATTR void VKAPI_CALL FreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* allocator) {
+    gpu::memory_unmapped(memory);
+    {
+        std::lock_guard lock(depth_mutex);
+        memory_sizes.erase(memory);
+    }
+    next.FreeMemory(device, memory, allocator);
+}
+
+VKAPI_ATTR void VKAPI_CALL UpdateDescriptorSets(VkDevice device, uint32_t write_count, const VkWriteDescriptorSet* writes,
+        uint32_t copy_count, const VkCopyDescriptorSet* copies) {
+    gpu::descriptors_written(write_count, writes);
+    next.UpdateDescriptorSets(device, write_count, writes, copy_count, copies);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdBindDescriptorSets(VkCommandBuffer buffer, VkPipelineBindPoint point,
+        VkPipelineLayout layout, uint32_t first, uint32_t count, const VkDescriptorSet* sets, uint32_t dynamic_count,
+        const uint32_t* dynamic) {
+    gpu::sets_bound(buffer, point, first, count, sets, dynamic_count, dynamic);
+    next.CmdBindDescriptorSets(buffer, point, layout, first, count, sets, dynamic_count, dynamic);
+}
+
+VKAPI_ATTR void VKAPI_CALL CmdPushConstants(VkCommandBuffer buffer, VkPipelineLayout layout, VkShaderStageFlags stages,
+        uint32_t offset, uint32_t size, const void* values) {
+    gpu::constants_pushed(buffer, offset, size, values);
+    next.CmdPushConstants(buffer, layout, stages, offset, size, values);
+}
+
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddress(VkDevice device, const VkBufferDeviceAddressInfo* info) {
+    const VkDeviceAddress address = next.GetBufferDeviceAddress(device, info);
+    gpu::buffer_address(info->buffer, address);
+    return address;
+}
+
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddressKHR(VkDevice device, const VkBufferDeviceAddressInfo* info) {
+    const VkDeviceAddress address = next.GetBufferDeviceAddressKHR(device, info);
+    gpu::buffer_address(info->buffer, address);
+    return address;
+}
+
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddressEXT(VkDevice device, const VkBufferDeviceAddressInfo* info) {
+    const VkDeviceAddress address = next.GetBufferDeviceAddressEXT(device, info);
+    gpu::buffer_address(info->buffer, address);
+    return address;
 }
 
 std::wstring flag_path() {
@@ -387,7 +526,7 @@ SceneDepth scene_depth(VkExtent2D) {
     // A copy submitted since the last present or the one before.
     if (!copy.image || presents - copy.submitted_at > 1) return found;
     return {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id, copy.camera,
-        copy.has_camera};
+        copy.has_camera, copy.gpu_camera};
 }
 
 Settings settings() {
@@ -413,11 +552,16 @@ Settings settings() {
         const double value = std::atof(word.c_str() + equals + 1);
         if (name == "near" && value > 0.0) read.near_distance = value;
         if (name == "margin" && value >= 0.0) read.margin = value;
-        if (name == "camera") read.camera_from_copy = word.substr(equals + 1) != "present";
+        if (name == "margin_remove" && value >= 0.0) read.margin_remove = value;
+        if (name == "camera") {
+            const std::string mode = word.substr(equals + 1);
+            read.camera = mode == "present" ? CameraMode::Present : mode == "copy" ? CameraMode::Copy : CameraMode::Gpu;
+        }
     }
     current = read;
-    log_line("game depth: near %.4g m, margin %.3g m, camera %s", current.near_distance, current.margin,
-        current.camera_from_copy ? "read with the copy" : "read at the present");
+    static const char* const kModes[] = {"the scene's, from the GPU", "read with the copy", "read at the present"};
+    log_line("game depth: near %.4g m, margin %.3g m (remove %.3g m), camera %s", current.near_distance, current.margin,
+        current.margin_remove, kModes[static_cast<int>(current.camera)]);
     return current;
 }
 
