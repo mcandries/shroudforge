@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { logUiEvent } from '../../logging/ui/log-ui-event'
 import { useI18n } from '../../ui-resources/i18n'
 import { postRequest } from '../../transport/ui/send-host-command'
+import { KeyReservationLock } from './toggle-key-reservation'
+import type { KeyReservation } from './toggle-key-reservation'
 
 const requestedLabels = new Set<string>()
 let labelRequestTimer: number | undefined
 let cancelActiveRecording: (() => void) | undefined
-type InputDevice = 'keyboard' | 'mouse'
+export type InputDevice = 'keyboard' | 'mouse'
 const inputDevices: InputDevice[] = ['keyboard', 'mouse']
 
 export type KeybindAssessmentTarget =
@@ -103,6 +105,7 @@ export function KeybindInput({
   onChange,
   onReset,
   disabled = false,
+  reservations,
 }: {
   value: unknown
   label: string
@@ -110,6 +113,8 @@ export function KeybindInput({
   onChange(value: string): void
   onReset?(): void
   disabled?: boolean
+  /** Padlocks of a key the mod may keep from the game, per device. */
+  reservations?: Partial<Record<InputDevice, KeyReservation>>
 }) {
   const { t } = useI18n()
   const tRef = useRef(t)
@@ -324,11 +329,21 @@ export function KeybindInput({
         const display = nativeLabels[binding] || binding
         const active = recording === device
         const action = `${label} (${t(`hotkeys.${device}`)})`
+        const reservation = binding && !active ? reservations?.[device] : undefined
+        const reserved = reservation?.reserved === true
         return <div className="keybind-device" key={device}>
           <span className="keybind-device-label">{t(`hotkeys.${device}`)}</span>
+          <div className="keybind-binding">
+          {reservation && (
+            <KeyReservationLock
+              reservation={reservation}
+              keyLabel={display}
+              disabled={disabled || assessmentPending}
+            />
+          )}
           <button
             type="button"
-            className="button secondary keybind-input"
+            className={'button secondary keybind-input' + (reserved ? ' reserved' : '')}
             data-capture-device={device}
             disabled={disabled || assessmentPending}
             aria-label={t('hotkeys.assignLabel', { action })}
@@ -349,6 +364,10 @@ export function KeybindInput({
           >
             {active ? t('hotkeys.recording') : display || t('hotkeys.unassigned')}
           </button>
+          </div>
+          {reserved && reservation && (
+            <span className="keybind-reserved-when">{reservation.condition}</span>
+          )}
           {active ? (
             <button key="cancel" type="button" className="button ghost" onClick={cancelRecording}>
               {t('common.cancel')}
