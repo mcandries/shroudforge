@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::build_voxel_view::{chunk_value, flush, plan_contains, ChunkCells, ViewPlan};
+use super::build_voxel_view::{chunk_value, flush, plan_contains, ChunkCells, ViewPlan, CHUNK};
 
 /// A build shown in the world, as Architect Line's preview.world_tiles and
 /// preview.world_solids make it.
@@ -18,6 +18,9 @@ pub(crate) struct WorldInput {
     /// Filled cells `margin` around the box (less on an axis over 128), none past `solids_max` cells.
     pub margin: i32,
     pub solids_max: usize,
+    /// The box of the filled cells instead, when given: what may hide the
+    /// build from a viewpoint, such as the box holding the build and the eye.
+    pub solids_box: Option<([i32; 3], [i32; 3])>,
 }
 
 /// A box of cells, run-length text x fastest, then y, then z, and how many of
@@ -110,11 +113,15 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
         Some((tiles, changed))
     });
     let (mut lo, mut hi) = (input.lo, input.hi);
-    for axis in 0..3 {
-        let side = input.hi[axis] - input.lo[axis] + 1;
-        let margin = input.margin.min((128 - side).div_euclid(2)).max(0);
-        lo[axis] -= margin;
-        hi[axis] += margin;
+    if let Some((from, to)) = input.solids_box {
+        (lo, hi) = (from, to);
+    } else {
+        for axis in 0..3 {
+            let side = input.hi[axis] - input.lo[axis] + 1;
+            let margin = input.margin.min((128 - side).div_euclid(2)).max(0);
+            lo[axis] -= margin;
+            hi[axis] += margin;
+        }
     }
     let size = size_of(lo, hi);
     let solids = if size.iter().any(|&side| side > 256) || size.iter().product::<usize>() > input.solids_max {
@@ -122,8 +129,26 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
     } else {
         // A filled cell the build changes (removed, or replaced) hides nothing.
         let changes = input.plan.as_ref().filter(|plan| !plan.add || !plan.only_empty);
+        // The chunk of the cell looked up once for its 16 cells along x: a
+        // box holding the eye may have millions of cells, most not read.
+        let mut chunk_key = [i32::MIN; 3];
+        let mut chunk: Option<&ChunkCells> = None;
         let (data, count) = run_length(lo, hi, |x, y, z| {
-            let filled = chunk_value(&input.chunks, x, y, z) > 0;
+            let key = [x.div_euclid(CHUNK), y.div_euclid(CHUNK), z.div_euclid(CHUNK)];
+            if key != chunk_key {
+                chunk_key = key;
+                chunk = input.chunks.get(&key);
+            }
+            let filled = match chunk {
+                None => false,
+                Some(ChunkCells::Uniform(value)) => *value > 0,
+                Some(ChunkCells::Packed(bytes)) => {
+                    let index = (x.rem_euclid(CHUNK) + y.rem_euclid(CHUNK) * CHUNK + z.rem_euclid(CHUNK) * CHUNK * CHUNK)
+                        as usize
+                        * 2;
+                    bytes.get(index..index + 2).is_some_and(|pair| u16::from_le_bytes([pair[0], pair[1]]) > 0)
+                }
+            };
             if filled && !changes.is_some_and(|plan| plan_contains(plan, [x, y, z])) { b'#' } else { b'.' }
         });
         Some(WorldBox { lo, size, data, count })
@@ -138,7 +163,17 @@ mod tests {
     use super::*;
 
     fn input(plan: Option<ViewPlan>, lo: [i32; 3], hi: [i32; 3]) -> WorldInput {
-        WorldInput { chunks: HashMap::new(), plan, lo, hi, tile: 256, total: 1 << 20, margin: 8, solids_max: 1 << 18 }
+        WorldInput {
+            chunks: HashMap::new(),
+            plan,
+            lo,
+            hi,
+            tile: 256,
+            total: 1 << 20,
+            margin: 8,
+            solids_max: 1 << 18,
+            solids_box: None,
+        }
     }
 
     #[test]
@@ -170,6 +205,18 @@ mod tests {
         let solids = cells.solids.unwrap();
         assert_eq!((solids.lo, solids.size, solids.count), ([-1, -1, -1], [6, 3, 3], 1));
         assert_eq!(solids.data, "27.#26.");
+    }
+
+    #[test]
+    fn solids_in_a_box_of_their_own_reach_far_from_the_build() {
+        // The build at the origin; the box of the solids reaches x = 40, where
+        // a chunk is filled (as between the build and an eye far away).
+        let mut world = input(None, [0, 0, 0], [0, 0, 0]);
+        world.solids_box = Some(([0, 0, 0], [47, 0, 0]));
+        world.chunks.insert([2, 0, 0], ChunkCells::Uniform(155));
+        let solids = build_world_cells(&world).solids.unwrap();
+        assert_eq!((solids.lo, solids.size, solids.count), ([0, 0, 0], [48, 1, 1], 16));
+        assert_eq!(solids.data, "32.16#");
     }
 
     #[test]

@@ -155,8 +155,10 @@ function shroudforge.voxels.chunks() end
 --- cells a side (256; the empty ones left out): run-length text as for `view3d`, `+` a cell
 --- filled (or replaced, unless `plan.only_empty` keeps the blocks there; a cell not read counts
 --- as empty), `-` a block removed, `.` the rest; and the filled cells `margin` around lo..hi (8,
---- less on an axis over 128), `#` a filled cell the build does not change.
---- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, tile: integer?, total: integer?, margin: integer?, solids_max: integer?}
+--- less on an axis over 128), or in `solids_lo`..`solids_hi` when given (256 a side at most, such
+--- as the box holding the build and the eye), `#` a filled cell the build does not change;
+--- `solids_max` cells at most (262144, up to 16777216).
+--- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, tile: integer?, total: integer?, margin: integer?, solids_max: integer?, solids_lo: integer[]?, solids_hi: integer[]?}
 --- `lo`..`hi`: the build's box, or the start cell alone; `chunks` and `plan` as for `view3d`.
 --- @return ShroudForgeWorldCellsJob
 function shroudforge.voxels.world(params) end
