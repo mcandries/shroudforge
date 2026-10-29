@@ -1,14 +1,16 @@
-// The game's scene depth image, followed through its frames, for the overlay
-// to read it at the present (to draw the world items against the game's own
+// The game's scene depth, copied as the game draws it, for the overlay to
+// read at the present (to draw the world items against the game's own
 // depth). On only with a file `game-depth.on` next to the layer, read once
 // when the game creates its device; off, no function is intercepted.
 //
 // Enshrouded (render probe, 29/10/2026) renders with vkCmdBeginRendering on
-// one queue; its scene depth is a D32 image the size of its render, created
-// with TRANSFER_SRC and SAMPLED, kept to the end of the frame, two of them
-// taking turns. Reading it means knowing the layout the game left it in: the
-// layer follows the depth images' layouts through the barriers and depth
-// attachments the game records, applied in the order it submits them.
+// one queue; its scene depth is a D32 image the size of its render. Read at
+// the present it holds only zeros (test of 29/10): its memory is used again
+// later in the frame. So, as ReShade's generic depth does, the layer copies
+// it into an image of its own right after each pass that writes it (stored,
+// shaped like the screen, at least 30 % of its area): barriers and a copy
+// recorded into the game's command buffer, the game's image put back in its
+// layout. The overlay samples the copy, left in SHADER_READ_ONLY_OPTIMAL.
 
 #include "overlay.h"
 #include "game_depth.h"
@@ -25,55 +27,173 @@ namespace {
 #define DEPTH_FUNCTIONS(X) \
     X(CreateImage, vkCreateImage) X(DestroyImage, vkDestroyImage) X(CreateImageView, vkCreateImageView) \
     X(BeginCommandBuffer, vkBeginCommandBuffer) X(CmdBeginRendering, vkCmdBeginRendering) \
-    X(CmdBeginRenderingKHR, vkCmdBeginRenderingKHR) X(CmdPipelineBarrier, vkCmdPipelineBarrier) \
-    X(CmdPipelineBarrier2, vkCmdPipelineBarrier2) X(CmdPipelineBarrier2KHR, vkCmdPipelineBarrier2KHR) \
-    X(QueueSubmit, vkQueueSubmit) X(QueueSubmit2, vkQueueSubmit2) X(QueueSubmit2KHR, vkQueueSubmit2KHR)
+    X(CmdBeginRenderingKHR, vkCmdBeginRenderingKHR) X(CmdEndRendering, vkCmdEndRendering) \
+    X(CmdEndRenderingKHR, vkCmdEndRenderingKHR) X(QueueSubmit, vkQueueSubmit) X(QueueSubmit2, vkQueueSubmit2) \
+    X(QueueSubmit2KHR, vkQueueSubmit2KHR)
 
 struct Next {
 #define DEPTH_DECLARE(name, type) PFN_##type name{};
     DEPTH_FUNCTIONS(DEPTH_DECLARE)
 #undef DEPTH_DECLARE
+    // Called, not intercepted.
+    PFN_vkCmdPipelineBarrier CmdPipelineBarrier{};
+    PFN_vkCmdCopyImage CmdCopyImage{};
 };
 
 Next next;
-VkDevice followed_device{};
+DeviceData* device_data{};
 
-// A depth image the overlay could read: one level, one layer, copyable.
+// A depth image the overlay could copy: one level, one layer, copyable.
 struct Followed {
     int id = 0;
     VkFormat format{};
     VkExtent2D extent{};
-    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;  // as submitted so far
 };
 
-// What a command buffer does to them, in recording order.
-struct Event {
-    VkImage image{};
+// The pass being recorded in a command buffer: its depth attachment.
+struct Recording {
+    VkImage depth{};
     VkImageLayout layout{};
-    bool attachment = false;  // a depth attachment of a pass
+    bool stored = false;     // its depth is written and kept
+    bool suspending = false;  // resumed in another command buffer: no copy between
+    bool copied = false;      // a copy recorded in this command buffer
 };
 
 std::mutex depth_mutex;
 std::unordered_map<VkImage, Followed> followed;
 std::unordered_map<VkImageView, VkImage> views;
-std::unordered_map<VkCommandBuffer, std::vector<Event>> recordings;
-std::vector<VkImage> attached;  // this frame's depth attachments, as submitted
+std::unordered_map<VkCommandBuffer, Recording> recordings;
+VkExtent2D screen{};  // the swapchain's
 int next_id = 1;
 
-thread_local VkCommandBuffer cached_buffer{};
-thread_local std::vector<Event>* cached_events{};
+// The copy: an image of our own, made for the size and format copied.
+struct Copy {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkExtent2D extent{};
+    VkFormat format{};
+    int id = 0;
+    bool failed = false;
+    uint64_t submitted_at = 0;  // the present count when a copy was last submitted
+};
+Copy copy;
+uint64_t presents = 0;
 
-std::vector<Event>& events_of(VkCommandBuffer buffer) {
+Recording& recording_of(VkCommandBuffer buffer) {
     // Called under depth_mutex.
-    if (buffer == cached_buffer && cached_events) return *cached_events;
-    cached_buffer = buffer;
-    cached_events = &recordings[buffer];
-    return *cached_events;
+    return recordings[buffer];
 }
 
 bool depth_format(VkFormat format) {
     return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_X8_D24_UNORM_PACK32 || format == VK_FORMAT_D32_SFLOAT ||
         format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+uint32_t device_local_memory(uint32_t bits) {
+    auto properties_of = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        device_data->instance->next_gipa(device_data->instance->instance, "vkGetPhysicalDeviceMemoryProperties"));
+    if (!properties_of) return UINT32_MAX;
+    VkPhysicalDeviceMemoryProperties properties{};
+    properties_of(device_data->physical_device, &properties);
+    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            return i;
+    return UINT32_MAX;
+}
+
+// Our image for a copy of this size and format (called under depth_mutex).
+// The previous one, if any, is left (rare: the game's render size changed).
+bool make_copy(VkExtent2D extent, VkFormat format) {
+    if (copy.image && copy.extent.width == extent.width && copy.extent.height == extent.height && copy.format == format)
+        return true;
+    if (copy.failed || !device_data || !device_data->instance) return false;
+    DeviceData& d = *device_data;
+    Copy made;
+    made.extent = extent;
+    made.format = format;
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {extent.width, extent.height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkMemoryRequirements requirements{};
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    const bool ok = d.fn.CreateImage(d.device, &info, nullptr, &made.image) == VK_SUCCESS &&
+        (d.fn.GetImageMemoryRequirements(d.device, made.image, &requirements), true) &&
+        (allocate.allocationSize = requirements.size,
+            allocate.memoryTypeIndex = device_local_memory(requirements.memoryTypeBits),
+            allocate.memoryTypeIndex != UINT32_MAX) &&
+        d.fn.AllocateMemory(d.device, &allocate, nullptr, &made.memory) == VK_SUCCESS &&
+        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS;
+    if (!ok) {
+        if (made.image) d.fn.DestroyImage(d.device, made.image, nullptr);
+        if (made.memory) d.fn.FreeMemory(d.device, made.memory, nullptr);
+        copy.failed = true;
+        log_line("game depth: no image of our own for a copy (%ux%u, format %d)", extent.width, extent.height,
+            static_cast<int>(format));
+        return false;
+    }
+    made.id = next_id++;
+    copy = made;
+    log_line("game depth: copied into an image of our own, #%d %ux%u", copy.id, extent.width, extent.height);
+    return true;
+}
+
+// The scene's depth, as the game's pass ends: worth a copy?
+bool scene_shaped(const Followed& image) {
+    if (!screen.width || !screen.height || !image.extent.height) return false;
+    const double aspect = static_cast<double>(screen.width) / screen.height;
+    const double shape = static_cast<double>(image.extent.width) / image.extent.height;
+    const double area = static_cast<double>(image.extent.width) * image.extent.height;
+    return std::abs(shape - aspect) <= 0.02 * aspect && area >= 0.3 * screen.width * screen.height;
+}
+
+void record_copy(VkCommandBuffer buffer, VkImage source, VkImageLayout layout) {
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = layout;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = source;
+    // Ours: its last content is not needed; after the overlay read it.
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = copy.image;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    next.CmdPipelineBarrier(buffer,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, before);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    region.dstSubresource = region.srcSubresource;
+    region.extent = {copy.extent.width, copy.extent.height, 1};
+    next.CmdCopyImage(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = layout;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, after);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateInfo* info,
@@ -83,7 +203,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateI
     if (depth_format(info->format) && (info->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && info->mipLevels == 1 &&
             info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT && info->imageType == VK_IMAGE_TYPE_2D) {
         std::lock_guard lock(depth_mutex);
-        followed[*image] = {next_id++, info->format, {info->extent.width, info->extent.height}, info->initialLayout};
+        followed[*image] = {next_id++, info->format, {info->extent.width, info->extent.height}};
     }
     return result;
 }
@@ -109,17 +229,22 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkImageVie
 VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer buffer, const VkCommandBufferBeginInfo* info) {
     {
         std::lock_guard lock(depth_mutex);
-        events_of(buffer).clear();
+        recording_of(buffer) = Recording{};
     }
     return next.BeginCommandBuffer(buffer, info);
 }
 
 void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
-    if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
     std::lock_guard lock(depth_mutex);
+    Recording& recording = recording_of(buffer);
+    recording.depth = VK_NULL_HANDLE;
+    if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
     auto view = views.find(info->pDepthAttachment->imageView);
     if (view == views.end()) return;
-    events_of(buffer).push_back({view->second, info->pDepthAttachment->imageLayout, true});
+    recording.depth = view->second;
+    recording.layout = info->pDepthAttachment->imageLayout;
+    recording.stored = info->pDepthAttachment->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+    recording.suspending = (info->flags & VK_RENDERING_SUSPENDING_BIT) != 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdBeginRendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
@@ -132,47 +257,34 @@ VKAPI_ATTR void VKAPI_CALL CmdBeginRenderingKHR(VkCommandBuffer buffer, const Vk
     next.CmdBeginRenderingKHR(buffer, info);
 }
 
-VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier(VkCommandBuffer buffer, VkPipelineStageFlags source,
-        VkPipelineStageFlags target, VkDependencyFlags flags, uint32_t memory_count, const VkMemoryBarrier* memory,
-        uint32_t buffer_count, const VkBufferMemoryBarrier* buffers, uint32_t image_count,
-        const VkImageMemoryBarrier* images) {
-    if (image_count) {
-        std::lock_guard lock(depth_mutex);
-        for (uint32_t i = 0; i < image_count; ++i)
-            if (followed.count(images[i].image)) events_of(buffer).push_back({images[i].image, images[i].newLayout, false});
-    }
-    next.CmdPipelineBarrier(buffer, source, target, flags, memory_count, memory, buffer_count, buffers, image_count, images);
-}
-
-void barrier2(VkCommandBuffer buffer, const VkDependencyInfo* info) {
-    if (!info->imageMemoryBarrierCount) return;
+// After the game's pass ends: its scene depth copied, when it wrote one.
+void end_rendering(VkCommandBuffer buffer) {
     std::lock_guard lock(depth_mutex);
-    for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i) {
-        const VkImageMemoryBarrier2& barrier = info->pImageMemoryBarriers[i];
-        if (followed.count(barrier.image)) events_of(buffer).push_back({barrier.image, barrier.newLayout, false});
-    }
+    Recording& recording = recording_of(buffer);
+    const VkImage image = recording.depth;
+    recording.depth = VK_NULL_HANDLE;
+    if (!image || !recording.stored || recording.suspending) return;
+    auto found = followed.find(image);
+    if (found == followed.end() || !scene_shaped(found->second)) return;
+    if (!make_copy(found->second.extent, found->second.format)) return;
+    record_copy(buffer, image, recording.layout);
+    recording.copied = true;
 }
 
-VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier2(VkCommandBuffer buffer, const VkDependencyInfo* info) {
-    barrier2(buffer, info);
-    next.CmdPipelineBarrier2(buffer, info);
+VKAPI_ATTR void VKAPI_CALL CmdEndRendering(VkCommandBuffer buffer) {
+    next.CmdEndRendering(buffer);
+    end_rendering(buffer);
 }
 
-VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier2KHR(VkCommandBuffer buffer, const VkDependencyInfo* info) {
-    barrier2(buffer, info);
-    next.CmdPipelineBarrier2KHR(buffer, info);
+VKAPI_ATTR void VKAPI_CALL CmdEndRenderingKHR(VkCommandBuffer buffer) {
+    next.CmdEndRenderingKHR(buffer);
+    end_rendering(buffer);
 }
 
 void submitted(VkCommandBuffer buffer) {
     // Called under depth_mutex.
     auto found = recordings.find(buffer);
-    if (found == recordings.end()) return;
-    for (const Event& event : found->second) {
-        auto image = followed.find(event.image);
-        if (image == followed.end()) continue;
-        image->second.layout = event.layout;
-        if (event.attachment) attached.push_back(event.image);
-    }
+    if (found != recordings.end() && found->second.copied) copy.submitted_at = presents;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
@@ -229,17 +341,19 @@ bool enabled() {
     return on;
 }
 
-void start(VkDevice device, PFN_vkGetDeviceProcAddr next_gdpa) {
+void start(DeviceData& d, PFN_vkGetDeviceProcAddr next_gdpa) {
     if (!enabled()) return;
-    if (followed_device) {
-        log_line("game depth: another device %p, not followed", static_cast<void*>(device));
+    if (device_data) {
+        log_line("game depth: another device %p, not followed", static_cast<void*>(d.device));
         return;
     }
-    followed_device = device;
-#define DEPTH_LOAD(name, type) next.name = reinterpret_cast<PFN_##type>(next_gdpa(device, #type));
+    device_data = &d;
+#define DEPTH_LOAD(name, type) next.name = reinterpret_cast<PFN_##type>(next_gdpa(d.device, #type));
     DEPTH_FUNCTIONS(DEPTH_LOAD)
 #undef DEPTH_LOAD
-    log_line("game depth: on (game-depth.on), device %p", static_cast<void*>(device));
+    next.CmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(next_gdpa(d.device, "vkCmdPipelineBarrier"));
+    next.CmdCopyImage = reinterpret_cast<PFN_vkCmdCopyImage>(next_gdpa(d.device, "vkCmdCopyImage"));
+    log_line("game depth: on (game-depth.on), device %p", static_cast<void*>(d.device));
 }
 
 PFN_vkVoidFunction function(const char* requested) {
@@ -252,25 +366,19 @@ PFN_vkVoidFunction function(const char* requested) {
     return nullptr;
 }
 
-SceneDepth scene_depth(VkExtent2D screen) {
-    SceneDepth best;
-    if (!enabled() || !screen.height) return best;
+void note_screen(VkExtent2D extent) {
+    if (!enabled()) return;
     std::lock_guard lock(depth_mutex);
-    const double aspect = static_cast<double>(screen.width) / screen.height;
-    uint64_t best_area = 0;
-    for (VkImage image : attached) {
-        auto found = followed.find(image);
-        if (found == followed.end() || !found->second.extent.height) continue;
-        const Followed& f = found->second;
-        const double shape = static_cast<double>(f.extent.width) / f.extent.height;
-        if (std::abs(shape - aspect) > 0.02 * aspect) continue;
-        const uint64_t area = static_cast<uint64_t>(f.extent.width) * f.extent.height;
-        // The largest; the last used of the same size.
-        if (area < best_area) continue;
-        best_area = area;
-        best = {image, f.format, f.extent, f.layout, f.id};
-    }
-    return best;
+    screen = extent;
+}
+
+SceneDepth scene_depth(VkExtent2D) {
+    SceneDepth found;
+    if (!enabled()) return found;
+    std::lock_guard lock(depth_mutex);
+    // A copy submitted since the last present or the one before.
+    if (!copy.image || presents - copy.submitted_at > 1) return found;
+    return {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id};
 }
 
 Settings settings() {
@@ -307,7 +415,7 @@ Settings settings() {
 void presented() {
     if (!enabled()) return;
     std::lock_guard lock(depth_mutex);
-    attached.clear();
+    ++presents;
 }
 
 }  // namespace overlay::depth

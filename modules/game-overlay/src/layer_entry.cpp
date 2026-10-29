@@ -120,7 +120,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
         devices[dispatch_key(*device)] = d;
     }
     probe::start(*device, next_gdpa);
-    depth::start(*device, next_gdpa);
+    depth::start(*d, next_gdpa);
     log_line("device %p created, called from %s, layers below: %s", static_cast<void*>(*device),
         module_name(_ReturnAddress()).c_str(), below.c_str());
     return VK_SUCCESS;
@@ -172,6 +172,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapc
     data.images.resize(count);
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, data.images.data());
     probe::note_swapchain(data.images, info->imageFormat, info->imageExtent);
+    depth::note_screen(info->imageExtent);
     // The zones are drawn in a render pass, as a color attachment.
     const bool attachment = (info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
     data.drawable = attachment && drawable_format(info->imageFormat) && info->imageArrayLayers == 1;
