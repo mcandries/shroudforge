@@ -36,10 +36,12 @@ pub(crate) mod shroudforge {
         mod read_ui_locale;
         mod resolve_overlay_paths;
         mod reuse_voxel_view_base;
+        mod reserve_mod_input;
         mod set_mod_settings;
         mod voxel_chunk_store;
         pub(crate) use create_mod_api::create;
         pub(crate) use dispatch_mod_ui_actions::{dispatch_ui_actions, invoke_mod_action};
+        pub(crate) use reserve_mod_input::register_input_reservations;
         pub(crate) use set_mod_settings::set_settings;
     }
 }
