@@ -288,13 +288,14 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (!value.contains("items") || !value["items"].is_array()) fail(type + ": expected items");
         item.spacing = type == "row" ? 6.0f : 5.0f;
         if (value.contains("spacing")) item.spacing = parse_number(value["spacing"], "spacing");
-        if (type == "row") {
-            item.background = IM_COL32(0, 0, 0, 0);
-            if (value.contains("background")) item.background = parse_color(value["background"], "background");
-            if (value.contains("border")) item.frame_border = parse_color(value["border"], "border");
-            if (value.contains("padding")) item.frame_padding = parse_pair(value["padding"], "padding");
-            if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
-        }
+        // A frame, for a row or a flow.
+        item.background = IM_COL32(0, 0, 0, 0);
+        if (value.contains("background")) item.background = parse_color(value["background"], "background");
+        if (value.contains("border")) item.frame_border = parse_color(value["border"], "border");
+        if (value.contains("padding")) item.frame_padding = parse_pair(value["padding"], "padding");
+        if (value.contains("rounding")) item.rounding = parse_number(value["rounding"], "rounding");
+        if (type == "flow" && value.contains("indent"))
+            item.flow_indent = std::max(0.0f, parse_number(value["indent"], "indent"));
         if (value.contains("line_gap")) item.line_gap = parse_number(value["line_gap"], "line_gap");
         TextStyle row_style = text_style;
         parse_text_style(value, row_style);

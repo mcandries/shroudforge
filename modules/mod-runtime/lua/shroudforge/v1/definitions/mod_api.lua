@@ -123,6 +123,7 @@ function shroudforge_input.keybind_label(setting_key) end
 --- @field items? (ShroudForgeOverlayItem|string)[] Row content side by side, or flow content wrapped like a sentence.
 --- @field spacing? number Space between the items of a row or the non-text items of a flow.
 --- @field line_gap? number Flow: space between wrapped lines.
+--- @field indent? number Flow: lines after the first start this much further right (a hanging indent).
 --- @field color? ShroudForgeOverlayColor Separator, bar or icon color; toggle track when off.
 --- @field background? ShroudForgeOverlayColor Bar or chip background.
 --- @field thickness? number Separator thickness.
