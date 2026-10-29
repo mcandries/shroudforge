@@ -534,6 +534,23 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
+            item.world_hide_hidden = cells.value("hide_hidden", false);
+            item.world_hidden_dashed = cells.value("hidden_dashed", false);
+            if (cells.value("hide_own", false)) {
+                // Its own cells, those with a color, hide each other too.
+                auto own = std::make_shared<WorldSolids>();
+                own->sx = box[0];
+                own->sy = box[1];
+                own->sz = box[2];
+                for (int i = 0; i < 3; ++i) own->origin[i] = item.world_cells_origin[i];
+                own->cell = item.world_cells_size;
+                const std::vector<unsigned char> grid = decode_voxel_cells(box[0], box[1], box[2], *text);
+                own->filled.resize(grid.size());
+                for (size_t i = 0; i < grid.size(); ++i)
+                    own->filled[i] = (item.cell_colors[grid[i]] & IM_COL32_A_MASK) != 0 ? 1 : 0;
+                own->data = text;
+                item.world_own_solids = std::move(own);
+            }
             item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false);
         }
         if (value.contains("solids")) {
@@ -877,7 +894,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh", "blobs"});
+    status["features"] = json::array({"dashes", "same_mesh", "blobs", "hide_hidden"});
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
