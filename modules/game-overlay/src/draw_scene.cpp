@@ -436,10 +436,17 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr) {
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr) {
     LocalCamera camera;
     if (!local_camera(camera, lead)) return false;
     if (read) *read = camera;
+    // The camera the game drew the scene with, when known: the cursor stays
+    // the one read now.
+    if (drawn) {
+        for (int i = 0; i < 3; ++i) camera.position[i] = drawn->position[i];
+        for (int i = 0; i < 4; ++i) camera.orientation[i] = drawn->orientation[i];
+        camera.fov_y = drawn->fov_y;
+    }
     const double* q = camera.orientation;
     const auto rotate = [&](double x, double y, double z, double out[3]) {
         // v + 2w (q x v) + 2 q x (q x v)
@@ -916,8 +923,10 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
 
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
-    LocalCamera camera;
-    if (!world_view(view, item.camera_lead, &camera)) return;
+    LocalCamera camera, drawn;
+    if (item.world_depth_picture && c.resources.want_depth_picture) c.resources.want_depth_picture();
+    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn);
+    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr)) return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
     const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {

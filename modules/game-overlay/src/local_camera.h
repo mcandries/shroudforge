@@ -30,4 +30,8 @@ struct LocalCamera {
 // changes is logged every 5 s.
 bool local_camera(LocalCamera& camera, double lead = 0.0);
 
+// The camera read now, from any thread, kept nowhere (for the game's depth
+// copy: the camera as the game draws the scene).
+bool local_camera_now(LocalCamera& camera);
+
 }  // namespace overlay

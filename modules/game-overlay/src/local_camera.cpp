@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -138,6 +139,25 @@ void report(double lead, double now) {
 }
 
 }  // namespace
+
+bool local_camera_now(LocalCamera& camera) {
+    static std::mutex mutex;
+    static ReadLocalCamera read = nullptr;
+    {
+        std::lock_guard lock(mutex);
+        if (!read)
+            if (HMODULE runtime = GetModuleHandleW(L"kfc-runtime.dll"))
+                read = reinterpret_cast<ReadLocalCamera>(GetProcAddress(runtime, "KfcRuntimeReadLocalCamera"));
+    }
+    if (!read) return false;
+    double values[17]{};
+    if (read(values, 17) != 1 || values[7] <= 0.0 || values[8] <= 0.0) return false;
+    for (int i = 0; i < 3; ++i) camera.position[i] = values[i];
+    for (int i = 0; i < 4; ++i) camera.orientation[i] = values[3 + i];
+    camera.fov_y = values[7];
+    camera.aspect = values[8];
+    return true;
+}
 
 bool local_camera(LocalCamera& camera, double lead) {
     static int frame = -1;
