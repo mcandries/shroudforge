@@ -165,6 +165,10 @@ struct Item {
     // edges dashed (`hidden_dashed`), instead of drawn lighter.
     bool world_hide_hidden = false;
     bool world_hidden_dashed = false;
+    // World: the cells drawn only inside the box of `solids`, and none while
+    // the eye is outside it: elsewhere what hides them is not known, and they
+    // would show in front of the world.
+    bool world_only_in_solids = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
