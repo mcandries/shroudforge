@@ -160,6 +160,12 @@ struct Item {
     // Opacity of its edges (0 to 1), in their cell's color.
     float world_cells_edge_opacity = 0.9f;
     std::shared_ptr<const WorldSolids> world_solids;
+    // World: the faces of `cells` hidden from the eye (behind `solids`, or
+    // behind its own cells with `hide_own`) are not drawn, or only their
+    // edges dashed (`hidden_dashed`), instead of drawn lighter.
+    bool world_hide_hidden = false;
+    bool world_hidden_dashed = false;
+    std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
     // World: the face the building cursor aims at, outlined at every frame from
