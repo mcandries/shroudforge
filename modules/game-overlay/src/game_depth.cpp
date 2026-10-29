@@ -552,7 +552,6 @@ Settings settings() {
         const double value = std::atof(word.c_str() + equals + 1);
         if (name == "near" && value > 0.0) read.near_distance = value;
         if (name == "margin" && value >= 0.0) read.margin = value;
-        if (name == "margin_remove" && value >= 0.0) read.margin_remove = value;
         if (name == "camera") {
             const std::string mode = word.substr(equals + 1);
             read.camera = mode == "present" ? CameraMode::Present : mode == "copy" ? CameraMode::Copy : CameraMode::Gpu;
@@ -560,8 +559,8 @@ Settings settings() {
     }
     current = read;
     static const char* const kModes[] = {"the scene's, from the GPU", "read with the copy", "read at the present"};
-    log_line("game depth: near %.4g m, margin %.3g m (remove %.3g m), camera %s", current.near_distance, current.margin,
-        current.margin_remove, kModes[static_cast<int>(current.camera)]);
+    log_line("game depth: near %.4g m, margin %.3g m, camera %s (unless a world item says)", current.near_distance,
+        current.margin, kModes[static_cast<int>(current.camera)]);
     return current;
 }
 

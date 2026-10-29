@@ -171,6 +171,10 @@ struct Item {
     bool world_only_in_solids = false;
     // World: asks for the picture of the game's depth (game-depth.on), a diagnostic.
     bool world_depth_picture = false;
+    // World: the camera drawing it against the game's depth (game-depth.on):
+    // 0 the scene's from the GPU, 1 read with the depth's copy, 2 read at the
+    // present; -1 as game-depth.on says.
+    int world_depth_camera = -1;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

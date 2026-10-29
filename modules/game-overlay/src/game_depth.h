@@ -46,9 +46,10 @@ SceneDepth scene_depth(VkExtent2D screen);
 enum class CameraMode { Gpu, Copy, Present };
 struct Settings {
     double near_distance = 0.01;  // the GPU camera's, when found
-    double margin = 0.15;
-    // Cells to remove sit in the game's blocks, whose relief juts out.
-    double margin_remove = 0.35;
+    // The game's blocks jut out of their cells (relief, bevels): cells drawn
+    // on them, to remove or replace, or built next to them, show that far
+    // behind the game's surface.
+    double margin = 0.35;
     // Which camera draws the world items: `camera=gpu` (default), the
     // scene's as handed to the GPU (else as `copy`); `camera=copy`, the one
     // read as the game recorded the scene; `camera=present`, the one read at

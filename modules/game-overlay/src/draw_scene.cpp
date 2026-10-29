@@ -744,7 +744,6 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // renderer, which leaves out, pixel by pixel, what the game's surface
     // hides; no test here.
     WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
-    if (gpu && item.world_hidden_dashed) gpu->remove = true;
     // Hide hidden faces: their results kept per mesh, tested a part per frame.
     HiddenFaces* hidden = nullptr;
     if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
@@ -926,7 +925,7 @@ void draw_world(const Context& c, const Item& item) {
     WorldView view;
     LocalCamera camera, drawn;
     if (item.world_depth_picture && c.resources.want_depth_picture) c.resources.want_depth_picture();
-    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn);
+    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn, item.world_depth_camera);
     if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr)) return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
