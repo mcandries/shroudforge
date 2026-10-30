@@ -492,6 +492,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("camera_lead"))
             item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), -0.2f, 0.2f);
         item.world_depth_picture = value.value("depth_picture", false);
+        if (value.contains("depth_margin") && value["depth_margin"].is_number())
+            item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
         if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
             const std::string mode = value["depth_camera"].get<std::string>();
             item.world_depth_camera = mode == "gpu" ? 0 : mode == "copy" ? 1 : mode == "present" ? 2 : -1;

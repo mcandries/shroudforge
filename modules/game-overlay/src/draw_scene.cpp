@@ -767,6 +767,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // renderer, which leaves out, pixel by pixel, what the game's surface
     // hides; no test here.
     WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
+    if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
     // Hide hidden faces: their results kept per mesh, tested a part per frame.
     HiddenFaces* hidden = nullptr;
     if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
