@@ -25,12 +25,14 @@ struct Offscreen {
 // out, or dashed on an edge with `dash` >= 0 (counted in dash periods).
 struct WorldDepthVertex {
     float x, y, depth, dash;
+    float extra;  // more margin, in units of 1 / depth (edges: kept visible where they touch the game's surface)
     ImU32 color;
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
     double margin = -1.0;  // an item's (depth_margin), else game-depth.on's
     double matrix_near = 0.0;  // the GPU camera matrix's near distance, when known
+    bool solid = false;  // opaque cells (solid style): drawn with a depth of their own, the nearest face kept
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };
