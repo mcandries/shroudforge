@@ -45,6 +45,7 @@ layout(location = 1) noperspective in float v_depth;
 layout(location = 2) noperspective in float v_dash;
 layout(location = 3) flat in float v_extra;
 layout(location = 4) noperspective in vec3 v_cell;
+layout(location = 5) flat in float v_fade;
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -181,12 +182,12 @@ void main() {
                 color.a = max(color.a, 220.0 / 255.0);
             }
         }
-        out_color = color;
+        out_color = vec4(color.rgb, color.a * v_fade);
         return;
     }
     if (hidden) {
         if (v_dash < 0.0 || fract(v_dash) >= 0.6) discard;
         color.a = max(color.a, 220.0 / 255.0);
     }
-    out_color = color;
+    out_color = vec4(color.rgb, color.a * v_fade);
 }

@@ -799,6 +799,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         std::uint8_t edges;
         bool dashed;  // Hidden, shown by its edges dashed only.
         double margin;  // more margin against the game's depth (the wire view's offsets), meters
+        bool back;      // turned away from the eye: only its creases with another turned away (back_edges)
     };
     // Against the game's depth (game-depth.on): every face sent to the
     // renderer, which leaves out, pixel by pixel, what the game's surface
@@ -935,8 +936,35 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             }
         }
         const double plane = base[axis] + (positive ? s + offset : -offset);
-        // Only the faces turned to the camera.
-        if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
+        // Only the faces turned to the camera; with back_edges (the wire
+        // view), those turned away too, for their creases with another
+        // turned away.
+        const bool back = (view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0;
+        const bool back_edges = gpu && gpu->wire && item.world_back_edges > 0.0f;
+        if (back && !back_edges) continue;
+        std::uint8_t back_creases = 0xF;
+        if (back) {
+            // The other face at each edge: the cell's own toward the edge (an
+            // outer corner), or the one coming back over it (an inner one);
+            // its plane is the edge's.
+            const auto drawn_at = [&](const int p[3]) {
+                if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
+                return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
+            };
+            static constexpr int kSide[4][2] = {{1, -1}, {0, 1}, {1, 1}, {0, -1}};
+            back_creases = 0;
+            for (int k = 0; k < 4; ++k) {
+                const int edge_axis = kSide[k][0] == 0 ? u : v;
+                const int toward = kSide[k][1];
+                int front[3] = {face.x, face.y, face.z};
+                front[edge_axis] += toward;
+                front[axis] += positive ? 1 : -1;
+                const double at = base[edge_axis] + (toward > 0 ? s : 0.0);
+                const double normal = drawn_at(front) ? -toward : toward;
+                if ((view.eye[edge_axis] - at) * normal <= 0.0) back_creases |= static_cast<std::uint8_t>(1 << k);
+            }
+            if (!(back_creases & face.creases)) continue;
+        }
         double in[4][3], at_world[4][3];
         double centre[3] = {0.0, 0.0, 0.0};
         for (int k = 0; k < 4; ++k) {
@@ -998,8 +1026,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             // Against the game's depth, a hidden part of an edge shows dashed
             // in this color (the renderer decides which part).
             entry.edge = piece_hidden ? dashed_edge : edge;
-            entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges));
+            entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges) & back_creases);
             entry.margin = face_margin;
+            entry.back = back;
             shown.push_back(entry);
         };
         const std::uint8_t state = hidden ? hidden->hidden[index] : 0;
@@ -1024,10 +1053,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu) {
         // The fills, then the edges as thin quads, all with their depth.
         for (const Shown& entry : shown) {
+            if (entry.back) continue;  // creases only
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
             for (int k = 0; k < entry.count; ++k)
                 gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f,
-                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {0.0f, 0.0f, 0.0f}});
+                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {0.0f, 0.0f, 0.0f}, 1.0f});
             for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
         }
         gpu->face_indices = gpu->indices.size();
@@ -1080,10 +1110,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 float ca[3], cb[3];
                 in_blocks(wa, da, ca);
                 in_blocks(wb, db, cb);
-                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}});
-                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}});
-                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}});
-                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}});
+                const float fade = entry.back ? item.world_back_edges : 1.0f;
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
                 gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
             }
         return;
