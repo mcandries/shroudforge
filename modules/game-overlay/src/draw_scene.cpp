@@ -449,7 +449,8 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr) {
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr,
+    bool keep_jitter = false) {
     LocalCamera camera;
     if (!local_camera(camera, lead)) return false;
     if (read) *read = camera;
@@ -480,6 +481,18 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
     if (camera.has_matrix) {
         view.matrix = true;
         for (int i = 0; i < 16; ++i) view.m[i] = camera.matrix[i];
+        // The temporal anti-aliasing's jitter: a fraction of a pixel added
+        // to clip x and y as w times a new offset each frame, rows 0 and 1
+        // taking a part of the gaze row 3. The camera's right and up are
+        // square to its gaze: what of row 3 they hold is the jitter.
+        if (!keep_jitter) {
+            const double gaze = view.m[12] * view.m[12] + view.m[13] * view.m[13] + view.m[14] * view.m[14];
+            for (int row = 0; row < 2 && gaze > 0.0; ++row) {
+                double* r = view.m + row * 4;
+                const double k = (r[0] * view.m[12] + r[1] * view.m[13] + r[2] * view.m[14]) / gaze;
+                for (int i = 0; i < 4; ++i) r[i] -= k * view.m[12 + i];
+            }
+        }
         view.focal_x = 1.0;
         view.focal_y = 1.0;
         return true;
@@ -740,6 +753,28 @@ void dashed_line(const Context& c, ImVec2 a, ImVec2 b, ImU32 color, float width)
     }
 }
 
+// The characters of a mesh's outer faces, kept for the last few meshes.
+const std::array<bool, 128>& characters_of(const std::shared_ptr<const VoxelMesh>& mesh) {
+    struct Entry {
+        std::weak_ptr<const VoxelMesh> mesh;
+        const VoxelMesh* raw = nullptr;
+        std::array<bool, 128> present{};
+    };
+    static std::vector<Entry> entries;
+    for (const Entry& entry : entries)
+        if (entry.raw == mesh.get() && entry.mesh.lock() == mesh) return entry.present;
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& e) { return e.mesh.expired(); }),
+        entries.end());
+    if (entries.size() >= 16) entries.erase(entries.begin());
+    Entry entry;
+    entry.mesh = mesh;
+    entry.raw = mesh.get();
+    for (const VoxelFace& face : mesh->faces)
+        if (!face.inner && face.ch < 128) entry.present[face.ch] = true;
+    entries.push_back(entry);
+    return entries.back().present;
+}
+
 // A box of cells in the world (`cells` of a world item): the faces turned to
 // the camera filled with their cell's color, lit by their direction, the
 // farthest first (at most kMaxWorldFaces); then over all of them their edges,
@@ -767,10 +802,27 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // Against the game's depth (game-depth.on): every face sent to the
     // renderer, which leaves out, pixel by pixel, what the game's surface
     // hides; no test here.
-    WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
+    // The wire view goes there whether hidden faces are hidden or not
+    // (30/10: drawn by ImGui, its edges over everything and its offsets as
+    // geometry, a block removed looked two deep).
+    const bool wire_style = item.world_cells_smooth && !item.world_own_solids;
+    WorldDepthDraw* gpu = (item.world_hide_hidden || wire_style) && c.resources.world_depth ? c.resources.world_depth()
+                                                                                           : nullptr;
     if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
     if (gpu && item.world_own_solids) gpu->solid = true;
-    if (gpu && item.world_cells_smooth && !item.world_own_solids) gpu->wire = true;
+    if (gpu && wire_style) gpu->wire = true;
+    if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
+    if (gpu) {
+        // Something standing less than the largest offset (and 10 cm) before
+        // our faces is a block of the game the build sits in.
+        double largest = item.world_face_offset;
+        for (const auto& entry : item.world_face_offsets)
+            for (float each : entry.second) largest = std::max(largest, static_cast<double>(each));
+        gpu->own_tolerance = std::max(gpu->own_tolerance, largest + 0.1);
+        gpu->focal_pixels = view.matrix
+            ? view.screen.y * 0.5 * std::sqrt(view.m[4] * view.m[4] + view.m[5] * view.m[5] + view.m[6] * view.m[6])
+            : view.screen.y * 0.5 / view.focal_y;
+    }
     // 30/10: the matrix's near (6.5 mm) made the build look farther than the
     // game's depth says: hidden behind what stands in front, more with the
     // distance. 1 cm by default; the matrix's when an item asks.
@@ -785,6 +837,20 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // only_in_solids, the eye outside the solids' box: no cell is drawn, the
     // world between them and the eye not known.
     if (item.world_only_in_solids && item.world_solids && !in_solids(*item.world_solids, view.eye)) return;
+    // face_offsets_largest: the largest offsets of the characters drawn.
+    bool use_largest = false;
+    std::array<double, 3> largest{0.0, 0.0, 0.0};
+    if (item.world_face_offsets_largest) {
+        const auto& present = characters_of(shared_mesh);
+        for (int ch = 0; ch < 128; ++ch) {
+            if (!present[ch]) continue;
+            std::array<double, 3> own{item.world_face_offset, item.world_face_offset, item.world_face_offset};
+            for (const auto& [key, each] : item.world_face_offsets)
+                if (key == ch) own = {each[0], each[1], each[2]};
+            for (int i = 0; i < 3; ++i) largest[i] = std::max(largest[i], own[i]);
+            use_largest = true;
+        }
+    }
     std::vector<Shown> shown;
     shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
     static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
@@ -805,6 +871,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         // Its offset toward a direction (axis * 2 + positive): the sides', the
         // top's (+y) or the bottom's (-y) of its character, else the item's.
         const auto offset_toward = [&](int direction) -> double {
+            if (use_largest) return direction == 3 ? largest[1] : direction == 2 ? largest[2] : largest[0];
             for (const auto& [ch, own] : item.world_face_offsets)
                 if (ch == face.ch) return direction == 3 ? own[1] : direction == 2 ? own[2] : own[0];
             return item.world_face_offset;
@@ -947,8 +1014,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         for (const Shown& entry : shown)
             for (int k = 0; k < 4; ++k) {
                 if (!(entry.edges & (1 << k))) continue;
-                // Unseen edges (the solid style) only matter dashed.
-                if (!item.world_hidden_dashed && !(entry.edge & IM_COL32_A_MASK)) continue;
+                // Unseen edges (the solid style) only matter dashed; the solid
+                // style shows none (30/10: in Remove mode, dashes over the
+                // terrain and the player).
+                const bool hidden_dashed = item.world_hidden_dashed && !gpu->solid;
+                if (!hidden_dashed && !(entry.edge & IM_COL32_A_MASK)) continue;
                 double a[3], b[3];
                 std::memcpy(a, entry.corners[k], sizeof a);
                 std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
@@ -968,7 +1038,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 const auto db = static_cast<float>(gpu->near_distance / b[2]) * edge_nearer;
                 // Dashes only where the edge is hidden: in Remove mode, and in
                 // the wire view (where the build itself hides it).
-                const bool dashes = item.world_hidden_dashed || gpu->wire;
+                const bool dashes = hidden_dashed || gpu->wire;
                 const float ua = dashes ? 0.0f : -1.0f;
                 const float ub = dashes ? length / period : -1.0f;
                 const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
@@ -1014,7 +1084,9 @@ void draw_world(const Context& c, const Item& item) {
     LocalCamera camera, drawn;
     if (item.world_depth_picture && c.resources.want_depth_picture) c.resources.want_depth_picture();
     const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn, item.world_depth_camera);
-    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr)) return;
+    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr,
+            item.world_depth_jitter_kept))
+        return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
     const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {

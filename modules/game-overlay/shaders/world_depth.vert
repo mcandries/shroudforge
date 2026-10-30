@@ -8,6 +8,7 @@ layout(push_constant) uniform Constants {
     float margin;      // how far behind the game's surface still shows, in units of 1 / depth
     int mode;          // see world_depth.frag
     float own_tolerance;
+    float focal;  // screen pixels per unit of tan, vertically
 } c;
 layout(location = 0) in vec2 position;
 layout(location = 1) in float depth;

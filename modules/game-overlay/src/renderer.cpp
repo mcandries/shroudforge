@@ -126,6 +126,7 @@ struct WorldDepthConstants {
     float margin;
     int32_t mode;         // 0 against the game's depth, 1 our faces' depth, 2 the wire view
     float own_tolerance;  // wire: how far before our nearest face something hides an edge entirely
+    float focal;          // screen pixels per unit of tan, vertically (the wire view's slopes)
 };
 
 }  // namespace
@@ -1158,7 +1159,7 @@ bool world_target(DeviceData& d, Renderer& r, VkExtent2D extent, VkImageView vie
 }
 
 // In the world's pass (mode 0), the wire view's depth pass (1, the faces
-// alone) or the zones' pass (2, the wire view).
+// alone) or the zones' pass (2, the wire view; 3 showing what is hidden).
 void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene,
         VkExtent2D screen, const depth::Settings& settings, VkPipeline pipeline, int mode, size_t indices) {
     WorldDepthPipeline& w = r.world;
@@ -1176,9 +1177,11 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     const double margin = r.world_draw.margin >= 0.0 ? r.world_draw.margin : settings.margin;
     constants.margin = static_cast<float>(margin / r.world_draw.near_distance);
     constants.mode = mode;
-    // Wire: an edge hidden by something 30 cm or more before our nearest
-    // face is left out (a tree, a wall); nearer, it is the build's own block.
-    constants.own_tolerance = static_cast<float>(0.3 / r.world_draw.near_distance);
+    // Wire: an edge hidden by something 30 cm (or the largest face offset
+    // and 10 cm) or more before our nearest face is left out (a tree, a
+    // wall); nearer, it is the build's own block.
+    constants.own_tolerance = static_cast<float>(r.world_draw.own_tolerance / r.world_draw.near_distance);
+    constants.focal = static_cast<float>(r.world_draw.focal_pixels);
     d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
         &constants);
     const VkDeviceSize offset = 0;
@@ -1380,6 +1383,9 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.margin = -1.0;
     r.world_draw.solid = false;
     r.world_draw.wire = false;
+    r.world_draw.show_hidden = false;
+    r.world_draw.own_tolerance = 0.3;
+    r.world_draw.focal_pixels = 0.0;
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
     // camera draws.
@@ -1515,8 +1521,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     pass_begin.renderArea.extent = target->extent;
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
     if (wire)
-        draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline, 2,
-            r.world_draw.indices.size());
+        draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline,
+            r.world_draw.show_hidden ? 3 : 2, r.world_draw.indices.size());
     ImGui_ImplVulkan_RenderDrawData(zones, cb);
     d.fn.CmdEndRenderPass(cb);
     if (world_drawn) finish_world(d, cb, scene_depth);

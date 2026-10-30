@@ -37,6 +37,12 @@ struct WorldDepthDraw {
     // an edge hidden by the build itself dashed, hidden by something before
     // the build left out.
     bool wire = false;
+    // The wire view showing what is hidden (hide_hidden off): an edge hidden
+    // by something before the build dashed, not left out.
+    bool show_hidden = false;
+    // Wire: how far before our nearest face something hides an edge entirely (meters).
+    double own_tolerance = 0.3;
+    double focal_pixels = 0.0;  // screen pixels per unit of tan, vertically
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;

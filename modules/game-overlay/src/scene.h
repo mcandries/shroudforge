@@ -181,6 +181,11 @@ struct Item {
     // World: the game's near distance for its depth (meters); 0: the GPU
     // camera matrix's; negative: as game-depth.on says.
     float world_depth_near = -1.0f;
+    // World: the GPU camera's matrix kept as the game gives it, with its
+    // temporal anti-aliasing jitter (depth_jitter = "keep"); by default
+    // taken out, the build steady on the image (30/10: shimmering by a pixel
+    // with FSR 3, not without anti-aliasing or with FXAA).
+    bool world_depth_jitter_kept = false;
     // World: its cells drawn this much larger (meters) where their surface is
     // open, as the game draws its blocks past their cells; they stay on the
     // grid. Faces pushed out, their edges longer at an outer corner, shorter
@@ -189,6 +194,11 @@ struct Item {
     // World: per cell character, its own face_offset: sides, top (+y),
     // bottom (-y) (the game's blocks: each material its own, KB 30/10).
     std::vector<std::pair<unsigned char, std::array<float, 3>>> world_face_offsets;
+    // World: every face drawn with the largest offsets of the characters it
+    // holds, direction by direction (face_offsets_largest): a build's faces
+    // all as far out, whatever block was there (30/10: steps on a wall of
+    // stone built over in wood, the stone's cells farther).
+    bool world_face_offsets_largest = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
