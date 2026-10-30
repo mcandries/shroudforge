@@ -5,6 +5,7 @@
 
 #include "overlay.h"
 #include "scene.h"
+#include "game_depth.h"
 
 #include <nlohmann/json.hpp>
 
@@ -959,6 +960,8 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
     status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time", "hide_hidden", "only_in_solids"});
+    // Drawing the world items against the game's depth (game-depth.on).
+    if (depth::enabled()) status["features"].push_back("game_depth");
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);
