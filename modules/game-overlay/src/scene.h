@@ -77,6 +77,7 @@ struct WorldSolids {
     double origin[3]{};
     double cell = 0.5;
     std::vector<std::uint8_t> filled;
+    std::vector<std::uint32_t> bits;  // `filled` a bit per cell, for the GPU (the wire view in Remove mode)
     std::shared_ptr<const std::string> data;  // The run-length text they were decoded from.
 };
 enum class Align { Start, Center, End };
