@@ -768,6 +768,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // hides; no test here.
     WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
     if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
+    if (gpu && item.world_own_solids) gpu->solid = true;
     // 30/10: the matrix's near (6.5 mm) made the build look farther than the
     // game's depth says: hidden behind what stands in front, more with the
     // distance. 1 cm by default; the matrix's when an item asks.
@@ -814,7 +815,10 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 beyond[kEdgeSide[k][0] == 0 ? u : v] += kEdgeSide[k][1];
                 int front[3] = {beyond[0], beyond[1], beyond[2]};
                 front[axis] += positive ? 1 : -1;
-                grow[kGrow[k]] = drawn(front) ? -offset : drawn(beyond) ? 0.0 : offset;
+                // Inner corner: shorter; a cell touching only along this
+                // edge (diagonal): unchanged, the two would cross; outer
+                // corner: longer.
+                grow[kGrow[k]] = drawn(front) ? (drawn(beyond) ? -offset : 0.0) : drawn(beyond) ? 0.0 : offset;
             }
         }
         const double plane = base[axis] + (positive ? s + offset : -offset);
@@ -905,11 +909,17 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         for (const Shown& entry : shown) {
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
             for (int k = 0; k < entry.count; ++k)
-                gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f, entry.fill});
+                gpu->vertices.push_back(
+                    {entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f, 0.0f, entry.fill});
             for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
         }
         const float half = std::max(0.75f, 0.75f * c.scale);
         const float period = 10.0f * c.scale;  // 6 on, 4 off, as dashed_line
+        // Edges keep 5 cm more: where a cell rests on the game's surface its
+        // outline stays (30/10: with no margin, cubes looked open).
+        const auto edge_extra = static_cast<float>(0.05 / gpu->near_distance);
+        // Solid: edges a hair nearer than their faces, kept over them.
+        const float edge_nearer = gpu->solid ? 1.001f : 1.0f;
         for (const Shown& entry : shown)
             for (int k = 0; k < 4; ++k) {
                 if (!(entry.edges & (1 << k))) continue;
@@ -930,15 +940,16 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 const float length = std::sqrt(dx * dx + dy * dy);
                 if (length < 0.5f) continue;
                 const float nx = -dy / length * half, ny = dx / length * half;
-                const auto da = static_cast<float>(gpu->near_distance / a[2]), db = static_cast<float>(gpu->near_distance / b[2]);
+                const auto da = static_cast<float>(gpu->near_distance / a[2]) * edge_nearer;
+                const auto db = static_cast<float>(gpu->near_distance / b[2]) * edge_nearer;
                 // Dashes only where the edge is hidden, and only in Remove mode.
                 const float ua = item.world_hidden_dashed ? 0.0f : -1.0f;
                 const float ub = item.world_hidden_dashed ? length / period : -1.0f;
                 const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
-                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, entry.edge});
-                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, entry.edge});
-                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, entry.edge});
-                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, entry.edge});
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, edge_extra, entry.edge});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, edge_extra, entry.edge});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, edge_extra, entry.edge});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, edge_extra, entry.edge});
                 gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
             }
         return;

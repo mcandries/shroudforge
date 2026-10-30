@@ -11,12 +11,17 @@ layout(location = 0) in vec2 position;
 layout(location = 1) in float depth;
 layout(location = 2) in float dash;
 layout(location = 3) in vec4 color;
+layout(location = 4) in float extra;  // more margin (edges), in units of 1 / depth
 layout(location = 0) out vec4 v_color;
 layout(location = 1) noperspective out float v_depth;
 layout(location = 2) noperspective out float v_dash;
+layout(location = 3) flat out float v_extra;
 void main() {
     v_color = color;
     v_depth = depth;
     v_dash = dash;
-    gl_Position = vec4(position * c.to_clip - 1.0, 0.0, 1.0);
+    v_extra = extra;
+    // The depth too, reversed as the game's: our own depth image, when the
+    // build is drawn solid, keeps the nearest of its faces.
+    gl_Position = vec4(position * c.to_clip - 1.0, depth, 1.0);
 }
