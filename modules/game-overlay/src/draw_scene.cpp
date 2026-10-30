@@ -795,12 +795,14 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         double world[4][3];    // Meters.
         ImVec2 points[8];
         float point_depths[8];  // As the game's: near / distance.
+        double point_world[8][3];  // Meters.
         int count;
         ImU32 fill, edge;
         std::uint8_t edges;
         bool dashed;  // Hidden, shown by its edges dashed only.
         double margin;  // more margin against the game's depth (the wire view's offsets), meters
         bool back;      // turned away from the eye: only its creases with another turned away (back_edges)
+        int direction;  // the face's (axis * 2 + positive)
     };
     // Against the game's depth (game-depth.on): every face sent to the
     // renderer, which leaves out, pixel by pixel, what the game's surface
@@ -816,6 +818,13 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu && wire_style) gpu->wire = true;
     if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
     if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
+    // The solid style textured: the first item's textures for all.
+    const bool textured = gpu && item.world_own_solids && item.world_textured;
+    if (textured && !gpu->textured) {
+        gpu->textures = item.world_textures;
+        gpu->textured = true;
+        for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
+    }
     if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
     // Remove mode: what hides an edge is told by the world's blocks around.
     const bool through_blocks = item.world_hidden_dashed || item.world_through_blocks;
@@ -987,7 +996,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             middle[axis] = plane;
             if (behind_solids(item, view, middle)) color = lighter(color);
         }
-        const ImU32 fill = fade(c, shade(color, kLight[face.direction], 1.0f));
+        // Textured: the texture's color, lit by the face's direction.
+        const ImU32 fill = textured ? fade(c, shade(IM_COL32(255, 255, 255, 255), kLight[face.direction], 1.0f))
+                                    : fade(c, shade(color, kLight[face.direction], 1.0f));
         const ImU32 edge = fade(c, (color & ~IM_COL32_A_MASK) |
             IM_COL32(0, 0, 0, static_cast<int>(item.world_cells_edge_opacity * 255.0f + 0.5f)));
         // A hidden part shown dashed: its edges in its color, nearly opaque,
@@ -1011,14 +1022,18 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             for (int k = 0; k < 4; ++k) {
                 const double* a = entry.corners[k];
                 const double* b = entry.corners[(k + 1) % 4];
+                const double* wa = entry.world[k];
+                const double* wb = entry.world[(k + 1) % 4];
                 if (a[2] >= kNear) {
                     entry.point_depths[entry.count] = static_cast<float>(near_distance / a[2]);
+                    std::memcpy(entry.point_world[entry.count], wa, sizeof entry.point_world[0]);
                     entry.points[entry.count++] = view.to_screen(a);
                 }
                 if ((a[2] >= kNear) != (b[2] >= kNear)) {
                     const double t = (kNear - a[2]) / (b[2] - a[2]);
                     const double cut[3] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, kNear};
                     entry.point_depths[entry.count] = static_cast<float>(near_distance / kNear);
+                    for (int i = 0; i < 3; ++i) entry.point_world[entry.count][i] = wa[i] + (wb[i] - wa[i]) * t;
                     entry.points[entry.count++] = view.to_screen(cut);
                 }
             }
@@ -1034,6 +1049,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges) & back_creases);
             entry.margin = face_margin;
             entry.back = back;
+            entry.direction = face.direction;
             shown.push_back(entry);
         };
         const std::uint8_t state = hidden ? hidden->hidden[index] : 0;
@@ -1060,9 +1076,20 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         for (const Shown& entry : shown) {
             if (entry.back) continue;  // creases only
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
-            for (int k = 0; k < entry.count; ++k)
+            // Textured (the solid style): which texture and plane, the point in
+            // meters from the texture origin.
+            const int axis = entry.direction / 2;
+            const float tex = !gpu->textured || !gpu->solid ? 0.0f
+                : axis == 0 ? 1.0f : axis == 2 ? 2.0f : entry.direction == 3 ? 3.0f : 4.0f;
+            for (int k = 0; k < entry.count; ++k) {
+                float meters[3] = {0.0f, 0.0f, 0.0f};
+                if (tex > 0.0f)
+                    for (int i = 0; i < 3; ++i)
+                        meters[i] = static_cast<float>((entry.point_world[k][i] - gpu->texture_origin[i]) * entry.point_depths[k]);
                 gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f,
-                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {0.0f, 0.0f, 0.0f}, 1.0f});
+                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {meters[0], meters[1], meters[2]},
+                    1.0f, tex});
+            }
             for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
         }
         gpu->face_indices = gpu->indices.size();

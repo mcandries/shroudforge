@@ -49,7 +49,7 @@ struct InstanceData {
     X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreateSampler) X(DestroySampler) X(CreateDescriptorPool) \
     X(DestroyDescriptorPool) X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(CmdBindPipeline) \
     X(CmdBindDescriptorSets) X(CmdBindVertexBuffers) X(CmdBindIndexBuffer) X(CmdPushConstants) X(CmdSetViewport) \
-    X(CmdSetScissor) X(CmdDrawIndexed)
+    X(CmdSetScissor) X(CmdDrawIndexed) X(CmdCopyBufferToImage)
 
 struct DeviceFunctions {
 #define OVERLAY_DECLARE(name) PFN_vk##name name{};
