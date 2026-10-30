@@ -40,6 +40,7 @@ layout(push_constant) uniform Constants {
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
+    vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
@@ -53,6 +54,9 @@ layout(location = 2) noperspective in float v_dash;
 layout(location = 3) flat in float v_extra;
 layout(location = 4) noperspective in vec3 v_cell;
 layout(location = 5) flat in float v_fade;
+layout(location = 6) flat in float v_tex;
+// The solid style's textures: sides, top, bottom (the game's BC7 levels).
+layout(set = 0, binding = 3) uniform sampler2D textures[3];
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -153,6 +157,22 @@ bool through_mass(vec3 from, float surface_at) {
     }
     return false;
 }
+// A face of the solid style textured as the game draws its material: the
+// texture of its sides, top or bottom, laid along the world's axes at the
+// game's tiling (v_cell: meters from the texture origin, times depth). The
+// three are sampled alike and one kept (indexing them would want the same
+// index for all the draw).
+vec4 textured(vec4 color) {
+    if (v_tex < 0.5) return color;
+    vec3 p = v_cell / v_depth;
+    int kind = int(v_tex + 0.5);
+    vec2 plane = kind == 1 ? vec2(p.z, -p.y) : kind == 2 ? vec2(p.x, -p.y) : vec2(p.x, p.z);
+    vec3 side = texture(textures[0], plane * c.tiling.x).rgb;
+    vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
+    vec3 bottom = texture(textures[2], plane * c.tiling.z).rgb;
+    vec3 rgb = kind <= 2 ? side : kind == 3 ? top : bottom;
+    return vec4(color.rgb * rgb, color.a);
+}
 void main() {
     if (c.mode == 1) {
         out_color = v_color;
@@ -197,5 +217,6 @@ void main() {
         if (v_dash < 0.0 || fract(v_dash) >= 0.6) discard;
         color.a = c.dash_alpha;
     }
+    if (v_dash < 0.0) color = textured(color);
     out_color = vec4(color.rgb, color.a * v_fade);
 }

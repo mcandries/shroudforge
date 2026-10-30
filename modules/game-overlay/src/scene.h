@@ -72,6 +72,18 @@ struct WorldQuad {
 // behind them, seen from the camera, are drawn lighter. The corner of the
 // first cell and the cell side in meters; 1 in `filled` for a filled cell,
 // x fastest, then y, then z.
+// A texture of the build drawn solid (a world item's cells.texture): BC7
+// levels as the game stores them, the largest first, `tiling` repeats a
+// meter (the game's tilingFactor).
+struct WorldTexture {
+    std::shared_ptr<const std::string> data;
+    int width = 0, height = 0, levels = 0;
+    float tiling = 0.25f;
+};
+
+// Bytes of `levels` BC7 levels from width x height down.
+size_t bc7_bytes(int width, int height, int levels);
+
 struct WorldSolids {
     int sx = 0, sy = 0, sz = 0;
     double origin[3]{};
@@ -212,6 +224,10 @@ struct Item {
     // (`solids`, and the cells drawn, counted as blocks), as hidden_dashed
     // does in Remove mode (cells.through_blocks: Build's wire view, 31/10).
     bool world_through_blocks = false;
+    // World, the solid style: its faces textured as the game draws the
+    // material, sides, top and bottom (cells.texture).
+    std::array<WorldTexture, 3> world_textures;
+    bool world_textured = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
