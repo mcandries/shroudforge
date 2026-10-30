@@ -499,10 +499,20 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("face_offset") && value["face_offset"].is_number())
             item.world_face_offset = std::clamp(value["face_offset"].get<float>(), 0.0f, 0.25f);
         if (value.contains("face_offsets") && value["face_offsets"].is_object())
-            for (const auto& [key, offset] : value["face_offsets"].items())
-                if (key.size() == 1 && offset.is_number())
-                    item.world_face_offsets.push_back(
-                        {static_cast<unsigned char>(key[0]), std::clamp(offset.get<float>(), 0.0f, 0.25f)});
+            for (const auto& [key, offset] : value["face_offsets"].items()) {
+                if (key.size() != 1) continue;
+                // One number for all, or {sides, top, bottom}.
+                std::array<float, 3> each{};
+                if (offset.is_number()) {
+                    each.fill(std::clamp(offset.get<float>(), 0.0f, 1.0f));
+                } else if (offset.is_array() && offset.size() == 3 && offset[0].is_number() && offset[1].is_number() &&
+                           offset[2].is_number()) {
+                    for (int i = 0; i < 3; ++i) each[i] = std::clamp(offset[i].get<float>(), 0.0f, 1.0f);
+                } else {
+                    continue;
+                }
+                item.world_face_offsets.push_back({static_cast<unsigned char>(key[0]), each});
+            }
         if (value.contains("depth_margin") && value["depth_margin"].is_number())
             item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
         if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
