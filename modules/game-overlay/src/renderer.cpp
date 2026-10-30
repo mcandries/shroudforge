@@ -1147,7 +1147,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     LocalCamera gpu_camera;
     const bool gpu_known = scene_depth.gpu_camera.valid && scene_depth.has_camera &&
         camera_of(scene_depth.gpu_camera, scene_depth.camera, gpu_camera);
-    r.world_draw.near_distance = gpu_known ? scene_depth.gpu_camera.matrix[11] : depth_settings.near_distance;
+    r.world_draw.near_distance = depth_settings.near_distance;
+    r.world_draw.matrix_near = gpu_known ? scene_depth.gpu_camera.matrix[11] : 0.0;
     const bool world_ready = scene_depth.image && scene_depth.format == VK_FORMAT_D32_SFLOAT &&
         scene_depth.layout != VK_IMAGE_LAYOUT_UNDEFINED && scene_depth.layout != VK_IMAGE_LAYOUT_PREINITIALIZED &&
         ensure_world(d, r, pass);

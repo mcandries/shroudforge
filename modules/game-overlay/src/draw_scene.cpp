@@ -768,6 +768,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // hides; no test here.
     WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
     if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
+    // 30/10: the matrix's near (6.5 mm) made the build look farther than the
+    // game's depth says: hidden behind what stands in front, more with the
+    // distance. 1 cm by default; the matrix's when an item asks.
+    if (gpu && item.world_depth_near > 0.0f) gpu->near_distance = item.world_depth_near;
+    if (gpu && item.world_depth_near == 0.0f && gpu->matrix_near > 0.0) gpu->near_distance = gpu->matrix_near;
     // Hide hidden faces: their results kept per mesh, tested a part per frame.
     HiddenFaces* hidden = nullptr;
     if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
