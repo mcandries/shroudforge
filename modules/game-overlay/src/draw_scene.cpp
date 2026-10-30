@@ -800,7 +800,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         // face_offset: pushed out, its edges `grow` (u0, u1, v0, v1) longer at
         // an outer corner, shorter at an inner one, as the game draws its
         // blocks past their cells (the user's reading, 30/10).
-        const double offset = item.world_face_offset;
+        double offset = item.world_face_offset;
+        for (const auto& [ch, own] : item.world_face_offsets)
+            if (ch == face.ch) offset = own;
         double grow[4] = {0.0, 0.0, 0.0, 0.0};
         if (offset > 0.0) {
             const auto drawn = [&](int p[3]) {

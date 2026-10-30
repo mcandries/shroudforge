@@ -186,6 +186,9 @@ struct Item {
     // grid. Faces pushed out, their edges longer at an outer corner, shorter
     // at an inner one.
     float world_face_offset = 0.0f;
+    // World: per cell character, its own face_offset (such as more for cells
+    // drawn on a block of the game: removed `-`, replaced `*`).
+    std::vector<std::pair<unsigned char, float>> world_face_offsets;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
