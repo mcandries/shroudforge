@@ -1068,8 +1068,10 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     for (const auto& part : draw.blocks_build) meshes.push_back(part.mesh.get());
     if (draw.blocks && (w.packed_of != draw.blocks || w.packed_meshes != meshes)) {
         const WorldSolids& grid = *draw.blocks;
+        // Filled cells (the solids and the build's), then the build's alone.
+        const size_t words = (grid.filled.size() + 31) / 32;
         w.packed = grid.bits;
-        w.packed.resize((grid.filled.size() + 31) / 32, 0u);
+        w.packed.resize(2 * words, 0u);
         // The build's cells: the blocks it removes.
         for (const auto& part : draw.blocks_build) {
             const VoxelMesh& mesh = *part.mesh;
@@ -1082,6 +1084,7 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
                         if (gx < 0 || gy < 0 || gz < 0 || gx >= grid.sx || gy >= grid.sy || gz >= grid.sz) continue;
                         const size_t at = (static_cast<size_t>(gz) * grid.sy + gy) * grid.sx + gx;
                         w.packed[at >> 5] |= 1u << (at & 31);
+                        w.packed[words + (at >> 5)] |= 1u << (at & 31);
                     }
         }
         w.packed_of = draw.blocks;
