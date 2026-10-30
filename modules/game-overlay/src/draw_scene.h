@@ -49,6 +49,7 @@ struct WorldDepthDraw {
     // their cells.
     std::shared_ptr<const WorldSolids> blocks;
     double blocks_eye[3]{};
+    double blocks_relief = 0.0;  // how far the game's surface may lie past the blocks (meters)
     // The build's own cells, blocks of the world too (the solids leave out
     // the cells a build changes): each tile's mesh at its place in `blocks`.
     struct BlocksPart {
