@@ -181,6 +181,12 @@ void parse_world_texture(Item& item, const json& texture) {
     item.world_textured = true;
 }
 
+// cells.texture_keep = {data...}: textures held though not drawn.
+void parse_texture_keep(Item& item, const json& list) {
+    for (const json& data : list)
+        if (is_text(data)) item.world_texture_keep.push_back(cells_text(data));
+}
+
 // A slot to build from these cells once the zone is kept (start_meshes).
 std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<const std::string> cells,
     const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels, bool one_shape = false) {
@@ -603,6 +609,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture") &&
             value["cells"]["texture"].is_object())
             parse_world_texture(item, value["cells"]["texture"]);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_keep") &&
+            value["cells"]["texture_keep"].is_array())
+            parse_texture_keep(item, value["cells"]["texture_keep"]);
         if (value.contains("cells")) {
             const auto& cells = value["cells"];
             if (!cells.is_object() || !cells.contains("box") || !cells["box"].is_array() || cells["box"].size() != 3 ||

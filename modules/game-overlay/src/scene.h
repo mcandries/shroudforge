@@ -228,6 +228,9 @@ struct Item {
     // material, sides, top and bottom (cells.texture).
     std::array<WorldTexture, 3> world_textures;
     bool world_textured = false;
+    // World: textures kept on the GPU though not drawn (cells.texture_keep,
+    // the data of the mod's cached materials): drawn again, not made again.
+    std::vector<std::shared_ptr<const std::string>> world_texture_keep;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
