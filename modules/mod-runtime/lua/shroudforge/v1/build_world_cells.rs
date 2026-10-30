@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::build_voxel_view::{chunk_value, flush, plan_contains, ChunkCells, ViewPlan, CHUNK};
+use super::build_voxel_view::{chunk_value, flush, plan_contains, with_density, ChunkCells, ViewPlan, CHUNK};
 
 /// A build shown in the world, as Architect Line's preview.world_tiles and
 /// preview.world_solids make it.
@@ -25,6 +25,8 @@ pub(crate) struct WorldInput {
     /// there tells how the cell is drawn (the game's blocks of each material
     /// are drawn past their cells by their own amount).
     pub palette: HashMap<i32, u8>,
+    /// Terrain cells less dense read as empty (with_density); 1: any.
+    pub density_min: i32,
 }
 
 /// A box of cells, run-length text x fastest, then y, then z, and how many of
@@ -97,7 +99,7 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
                         if !plan_contains(plan, [x, y, z]) {
                             return b'.';
                         }
-                        let value = chunk_value(&input.chunks, x, y, z);
+                        let value = with_density(chunk_value(&input.chunks, x, y, z), input.density_min);
                         let full = value > 0;
                         if plan.add {
                             // Building keeps the blocks already there (replace off),
@@ -154,12 +156,14 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
             }
             let filled = match chunk {
                 None => false,
-                Some(ChunkCells::Uniform(value)) => *value > 0,
+                Some(ChunkCells::Uniform(value)) => with_density(*value, input.density_min) > 0,
                 Some(ChunkCells::Packed(bytes)) => {
                     let index = (x.rem_euclid(CHUNK) + y.rem_euclid(CHUNK) * CHUNK + z.rem_euclid(CHUNK) * CHUNK * CHUNK)
                         as usize
                         * 2;
-                    bytes.get(index..index + 2).is_some_and(|pair| u16::from_le_bytes([pair[0], pair[1]]) > 0)
+                    bytes.get(index..index + 2).is_some_and(|pair| {
+                        with_density(i32::from(u16::from_le_bytes([pair[0], pair[1]])), input.density_min) > 0
+                    })
                 }
             };
             if filled && !changes.is_some_and(|plan| plan_contains(plan, [x, y, z])) { b'#' } else { b'.' }
@@ -187,6 +191,7 @@ mod tests {
             solids_max: 1 << 18,
             solids_box: None,
             palette: HashMap::new(),
+            density_min: 1,
         }
     }
 
