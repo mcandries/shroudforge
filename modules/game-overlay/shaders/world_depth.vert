@@ -9,7 +9,7 @@ layout(push_constant) uniform Constants {
     int mode;          // see world_depth.frag
     float own_tolerance;
     float focal;  // screen pixels per unit of tan, vertically
-    vec4 eye;     // mode 4: the eye in cells of the blocks' grid
+    vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
 } c;
 layout(location = 0) in vec2 position;
