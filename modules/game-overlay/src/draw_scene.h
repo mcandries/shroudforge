@@ -33,6 +33,11 @@ struct WorldDepthDraw {
     double margin = -1.0;  // an item's (depth_margin), else game-depth.on's
     double matrix_near = 0.0;  // the GPU camera matrix's near distance, when known
     bool solid = false;  // opaque cells (solid style): drawn with a depth of their own, the nearest face kept
+    // The wire view (smooth style): our faces' nearest depth drawn first, then
+    // an edge hidden by the build itself dashed, hidden by something before
+    // the build left out.
+    bool wire = false;
+    size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };
