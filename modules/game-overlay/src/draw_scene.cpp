@@ -795,17 +795,38 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         const bool positive = face.direction % 2 == 1;
         const double base[3] = {item.world_cells_origin[0] + face.x * s, item.world_cells_origin[1] + face.y * s,
             item.world_cells_origin[2] + face.z * s};
-        const double plane = base[axis] + (positive ? s : 0.0);
+        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
+        // face_offset: pushed out, its edges `grow` (u0, u1, v0, v1) longer at
+        // an outer corner, shorter at an inner one, as the game draws its
+        // blocks past their cells (the user's reading, 30/10).
+        const double offset = item.world_face_offset;
+        double grow[4] = {0.0, 0.0, 0.0, 0.0};
+        if (offset > 0.0) {
+            const auto drawn = [&](int p[3]) {
+                if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
+                return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
+            };
+            // Edge k toward -v, +u, +v, -u; grow index u0, u1, v0, v1.
+            static constexpr int kEdgeSide[4][2] = {{1, -1}, {0, 1}, {1, 1}, {0, -1}};
+            static constexpr int kGrow[4] = {2, 1, 3, 0};
+            for (int k = 0; k < 4; ++k) {
+                int beyond[3] = {face.x, face.y, face.z};
+                beyond[kEdgeSide[k][0] == 0 ? u : v] += kEdgeSide[k][1];
+                int front[3] = {beyond[0], beyond[1], beyond[2]};
+                front[axis] += positive ? 1 : -1;
+                grow[kGrow[k]] = drawn(front) ? -offset : drawn(beyond) ? 0.0 : offset;
+            }
+        }
+        const double plane = base[axis] + (positive ? s + offset : -offset);
         // Only the faces turned to the camera.
         if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
-        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
         double in[4][3];
         double centre[3] = {0.0, 0.0, 0.0};
         for (int k = 0; k < 4; ++k) {
             double corner[3];
             corner[axis] = plane;
-            corner[u] = base[u] + kSquare[k][0] * s;
-            corner[v] = base[v] + kSquare[k][1] * s;
+            corner[u] = kSquare[k][0] ? base[u] + s + grow[1] : base[u] - grow[0];
+            corner[v] = kSquare[k][1] ? base[v] + s + grow[3] : base[v] - grow[2];
             view.to_camera(corner, in[k]);
             for (int i = 0; i < 3; ++i) centre[i] += in[k][i] * 0.25;
         }
