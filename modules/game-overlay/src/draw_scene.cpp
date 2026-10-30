@@ -800,11 +800,18 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         // face_offset: pushed out, its edges `grow` (u0, u1, v0, v1) longer at
         // an outer corner, shorter at an inner one, as the game draws its
         // blocks past their cells (the user's reading, 30/10).
-        double offset = item.world_face_offset;
-        for (const auto& [ch, own] : item.world_face_offsets)
-            if (ch == face.ch) offset = own;
+        // Its offset toward a direction (axis * 2 + positive): the sides', the
+        // top's (+y) or the bottom's (-y) of its character, else the item's.
+        const auto offset_toward = [&](int direction) -> double {
+            for (const auto& [ch, own] : item.world_face_offsets)
+                if (ch == face.ch) return direction == 3 ? own[1] : direction == 2 ? own[2] : own[0];
+            return item.world_face_offset;
+        };
+        const double offset = offset_toward(face.direction);
+        bool any_offset = offset > 0.0;
+        for (int direction = 0; direction < 6 && !any_offset; ++direction) any_offset = offset_toward(direction) > 0.0;
         double grow[4] = {0.0, 0.0, 0.0, 0.0};
-        if (offset > 0.0) {
+        if (any_offset) {
             const auto drawn = [&](int p[3]) {
                 if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
                 return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
@@ -817,10 +824,15 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 beyond[kEdgeSide[k][0] == 0 ? u : v] += kEdgeSide[k][1];
                 int front[3] = {beyond[0], beyond[1], beyond[2]};
                 front[axis] += positive ? 1 : -1;
-                // Inner corner: shorter; a cell touching only along this
-                // edge (diagonal): unchanged, the two would cross; outer
-                // corner: longer.
-                grow[kGrow[k]] = drawn(front) ? (drawn(beyond) ? -offset : 0.0) : drawn(beyond) ? 0.0 : offset;
+                // Outer corner: longer by the offset of the face it meets
+                // there (toward the edge); inner corner: shorter by the one
+                // of the face coming back over it; a cell touching only along
+                // this edge (diagonal): unchanged, the two would cross.
+                const int edge_axis = kEdgeSide[k][0] == 0 ? u : v;
+                const int toward = edge_axis * 2 + (kEdgeSide[k][1] > 0 ? 1 : 0);
+                const int back = edge_axis * 2 + (kEdgeSide[k][1] > 0 ? 0 : 1);
+                grow[kGrow[k]] = drawn(front) ? (drawn(beyond) ? -offset_toward(back) : 0.0)
+                                              : drawn(beyond) ? 0.0 : offset_toward(toward);
             }
         }
         const double plane = base[axis] + (positive ? s + offset : -offset);
