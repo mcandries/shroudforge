@@ -30,6 +30,7 @@ struct WorldDepthVertex {
 struct WorldDepthDraw {
     double near_distance = 0.01;
     double margin = -1.0;  // an item's (depth_margin), else game-depth.on's
+    double matrix_near = 0.0;  // the GPU camera matrix's near distance, when known
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };
