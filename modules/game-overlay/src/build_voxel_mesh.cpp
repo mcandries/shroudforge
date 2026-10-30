@@ -11,9 +11,11 @@ bool drawn(const std::array<ImU32, 128>& colors, unsigned char ch) {
     return ((colors[ch] >> IM_COL32_A_SHIFT) & 0xFF) != 0;
 }
 
-// The faces (and marks, `with_marks`) of a decoded grid.
+// The faces (and marks, `with_marks`) of a decoded grid; `one_shape`: every
+// drawn character one shape (no face between two of them, creases where the
+// whole shape turns).
 VoxelMesh mesh_of_grid(int sx, int sy, int sz, const std::vector<unsigned char>& grid,
-    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool with_marks) {
+    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool with_marks, bool one_shape) {
     const size_t total = grid.size();
     bool is_drawn[128], is_marked[128];
     for (int ch = 0; ch < 128; ++ch) {
@@ -47,7 +49,8 @@ VoxelMesh mesh_of_grid(int sx, int sy, int sz, const std::vector<unsigned char>&
             int beyond[3] = {x, y, z};
             beyond[sides[kEdges[k][0]]] += kEdges[k][1];
             int front[3] = {beyond[0] + kSteps[d][0], beyond[1] + kSteps[d][1], beyond[2] + kSteps[d][2]};
-            if (at(beyond[0], beyond[1], beyond[2]) != ch || drawn_at(front)) bits |= 1 << k;
+            const bool same = one_shape ? drawn_at(beyond) : at(beyond[0], beyond[1], beyond[2]) == ch;
+            if (!same || drawn_at(front)) bits |= 1 << k;
         }
         return bits;
     };
@@ -69,7 +72,7 @@ VoxelMesh mesh_of_grid(int sx, int sy, int sz, const std::vector<unsigned char>&
                 for (std::uint8_t d = 0; d < 6; ++d) {
                     const int other = around[d];
                     const bool open = other < 0 || !is_drawn[other];
-                    if (!open && other == ch) continue;
+                    if (!open && (other == ch || one_shape)) continue;
                     if (mesh.faces.size() >= kMaxVoxelFaces) throw std::runtime_error("voxels: too many faces");
                     mesh.faces.push_back({static_cast<std::int16_t>(x), static_cast<std::int16_t>(y),
                         static_cast<std::int16_t>(z), d, ch, !open, open ? creases(x, y, z, d, ch) : std::uint8_t{0}});
@@ -156,9 +159,9 @@ void check_voxel_cells(int sx, int sy, int sz, const std::string& cells) {
 }
 
 VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, const std::array<ImU32, 128>& colors,
-    const std::array<ImU32, 128>& marks, bool levels) {
+    const std::array<ImU32, 128>& marks, bool levels, bool one_shape) {
     std::vector<unsigned char> grid = decode_voxel_cells(sx, sy, sz, cells);
-    VoxelMesh mesh = mesh_of_grid(sx, sy, sz, grid, colors, marks, true);
+    VoxelMesh mesh = mesh_of_grid(sx, sy, sz, grid, colors, marks, true, one_shape);
     if (!levels || std::max({sx, sy, sz}) <= kVoxelLevelsFrom) return mesh;
     // Rank: a drawn character above every other, the rarer the higher.
     size_t counts[128] = {};
@@ -181,7 +184,7 @@ VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, con
         x = hx;
         y = hy;
         z = hz;
-        auto coarse = std::make_shared<VoxelMesh>(mesh_of_grid(x, y, z, grid, colors, marks, false));
+        auto coarse = std::make_shared<VoxelMesh>(mesh_of_grid(x, y, z, grid, colors, marks, false, one_shape));
         coarse->scale = 1 << level;
         mesh.coarser.push_back(std::move(coarse));
     }
