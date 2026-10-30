@@ -516,6 +516,10 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
         if (value.contains("depth_margin") && value["depth_margin"].is_number())
             item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
+        if (value.contains("depth_jitter") && value["depth_jitter"].is_string())
+            item.world_depth_jitter_kept = value["depth_jitter"].get<std::string>() == "keep";
+        if (value.contains("face_offsets_largest") && value["face_offsets_largest"].is_boolean())
+            item.world_face_offsets_largest = value["face_offsets_largest"].get<bool>();
         if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
             const std::string mode = value["depth_camera"].get<std::string>();
             item.world_depth_camera = mode == "gpu" ? 0 : mode == "copy" ? 1 : mode == "present" ? 2 : -1;
