@@ -816,6 +816,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu && wire_style) gpu->wire = true;
     if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
     if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
+    if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
     // Remove mode: what hides an edge is told by the world's blocks around.
     if (gpu && wire_style && item.world_hide_hidden && item.world_hidden_dashed && item.world_solids && !gpu->blocks) {
         gpu->blocks = item.world_solids;
@@ -1131,9 +1132,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 float ca[3], cb[3];
                 in_blocks(wa, da, ca);
                 in_blocks(wb, db, cb);
-                // A crease turned away: dashed at back_edges (its own opacity).
-                const float fade = !entry.back ? 1.0f
-                    : gpu->dash_alpha > 0.0 ? static_cast<float>(item.world_back_edges / gpu->dash_alpha) : 0.0f;
+                // A crease turned away is behind the build's own faces: the
+                // shader dashes it at back_edges.
+                const float fade = 1.0f;
                 gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
                 gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
                 gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
