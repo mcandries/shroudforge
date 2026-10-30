@@ -762,6 +762,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         ImU32 fill, edge;
         std::uint8_t edges;
         bool dashed;  // Hidden, shown by its edges dashed only.
+        double margin;  // more margin against the game's depth (the wire view's offsets), meters
     };
     // Against the game's depth (game-depth.on): every face sent to the
     // renderer, which leaves out, pixel by pixel, what the game's surface
@@ -769,6 +770,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     WorldDepthDraw* gpu = item.world_hide_hidden && c.resources.world_depth ? c.resources.world_depth() : nullptr;
     if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
     if (gpu && item.world_own_solids) gpu->solid = true;
+    if (gpu && item.world_cells_smooth && !item.world_own_solids) gpu->wire = true;
     // 30/10: the matrix's near (6.5 mm) made the build look farther than the
     // game's depth says: hidden behind what stands in front, more with the
     // distance. 1 cm by default; the matrix's when an item asks.
@@ -807,9 +809,15 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 if (ch == face.ch) return direction == 3 ? own[1] : direction == 2 ? own[2] : own[0];
             return item.world_face_offset;
         };
-        const double offset = offset_toward(face.direction);
-        bool any_offset = offset > 0.0;
-        for (int direction = 0; direction < 6 && !any_offset; ++direction) any_offset = offset_toward(direction) > 0.0;
+        // The wire view keeps the cells on the grid (its edges must not
+        // cross): the offset only lets the face show that far behind the
+        // game's surface, as a margin.
+        const bool offset_as_margin = gpu && gpu->wire;
+        const double face_margin = offset_as_margin ? offset_toward(face.direction) : 0.0;
+        const double offset = offset_as_margin ? 0.0 : offset_toward(face.direction);
+        bool any_offset = !offset_as_margin && offset > 0.0;
+        for (int direction = 0; direction < 6 && !any_offset && !offset_as_margin; ++direction)
+            any_offset = offset_toward(direction) > 0.0;
         double grow[4] = {0.0, 0.0, 0.0, 0.0};
         if (any_offset) {
             const auto drawn = [&](int p[3]) {
@@ -897,6 +905,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             // in this color (the renderer decides which part).
             entry.edge = piece_hidden ? dashed_edge : edge;
             entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges));
+            entry.margin = face_margin;
             shown.push_back(entry);
         };
         const std::uint8_t state = hidden ? hidden->hidden[index] : 0;
@@ -923,10 +932,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         for (const Shown& entry : shown) {
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
             for (int k = 0; k < entry.count; ++k)
-                gpu->vertices.push_back(
-                    {entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f, 0.0f, entry.fill});
+                gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f,
+                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill});
             for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
         }
+        gpu->face_indices = gpu->indices.size();
         const float half = std::max(0.75f, 0.75f * c.scale);
         const float period = 10.0f * c.scale;  // 6 on, 4 off, as dashed_line
         // Edges keep 5 cm more: where a cell rests on the game's surface its
@@ -956,14 +966,17 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 const float nx = -dy / length * half, ny = dx / length * half;
                 const auto da = static_cast<float>(gpu->near_distance / a[2]) * edge_nearer;
                 const auto db = static_cast<float>(gpu->near_distance / b[2]) * edge_nearer;
-                // Dashes only where the edge is hidden, and only in Remove mode.
-                const float ua = item.world_hidden_dashed ? 0.0f : -1.0f;
-                const float ub = item.world_hidden_dashed ? length / period : -1.0f;
+                // Dashes only where the edge is hidden: in Remove mode, and in
+                // the wire view (where the build itself hides it).
+                const bool dashes = item.world_hidden_dashed || gpu->wire;
+                const float ua = dashes ? 0.0f : -1.0f;
+                const float ub = dashes ? length / period : -1.0f;
                 const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
-                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, edge_extra, entry.edge});
-                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, edge_extra, entry.edge});
-                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, edge_extra, entry.edge});
-                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, edge_extra, entry.edge});
+                const auto extra = edge_extra + static_cast<float>(entry.margin / gpu->near_distance);
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge});
                 gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
             }
         return;
