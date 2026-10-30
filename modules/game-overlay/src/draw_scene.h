@@ -29,6 +29,10 @@ struct WorldDepthVertex {
     ImU32 color;
     float cell[3];  // in cells of `blocks` (WorldDepthDraw), times depth
     float fade = 1.0f;  // its opacity, times (the wire view's creases turned away)
+    // Textured faces (the solid style): 1 a side across x (u along z), 2 a
+    // side across z (u along x), 3 the top, 4 the bottom; 0 none. `cell` is
+    // then the point in meters from `texture_origin`, times depth.
+    float tex = 0.0f;
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
@@ -60,6 +64,11 @@ struct WorldDepthDraw {
         int at[3]{};
     };
     std::vector<BlocksPart> blocks_build;
+    // The solid style's textures (sides, top, bottom), from the first item
+    // with them; their meters counted from texture_origin (a multiple of 64 m).
+    std::array<WorldTexture, 3> textures;
+    bool textured = false;
+    double texture_origin[3]{};
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
