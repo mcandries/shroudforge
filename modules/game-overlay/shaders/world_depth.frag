@@ -12,6 +12,11 @@
 // dashed; else drawn plain.
 // mode 3: the wire view showing what is hidden: as 2, but an edge hidden by
 // something before the build shows dashed instead of left out.
+// mode 4: the wire view in Remove mode: an edge hidden by the game's surface
+// is dashed when a block of the world (the grid of `blocks`, removed or not,
+// or the terrain) stands between it and the eye, else (a tree, a character,
+// an object) left out; no distance guessed (30/10: dashes vanishing inside
+// a large block, or behind the bumps of rough stone).
 // In the wire view, margins (the game's blocks drawn past their cells) count
 // across the game's surface: seen at a grazing angle, its relief stands that
 // much farther before our faces along the view (30/10: dashes vanishing on
@@ -23,13 +28,19 @@ layout(push_constant) uniform Constants {
     int mode;
     float own_tolerance;  // in units of 1 / depth, as margin
     float focal;  // screen pixels per unit of tan, vertically
+    vec4 eye;     // mode 4: the eye in cells of the blocks' grid
+    ivec4 size;   // mode 4: the grid's size in cells
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
+// The world's blocks around the build (mode 4): a bit per cell, x fastest,
+// then y, then z.
+layout(set = 0, binding = 2, std430) readonly buffer Blocks { uint bits[]; } blocks;
 layout(location = 0) in vec4 v_color;
 layout(location = 1) noperspective in float v_depth;
 layout(location = 2) noperspective in float v_dash;
 layout(location = 3) flat in float v_extra;
+layout(location = 4) noperspective in vec3 v_cell;
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -45,6 +56,41 @@ float slope_factor(ivec2 p, float far) {
     float gy = min(abs(far_at(p + ivec2(0, 1)) - far), abs(far - far_at(p - ivec2(0, 1))));
     float t = min(length(vec2(gx, gy) * c.depth_scale) * c.focal / far, 8.0);
     return sqrt(1.0 + t * t);
+}
+// Whether a filled cell of `blocks` lies between `from` (in cells) and the
+// eye, walking the grid cell by cell; out of the grid: none.
+bool blocks_between(vec3 from) {
+    vec3 to = c.eye.xyz - from;
+    float length_to = length(to);
+    if (length_to < 1e-4) return false;
+    vec3 dir = to / length_to;
+    // A hair toward the eye: off the cell boundary the edge lies on.
+    vec3 p = from + dir * 0.01;
+    ivec3 cell = ivec3(floor(p));
+    ivec3 step_by = ivec3(sign(dir));
+    vec3 inverse = 1.0 / max(abs(dir), vec3(1e-6));
+    vec3 next = (vec3(cell) + max(vec3(step_by), vec3(0.0)) - p) * sign(dir) * inverse;
+    next = mix(vec3(1e30), next, notEqual(step_by, ivec3(0)));
+    float walked = 0.0;
+    for (int i = 0; i < 768 && walked < length_to; ++i) {
+        if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, c.size.xyz))) return false;
+        uint index = uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x);
+        if ((blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u) return true;
+        if (next.x < next.y && next.x < next.z) {
+            walked = next.x;
+            next.x += inverse.x;
+            cell.x += step_by.x;
+        } else if (next.y < next.z) {
+            walked = next.y;
+            next.y += inverse.y;
+            cell.y += step_by.y;
+        } else {
+            walked = next.z;
+            next.z += inverse.z;
+            cell.z += step_by.z;
+        }
+    }
+    return false;
 }
 void main() {
     if (c.mode == 1) {
@@ -66,6 +112,12 @@ void main() {
         bool behind_own = own > 0.0 && v_depth < own * 0.9999;
         if (v_dash < 0.0) {
             if (hidden || behind_own) discard;
+        } else if (c.mode == 4) {
+            if (hidden && !blocks_between(v_cell / v_depth)) discard;
+            if (hidden || behind_own) {
+                if (fract(v_dash) >= 0.6) discard;
+                color.a = max(color.a, 220.0 / 255.0);
+            }
         } else {
             // What hides it stands before the build: nothing of it shows
             // (shown dashed in mode 3).
