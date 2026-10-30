@@ -818,12 +818,13 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
     if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
     // Remove mode: what hides an edge is told by the world's blocks around.
-    if (gpu && wire_style && item.world_hide_hidden && item.world_hidden_dashed && item.world_solids && !gpu->blocks) {
+    const bool through_blocks = item.world_hidden_dashed || item.world_through_blocks;
+    if (gpu && wire_style && item.world_hide_hidden && through_blocks && item.world_solids && !gpu->blocks) {
         gpu->blocks = item.world_solids;
         for (int i = 0; i < 3; ++i)
             gpu->blocks_eye[i] = (view.eye[i] - item.world_solids->origin[i]) / item.world_solids->cell;
     }
-    if (gpu && gpu->blocks && item.world_hidden_dashed && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
+    if (gpu && gpu->blocks && through_blocks && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
         WorldDepthDraw::BlocksPart part;
         part.mesh = shared_mesh;
         for (int i = 0; i < 3; ++i)
