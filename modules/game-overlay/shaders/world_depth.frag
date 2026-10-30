@@ -13,10 +13,11 @@
 // mode 3: the wire view showing what is hidden: as 2, but an edge hidden by
 // something before the build shows dashed instead of left out.
 // mode 4: the wire view in Remove mode: an edge hidden by the game's surface
-// is dashed when a block of the world (the grid of `blocks`, removed or not,
-// or the terrain) stands between it and the eye, else (a tree, a character,
-// an object) left out; no distance guessed (30/10: dashes vanishing inside
-// a large block, or behind the bumps of rough stone).
+// is dashed when that surface is the one of the mass it lies in: walking
+// from it toward the eye, the cells of `blocks` (removed or not, or the
+// terrain) stay filled up to the game's surface; air before it, something
+// else stands in front (a character, a tree, a block apart) and it is left
+// out (30/10, the user's rule: material, air, material hides).
 // In the wire view, margins (the game's blocks drawn past their cells) count
 // across the game's surface: seen at a grazing angle, its relief stands that
 // much farther before our faces along the view (30/10: dashes vanishing on
@@ -28,7 +29,7 @@ layout(push_constant) uniform Constants {
     int mode;
     float own_tolerance;  // in units of 1 / depth, as margin
     float focal;  // screen pixels per unit of tan, vertically
-    vec4 eye;     // mode 4: the eye in cells of the blocks' grid
+    vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
@@ -57,13 +58,17 @@ float slope_factor(ivec2 p, float far) {
     float t = min(length(vec2(gx, gy) * c.depth_scale) * c.focal / far, 8.0);
     return sqrt(1.0 + t * t);
 }
-// Whether a filled cell of `blocks` lies between `from` (in cells) and the
-// eye, walking the grid cell by cell; out of the grid: none.
-bool blocks_between(vec3 from) {
+// Whether the game's surface, `surface_at` of the way from `from` (in cells)
+// to the eye, is the one of the mass `from` lies in: the cells stay filled
+// up to it, or it lies no farther than the relief (eye.w, across the face
+// the walk leaves by: `slope` when it starts in the air) past where they
+// end. Out of the grid: air.
+bool through_mass(vec3 from, float surface_at, float slope) {
     vec3 to = c.eye.xyz - from;
     float length_to = length(to);
     if (length_to < 1e-4) return false;
     vec3 dir = to / length_to;
+    float surface = surface_at * length_to;
     // A hair toward the eye: off the cell boundary the edge lies on.
     vec3 p = from + dir * 0.01;
     ivec3 cell = ivec3(floor(p));
@@ -72,25 +77,37 @@ bool blocks_between(vec3 from) {
     vec3 next = (vec3(cell) + max(vec3(step_by), vec3(0.0)) - p) * sign(dir) * inverse;
     next = mix(vec3(1e30), next, notEqual(step_by, ivec3(0)));
     float walked = 0.0;
-    for (int i = 0; i < 768 && walked < length_to; ++i) {
-        if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, c.size.xyz))) return false;
-        uint index = uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x);
-        if ((blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u) return true;
+    int axis = -1;
+    for (int i = 0; i < 768; ++i) {
+        bool inside = all(greaterThanEqual(cell, ivec3(0))) && all(lessThan(cell, c.size.xyz));
+        bool filled = false;
+        if (inside) {
+            uint index = uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x);
+            filled = (blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u;
+        }
+        if (!filled) {
+            float along = axis < 0 ? slope : 1.0 / max(abs(dir[axis]), 0.1);
+            return surface <= walked + c.eye.w * along;
+        }
+        if (walked >= surface) return true;
         if (next.x < next.y && next.x < next.z) {
             walked = next.x;
             next.x += inverse.x;
             cell.x += step_by.x;
+            axis = 0;
         } else if (next.y < next.z) {
             walked = next.y;
             next.y += inverse.y;
             cell.y += step_by.y;
+            axis = 1;
         } else {
             walked = next.z;
             next.z += inverse.z;
             cell.z += step_by.z;
+            axis = 2;
         }
     }
-    return false;
+    return true;
 }
 void main() {
     if (c.mode == 1) {
@@ -113,7 +130,7 @@ void main() {
         if (v_dash < 0.0) {
             if (hidden || behind_own) discard;
         } else if (c.mode == 4) {
-            if (hidden && !blocks_between(v_cell / v_depth)) discard;
+            if (hidden && !through_mass(v_cell / v_depth, 1.0 - v_depth / scene, slope)) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
                 color.a = max(color.a, 220.0 / 255.0);
