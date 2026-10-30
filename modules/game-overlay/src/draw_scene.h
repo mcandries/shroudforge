@@ -28,6 +28,7 @@ struct WorldDepthVertex {
     float extra;  // more margin, in units of 1 / depth (edges: kept visible where they touch the game's surface)
     ImU32 color;
     float cell[3];  // in cells of `blocks` (WorldDepthDraw), times depth
+    float fade = 1.0f;  // its opacity, times (the wire view's creases turned away)
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;

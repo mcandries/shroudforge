@@ -200,6 +200,11 @@ struct Item {
     // all as far out, whatever block was there (30/10: steps on a wall of
     // stone built over in wood, the stone's cells farther).
     bool world_face_offsets_largest = false;
+    // World, the wire view: the creases between two faces turned away from
+    // the eye drawn too, this opaque against the others (cells.back_edges, 0
+    // to 1; 0: not drawn). 30/10: a crease seen from one side vanished from
+    // the other, the build hard to read.
+    float world_back_edges = 0.0f;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

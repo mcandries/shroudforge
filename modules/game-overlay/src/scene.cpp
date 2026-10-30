@@ -523,6 +523,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
         if (value.contains("depth_jitter") && value["depth_jitter"].is_string())
             item.world_depth_jitter_kept = value["depth_jitter"].get<std::string>() == "keep";
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("back_edges") &&
+            value["cells"]["back_edges"].is_number())
+            item.world_back_edges = std::clamp(value["cells"]["back_edges"].get<float>(), 0.0f, 1.0f);
         if (value.contains("face_offsets_largest") && value["face_offsets_largest"].is_boolean())
             item.world_face_offsets_largest = value["face_offsets_largest"].get<bool>();
         if (value.contains("depth_camera") && value["depth_camera"].is_string()) {

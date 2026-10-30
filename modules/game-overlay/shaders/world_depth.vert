@@ -18,18 +18,21 @@ layout(location = 2) in float dash;
 layout(location = 3) in vec4 color;
 layout(location = 4) in float extra;  // more margin (edges), in units of 1 / depth
 layout(location = 5) in vec3 cell;    // in cells of the blocks' grid, times depth (mode 4)
+layout(location = 6) in float fade;   // its opacity, times (the wire view's creases turned away)
 layout(location = 0) out vec4 v_color;
 layout(location = 1) noperspective out float v_depth;
 layout(location = 2) noperspective out float v_dash;
 layout(location = 3) flat out float v_extra;
 // Times depth, as the depth goes along the screen: divided by it, the point.
 layout(location = 4) noperspective out vec3 v_cell;
+layout(location = 5) flat out float v_fade;
 void main() {
     v_color = color;
     v_depth = depth;
     v_dash = dash;
     v_extra = extra;
     v_cell = cell;
+    v_fade = fade;
     // The depth too, reversed as the game's: our own depth image, when the
     // build is drawn solid, keeps the nearest of its faces.
     gl_Position = vec4(position * c.to_clip - 1.0, depth, 1.0);

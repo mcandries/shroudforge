@@ -892,18 +892,19 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     stages[1].module = frag;
     stages[1].pName = "main";
     VkVertexInputBindingDescription vertex_binding{0, sizeof(WorldDepthVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attributes[6] = {
+    VkVertexInputAttributeDescription attributes[7] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(WorldDepthVertex, x)},
         {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, depth)},
         {2, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, dash)},
         {3, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(WorldDepthVertex, color)},
         {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, extra)},
         {5, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(WorldDepthVertex, cell)},
+        {6, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, fade)},
     };
     VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex_input.vertexBindingDescriptionCount = 1;
     vertex_input.pVertexBindingDescriptions = &vertex_binding;
-    vertex_input.vertexAttributeDescriptionCount = 6;
+    vertex_input.vertexAttributeDescriptionCount = 7;
     vertex_input.pVertexAttributeDescriptions = attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
