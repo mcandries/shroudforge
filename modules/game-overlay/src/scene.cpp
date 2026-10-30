@@ -526,6 +526,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("back_edges") &&
             value["cells"]["back_edges"].is_number())
             item.world_back_edges = std::clamp(value["cells"]["back_edges"].get<float>(), 0.0f, 1.0f);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("through_blocks") &&
+            value["cells"]["through_blocks"].is_boolean())
+            item.world_through_blocks = value["cells"]["through_blocks"].get<bool>();
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("dash_opacity") &&
             value["cells"]["dash_opacity"].is_number())
             item.world_dash_opacity = std::clamp(value["cells"]["dash_opacity"].get<float>(), 0.0f, 1.0f);

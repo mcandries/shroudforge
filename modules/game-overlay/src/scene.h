@@ -208,6 +208,10 @@ struct Item {
     // World: a hidden edge's dashes this opaque (cells.dash_opacity, 0 to 1;
     // negative: 220 / 255, nearly opaque, as before 31/10).
     float world_dash_opacity = -1.0f;
+    // World, the wire view: what hides an edge told by the world's blocks
+    // (`solids`, and the cells drawn, counted as blocks), as hidden_dashed
+    // does in Remove mode (cells.through_blocks: Build's wire view, 31/10).
+    bool world_through_blocks = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
