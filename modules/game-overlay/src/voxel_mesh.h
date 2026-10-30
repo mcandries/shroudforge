@@ -75,8 +75,10 @@ struct VoxelSource {
     std::shared_ptr<const std::string> cells;
     std::array<ImU32, 128> colors{}, marks{};
     bool levels = false;
+    bool one_shape = false;
     bool same(const VoxelSource& other) const {
         return sx == other.sx && sy == other.sy && sz == other.sz && levels == other.levels &&
+               one_shape == other.one_shape &&
                colors == other.colors && marks == other.marks &&
                (cells == other.cells || (cells && other.cells && *cells == *other.cells));
     }
@@ -115,9 +117,11 @@ void check_voxel_cells(int sx, int sy, int sz, const std::string& cells);
 // also gets its coarser meshes: each of their cells takes, among the cells it
 // covers, the drawn character the rarest in the box (a planned block, an
 // endpoint, a wall before the terrain), so that small things stay seen.
+// With `one_shape`, every drawn character is one shape: no inner face, creases
+// where the whole shape turns (a build whose cells say what was there).
 // Throws std::runtime_error on malformed input.
 VoxelMesh build_voxel_mesh(int sx, int sy, int sz, const std::string& cells, const std::array<ImU32, 128>& colors,
-    const std::array<ImU32, 128>& marks, bool levels = false);
+    const std::array<ImU32, 128>& marks, bool levels = false, bool one_shape = false);
 
 // build_voxel_mesh of `slot->source` on the overlay's thread, then `slot`
 // filled, unless its item is gone meanwhile (its zone replaced again: not
