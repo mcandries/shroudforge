@@ -15,6 +15,7 @@
 #include <iterator>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace overlay {
 
@@ -1068,9 +1069,27 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         const auto edge_extra = static_cast<float>(0.05 / gpu->near_distance);
         // Solid: edges a hair nearer than their faces, kept over them.
         const float edge_nearer = gpu->solid ? 1.001f : 1.0f;
+        // Each edge once: two faces seen share theirs (31/10: drawn twice,
+        // the creases between them more opaque than the outline, their
+        // dashes out of step). Known by its ends, to the millimeter.
+        std::unordered_set<std::uint64_t> drawn_edges;
+        drawn_edges.reserve(shown.size() * 2);
+        const auto edge_key = [](const double* p, const double* q) {
+            long long ends[2][3];
+            for (int i = 0; i < 3; ++i) {
+                ends[0][i] = std::llround(p[i] * 1000.0);
+                ends[1][i] = std::llround(q[i] * 1000.0);
+            }
+            if (std::lexicographical_compare(ends[1], ends[1] + 3, ends[0], ends[0] + 3)) std::swap(ends[0], ends[1]);
+            std::uint64_t key = 1469598103934665603ull;
+            for (const auto& end : ends)
+                for (long long value : end) key = (key ^ static_cast<std::uint64_t>(value)) * 1099511628211ull;
+            return key;
+        };
         for (const Shown& entry : shown)
             for (int k = 0; k < 4; ++k) {
                 if (!(entry.edges & (1 << k))) continue;
+                if (!drawn_edges.insert(edge_key(entry.world[k], entry.world[(k + 1) % 4])).second) continue;
                 // Unseen edges (the solid style) only matter dashed; the solid
                 // style shows none (30/10: in Remove mode, dashes over the
                 // terrain and the player).
