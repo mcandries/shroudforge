@@ -27,6 +27,7 @@ struct WorldDepthVertex {
     float x, y, depth, dash;
     float extra;  // more margin, in units of 1 / depth (edges: kept visible where they touch the game's surface)
     ImU32 color;
+    float cell[3];  // in cells of `blocks` (WorldDepthDraw), times depth
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
@@ -43,6 +44,18 @@ struct WorldDepthDraw {
     // Wire: how far before our nearest face something hides an edge entirely (meters).
     double own_tolerance = 0.3;
     double focal_pixels = 0.0;  // screen pixels per unit of tan, vertically
+    // The wire view in Remove mode (hidden_dashed): an edge hidden by these
+    // blocks of the world dashed, by anything else left out; the eye in
+    // their cells.
+    std::shared_ptr<const WorldSolids> blocks;
+    double blocks_eye[3]{};
+    // The build's own cells, blocks of the world too (the solids leave out
+    // the cells a build changes): each tile's mesh at its place in `blocks`.
+    struct BlocksPart {
+        std::shared_ptr<const VoxelMesh> mesh;
+        int at[3]{};
+    };
+    std::vector<BlocksPart> blocks_build;
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;

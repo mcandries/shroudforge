@@ -174,7 +174,11 @@ std::shared_ptr<const WorldSolids> decoded_solids(const int box[3], const std::a
     shape->cell = cell;
     const std::vector<unsigned char> grid = decode_voxel_cells(box[0], box[1], box[2], *data);
     shape->filled.resize(grid.size());
-    for (size_t i = 0; i < grid.size(); ++i) shape->filled[i] = grid[i] == '#' ? 1 : 0;
+    shape->bits.assign((grid.size() + 31) / 32, 0u);
+    for (size_t i = 0; i < grid.size(); ++i) {
+        shape->filled[i] = grid[i] == '#' ? 1 : 0;
+        if (shape->filled[i]) shape->bits[i >> 5] |= 1u << (i & 31);
+    }
     shape->data = std::move(data);
     if (recent_solids.size() >= 16) recent_solids.erase(recent_solids.begin());
     recent_solids.push_back(shape);

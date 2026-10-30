@@ -116,6 +116,18 @@ struct WorldDepthPipeline {
     void* vertex_mapped[kFrames]{};
     void* index_mapped[kFrames]{};
     VkDeviceSize vertex_size[kFrames]{}, index_size[kFrames]{};
+    // The world's blocks of the wire view in Remove mode, a bit per cell:
+    // packed once per grid, copied to each slot's buffer when it changes.
+    VkBuffer blocks[kFrames]{};
+    VkDeviceMemory blocks_memory[kFrames]{};
+    void* blocks_mapped[kFrames]{};
+    VkDeviceSize blocks_size[kFrames]{};
+    std::uint64_t blocks_in[kFrames]{};  // the packing each slot holds
+    std::shared_ptr<const WorldSolids> packed_of;
+    std::vector<const VoxelMesh*> packed_meshes;
+    std::vector<std::shared_ptr<const VoxelMesh>> packed_keep;
+    std::uint64_t packing = 0;
+    std::vector<std::uint32_t> packed;
     std::unordered_map<int, VkImageView> views;  // of the game's depth images, by their number
     bool drawn_logged = false;
 };
@@ -127,6 +139,8 @@ struct WorldDepthConstants {
     int32_t mode;         // 0 against the game's depth, 1 our faces' depth, 2 the wire view
     float own_tolerance;  // wire: how far before our nearest face something hides an edge entirely
     float focal;          // screen pixels per unit of tan, vertically (the wire view's slopes)
+    float eye[4];         // mode 4: the eye in cells of the blocks' grid
+    int32_t size[4];      // mode 4: the grid's size in cells
 };
 
 }  // namespace
@@ -721,6 +735,8 @@ void release_world(DeviceData& d, Renderer& r) {
         if (w.vertex_memory[i]) d.fn.FreeMemory(d.device, w.vertex_memory[i], nullptr);
         if (w.index[i]) d.fn.DestroyBuffer(d.device, w.index[i], nullptr);
         if (w.index_memory[i]) d.fn.FreeMemory(d.device, w.index_memory[i], nullptr);
+        if (w.blocks[i]) d.fn.DestroyBuffer(d.device, w.blocks[i], nullptr);
+        if (w.blocks_memory[i]) d.fn.FreeMemory(d.device, w.blocks_memory[i], nullptr);
     }
     for (auto& [id, view] : w.views) d.fn.DestroyImageView(d.device, view, nullptr);
     for (auto& [view, framebuffer] : w.framebuffers) d.fn.DestroyFramebuffer(d.device, framebuffer, nullptr);
@@ -841,13 +857,14 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     w.pass = world_pass(d, format);
     if (!w.pass) return false;
     const VkRenderPass pass = w.pass;
-    // The game's depth, and ours (the wire view).
-    VkDescriptorSetLayoutBinding bindings[2] = {
+    // The game's depth, ours (the wire view) and the world's blocks (its Remove mode).
+    VkDescriptorSetLayoutBinding bindings[3] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
     };
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    set_info.bindingCount = 2;
+    set_info.bindingCount = 3;
     set_info.pBindings = bindings;
     if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.set_layout) != VK_SUCCESS) return false;
     VkPushConstantRange constants{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -875,17 +892,18 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     stages[1].module = frag;
     stages[1].pName = "main";
     VkVertexInputBindingDescription vertex_binding{0, sizeof(WorldDepthVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-    VkVertexInputAttributeDescription attributes[5] = {
+    VkVertexInputAttributeDescription attributes[6] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(WorldDepthVertex, x)},
         {1, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, depth)},
         {2, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, dash)},
         {3, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(WorldDepthVertex, color)},
         {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(WorldDepthVertex, extra)},
+        {5, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(WorldDepthVertex, cell)},
     };
     VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertex_input.vertexBindingDescriptionCount = 1;
     vertex_input.pVertexBindingDescriptions = &vertex_binding;
-    vertex_input.vertexAttributeDescriptionCount = 5;
+    vertex_input.vertexAttributeDescriptionCount = 6;
     vertex_input.pVertexAttributeDescriptions = attributes;
     VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -968,11 +986,12 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     sampler_info.addressModeU = sampler_info.addressModeV = sampler_info.addressModeW =
         VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (d.fn.CreateSampler(d.device, &sampler_info, nullptr, &w.sampler) != VK_SUCCESS) return false;
-    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kFrames};
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kFrames},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrames}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = kFrames;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
+    pool_info.poolSizeCount = 2;
+    pool_info.pPoolSizes = pool_sizes;
     if (d.fn.CreateDescriptorPool(d.device, &pool_info, nullptr, &w.pool) != VK_SUCCESS) return false;
     VkDescriptorSetLayout layouts[kFrames];
     for (auto& layout : layouts) layout = w.set_layout;
@@ -1043,6 +1062,52 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     }
     std::memcpy(w.vertex_mapped[slot], draw.vertices.data(), vertex_bytes);
     std::memcpy(w.index_mapped[slot], draw.indices.data(), index_bytes);
+    // The world's blocks (the wire view in Remove mode), packed once per grid;
+    // a small buffer bound when there are none.
+    std::vector<const VoxelMesh*> meshes;
+    for (const auto& part : draw.blocks_build) meshes.push_back(part.mesh.get());
+    if (draw.blocks && (w.packed_of != draw.blocks || w.packed_meshes != meshes)) {
+        const WorldSolids& grid = *draw.blocks;
+        w.packed = grid.bits;
+        w.packed.resize((grid.filled.size() + 31) / 32, 0u);
+        // The build's cells: the blocks it removes.
+        for (const auto& part : draw.blocks_build) {
+            const VoxelMesh& mesh = *part.mesh;
+            size_t i = 0;
+            for (int z = 0; z < mesh.sz; ++z)
+                for (int y = 0; y < mesh.sy; ++y)
+                    for (int x = 0; x < mesh.sx; ++x, ++i) {
+                        if (i >= mesh.drawn.size() || !mesh.drawn[i]) continue;
+                        const int gx = x + part.at[0], gy = y + part.at[1], gz = z + part.at[2];
+                        if (gx < 0 || gy < 0 || gz < 0 || gx >= grid.sx || gy >= grid.sy || gz >= grid.sz) continue;
+                        const size_t at = (static_cast<size_t>(gz) * grid.sy + gy) * grid.sx + gx;
+                        w.packed[at >> 5] |= 1u << (at & 31);
+                    }
+        }
+        w.packed_of = draw.blocks;
+        w.packed_meshes = meshes;
+        w.packed_keep.clear();
+        for (const auto& part : draw.blocks_build) w.packed_keep.push_back(part.mesh);
+        ++w.packing;
+    }
+    const VkDeviceSize blocks_bytes = draw.blocks ? w.packed.size() * sizeof(std::uint32_t) : 0;
+    if (!ensure_buffer(d, w.blocks[slot], w.blocks_memory[slot], w.blocks_mapped[slot], w.blocks_size[slot],
+            std::max<VkDeviceSize>(blocks_bytes, 4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+        log_line("game depth: world blocks buffer unavailable");
+        return false;
+    }
+    if (draw.blocks && w.blocks_in[slot] != w.packing) {
+        std::memcpy(w.blocks_mapped[slot], w.packed.data(), blocks_bytes);
+        w.blocks_in[slot] = w.packing;
+    }
+    VkDescriptorBufferInfo blocks_info{w.blocks[slot], 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet blocks_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    blocks_write.dstSet = w.sets[slot];
+    blocks_write.dstBinding = 2;
+    blocks_write.descriptorCount = 1;
+    blocks_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    blocks_write.pBufferInfo = &blocks_info;
+    d.fn.UpdateDescriptorSets(d.device, 1, &blocks_write, 0, nullptr);
     VkImageView& view = w.views[scene.id];
     if (!view) {
         VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -1159,7 +1224,8 @@ bool world_target(DeviceData& d, Renderer& r, VkExtent2D extent, VkImageView vie
 }
 
 // In the world's pass (mode 0), the wire view's depth pass (1, the faces
-// alone) or the zones' pass (2, the wire view; 3 showing what is hidden).
+// alone) or the zones' pass (2, the wire view; 3 showing what is hidden; 4
+// in Remove mode, the world's blocks telling what hides an edge).
 void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene,
         VkExtent2D screen, const depth::Settings& settings, VkPipeline pipeline, int mode, size_t indices) {
     WorldDepthPipeline& w = r.world;
@@ -1182,6 +1248,12 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     // wall); nearer, it is the build's own block.
     constants.own_tolerance = static_cast<float>(r.world_draw.own_tolerance / r.world_draw.near_distance);
     constants.focal = static_cast<float>(r.world_draw.focal_pixels);
+    if (const auto& blocks = r.world_draw.blocks) {
+        for (int i = 0; i < 3; ++i) constants.eye[i] = static_cast<float>(r.world_draw.blocks_eye[i]);
+        constants.size[0] = blocks->sx;
+        constants.size[1] = blocks->sy;
+        constants.size[2] = blocks->sz;
+    }
     d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
         &constants);
     const VkDeviceSize offset = 0;
@@ -1385,6 +1457,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.show_hidden = false;
     r.world_draw.own_tolerance = 0.3;
     r.world_draw.focal_pixels = 0.0;
+    r.world_draw.blocks.reset();
+    r.world_draw.blocks_build.clear();
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
     // camera draws.
@@ -1521,7 +1595,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
     if (wire)
         draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline,
-            r.world_draw.show_hidden ? 3 : 2, r.world_draw.indices.size());
+            r.world_draw.blocks ? 4 : r.world_draw.show_hidden ? 3 : 2, r.world_draw.indices.size());
     ImGui_ImplVulkan_RenderDrawData(zones, cb);
     d.fn.CmdEndRenderPass(cb);
     if (world_drawn) finish_world(d, cb, scene_depth);

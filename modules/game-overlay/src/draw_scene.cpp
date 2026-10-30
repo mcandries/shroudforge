@@ -791,6 +791,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     struct Shown {
         double depth;
         double corners[4][3];  // Camera space.
+        double world[4][3];    // Meters.
         ImVec2 points[8];
         float point_depths[8];  // As the game's: near / distance.
         int count;
@@ -812,6 +813,26 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu && item.world_own_solids) gpu->solid = true;
     if (gpu && wire_style) gpu->wire = true;
     if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
+    // Remove mode: what hides an edge is told by the world's blocks around.
+    if (gpu && wire_style && item.world_hide_hidden && item.world_hidden_dashed && item.world_solids && !gpu->blocks) {
+        gpu->blocks = item.world_solids;
+        for (int i = 0; i < 3; ++i)
+            gpu->blocks_eye[i] = (view.eye[i] - item.world_solids->origin[i]) / item.world_solids->cell;
+    }
+    if (gpu && gpu->blocks && item.world_hidden_dashed && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
+        WorldDepthDraw::BlocksPart part;
+        part.mesh = shared_mesh;
+        for (int i = 0; i < 3; ++i)
+            part.at[i] = static_cast<int>(std::lround((item.world_cells_origin[i] - gpu->blocks->origin[i]) / gpu->blocks->cell));
+        gpu->blocks_build.push_back(std::move(part));
+    }
+    // A world point in cells of the blocks, times `depth` (as the shader interpolates it).
+    const auto in_blocks = [&](const double world[3], float depth, float out[3]) {
+        for (int i = 0; i < 3; ++i)
+            out[i] = gpu && gpu->blocks
+                ? static_cast<float>((world[i] - gpu->blocks->origin[i]) / gpu->blocks->cell * depth)
+                : 0.0f;
+    };
     if (gpu) {
         // Something standing less than the largest offset (and 10 cm) before
         // our faces is a block of the game the build sits in.
@@ -913,10 +934,10 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         const double plane = base[axis] + (positive ? s + offset : -offset);
         // Only the faces turned to the camera.
         if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
-        double in[4][3];
+        double in[4][3], at_world[4][3];
         double centre[3] = {0.0, 0.0, 0.0};
         for (int k = 0; k < 4; ++k) {
-            double corner[3];
+            double* corner = at_world[k];
             corner[axis] = plane;
             corner[u] = kSquare[k][0] ? base[u] + s + grow[1] : base[u] - grow[0];
             corner[v] = kSquare[k][1] ? base[v] + s + grow[3] : base[v] - grow[2];
@@ -945,8 +966,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             Shown entry{};
             const double at[4][2] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
             for (int k = 0; k < 4; ++k)
-                for (int i = 0; i < 3; ++i)
+                for (int i = 0; i < 3; ++i) {
                     entry.corners[k][i] = in[0][i] + (in[1][i] - in[0][i]) * at[k][0] + (in[3][i] - in[0][i]) * at[k][1];
+                    entry.world[k][i] = at_world[0][i] + (at_world[1][i] - at_world[0][i]) * at[k][0] +
+                        (at_world[3][i] - at_world[0][i]) * at[k][1];
+                }
             const double near_distance = gpu ? gpu->near_distance : 1.0;
             for (int k = 0; k < 4; ++k) {
                 const double* a = entry.corners[k];
@@ -1000,7 +1024,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
             for (int k = 0; k < entry.count; ++k)
                 gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f,
-                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill});
+                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {0.0f, 0.0f, 0.0f}});
             for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
         }
         gpu->face_indices = gpu->indices.size();
@@ -1019,15 +1043,22 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 // terrain and the player).
                 const bool hidden_dashed = item.world_hidden_dashed && !gpu->solid;
                 if (!hidden_dashed && !(entry.edge & IM_COL32_A_MASK)) continue;
-                double a[3], b[3];
+                double a[3], b[3], wa[3], wb[3];
                 std::memcpy(a, entry.corners[k], sizeof a);
                 std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
+                std::memcpy(wa, entry.world[k], sizeof wa);
+                std::memcpy(wb, entry.world[(k + 1) % 4], sizeof wb);
                 if (a[2] < kNear && b[2] < kNear) continue;
                 if (a[2] < kNear || b[2] < kNear) {
                     double* behind = a[2] < kNear ? a : b;
                     const double* front = a[2] < kNear ? b : a;
+                    double* world_behind = a[2] < kNear ? wa : wb;
+                    const double* world_front = a[2] < kNear ? wb : wa;
                     const double t = (kNear - front[2]) / (behind[2] - front[2]);
-                    for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
+                    for (int i = 0; i < 3; ++i) {
+                        behind[i] = front[i] + (behind[i] - front[i]) * t;
+                        world_behind[i] = world_front[i] + (world_behind[i] - world_front[i]) * t;
+                    }
                 }
                 const ImVec2 pa = view.to_screen(a), pb = view.to_screen(b);
                 const float dx = pb.x - pa.x, dy = pb.y - pa.y;
@@ -1043,10 +1074,13 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 const float ub = dashes ? length / period : -1.0f;
                 const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
                 const auto extra = edge_extra + static_cast<float>(entry.margin / gpu->near_distance);
-                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge});
-                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge});
-                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge});
-                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge});
+                float ca[3], cb[3];
+                in_blocks(wa, da, ca);
+                in_blocks(wb, db, cb);
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}});
                 gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
             }
         return;
