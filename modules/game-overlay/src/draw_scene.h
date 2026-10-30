@@ -29,6 +29,7 @@ struct WorldDepthVertex {
 };
 struct WorldDepthDraw {
     double near_distance = 0.01;
+    double margin = -1.0;  // an item's (depth_margin), else game-depth.on's
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
 };

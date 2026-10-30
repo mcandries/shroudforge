@@ -941,7 +941,8 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.to_clip[1] = 2.0f / screen.height;
     constants.depth_scale[0] = static_cast<float>(scene.extent.width) / screen.width;
     constants.depth_scale[1] = static_cast<float>(scene.extent.height) / screen.height;
-    constants.margin = static_cast<float>(settings.margin / r.world_draw.near_distance);
+    const double margin = r.world_draw.margin >= 0.0 ? r.world_draw.margin : settings.margin;
+    constants.margin = static_cast<float>(margin / r.world_draw.near_distance);
     d.fn.CmdPushConstants(cb, w.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants,
         &constants);
     const VkDeviceSize offset = 0;
@@ -1140,6 +1141,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     const depth::Settings depth_settings = depth::enabled() ? depth::settings() : depth::Settings{};
     r.world_draw.vertices.clear();
     r.world_draw.indices.clear();
+    r.world_draw.margin = -1.0;
     // The scene's camera from the GPU, when found: its near distance whatever
     // camera draws.
     LocalCamera gpu_camera;
