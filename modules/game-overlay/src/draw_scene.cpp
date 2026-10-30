@@ -840,8 +840,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         for (const auto& entry : item.world_face_offsets)
             for (float each : entry.second) largest = std::max(largest, static_cast<double>(each));
         gpu->own_tolerance = std::max(gpu->own_tolerance, largest + 0.1);
-        // The game's blocks drawn past their cells: 5 cm more than the farthest.
-        gpu->blocks_relief = std::max(gpu->blocks_relief, largest + 0.05);
+        // The game's blocks drawn past their cells, from a cell's box: one and
+        // a half the farthest (a corner's bumps, diagonally) and 5 cm.
+        gpu->blocks_relief = std::max(gpu->blocks_relief, 1.5 * largest + 0.05);
         gpu->focal_pixels = view.matrix
             ? view.screen.y * 0.5 * std::sqrt(view.m[4] * view.m[4] + view.m[5] * view.m[5] + view.m[6] * view.m[6])
             : view.screen.y * 0.5 / view.focal_y;
