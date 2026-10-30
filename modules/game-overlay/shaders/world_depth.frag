@@ -10,6 +10,11 @@
 // `own_tolerance`: something standing before the build) is left out; hidden
 // otherwise (by the build itself, or by the game's blocks it sits in), it is
 // dashed; else drawn plain.
+// In the wire view, a dashed edge behind the build's own faces by more than
+// its margin (inside the build, or at its back) is `back_alpha` opaque, one
+// hidden by the world alone `dash_alpha`: told by what hides it, not by
+// which way its faces turn (31/10: an edge changed as the eye crossed the
+// plane of a face, and edges inside the build showed as in front).
 // mode 3: the wire view showing what is hidden: as 2, but an edge hidden by
 // something before the build shows dashed instead of left out.
 // mode 4: the wire view in Remove mode: an edge hidden by the game's surface
@@ -34,6 +39,7 @@ layout(push_constant) uniform Constants {
     vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
+    float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
@@ -165,13 +171,14 @@ void main() {
         }
         float own = texelFetch(own_depth, ivec2(gl_FragCoord.xy), 0).r;
         bool behind_own = own > 0.0 && v_depth < own * 0.9999;
+        float dashes_alpha = own > 0.0 && 1.0 / v_depth - 1.0 / own > v_extra ? c.back_alpha : c.dash_alpha;
         if (v_dash < 0.0) {
             if (hidden || behind_own) discard;
         } else if (c.mode == 4) {
             if (hidden && !through_mass(v_cell / v_depth, 1.0 - v_depth / scene)) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
-                color.a = c.dash_alpha;
+                color.a = dashes_alpha;
             }
         } else {
             // What hides it stands before the build: nothing of it shows
@@ -180,7 +187,7 @@ void main() {
             if (c.mode == 2 && hidden && 1.0 / front - 1.0 / scene > c.own_tolerance * slope) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
-                color.a = c.dash_alpha;
+                color.a = dashes_alpha;
             }
         }
         out_color = vec4(color.rgb, color.a * v_fade);
