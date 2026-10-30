@@ -153,8 +153,8 @@ function shroudforge.voxels.chunks() end
 
 --- Build, on a thread of its own, what a build changes in the world, as tiles of at most `tile`
 --- cells a side (256; the empty ones left out): run-length text as for `view3d`, `+` a cell
---- filled (or replaced, unless `plan.only_empty` keeps the blocks there; a cell not read counts
---- as empty), `-` a block removed, `.` the rest; and the filled cells `margin` around lo..hi (8,
+--- filled (a cell not read counts as empty), `*` a block replaced (unless `plan.only_empty` keeps
+--- the blocks there), `-` a block removed, `.` the rest; and the filled cells `margin` around lo..hi (8,
 --- less on an axis over 128), or in `solids_lo`..`solids_hi` when given (256 a side at most, such
 --- as the box holding the build and the eye), `#` a filled cell the build does not change;
 --- `solids_max` cells at most (262144, up to 16777216).

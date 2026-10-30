@@ -95,8 +95,9 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
                         }
                         let full = chunk_value(&input.chunks, x, y, z) > 0;
                         if plan.add {
-                            // Building keeps the blocks already there (replace off).
-                            if plan.only_empty && full { b'.' } else { b'+' }
+                            // Building keeps the blocks already there (replace off),
+                            // or replaces them: `*`, drawn on a block of the game.
+                            if !full { b'+' } else if plan.only_empty { b'.' } else { b'*' }
                         } else if full {
                             b'-'
                         } else {
@@ -205,6 +206,23 @@ mod tests {
         let solids = cells.solids.unwrap();
         assert_eq!((solids.lo, solids.size, solids.count), ([-1, -1, -1], [6, 3, 3], 1));
         assert_eq!(solids.data, "27.#26.");
+    }
+
+    #[test]
+    fn replaced_cells_are_told_apart() {
+        // Replace on: the filled cell is `*`, the empty one `+`.
+        let mut world = input(
+            Some(ViewPlan { add: true, only_empty: false, lo: [0, 0, 0], hi: [1, 0, 0], cells: None }),
+            [0, 0, 0],
+            [1, 0, 0],
+        );
+        world.chunks.insert([0, 0, 0], ChunkCells::Packed(std::sync::Arc::new({
+            let mut bytes = vec![0u8; 16 * 16 * 16 * 2];
+            bytes[0] = 7;
+            bytes
+        })));
+        let (tiles, changed) = build_world_cells(&world).tiles.unwrap();
+        assert_eq!((tiles[0].data.as_str(), changed), ("*+", 2));
     }
 
     #[test]
