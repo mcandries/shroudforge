@@ -507,6 +507,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             if (value["depth_near"].is_number()) item.world_depth_near = std::clamp(value["depth_near"].get<float>(), 0.0001f, 1.0f);
             else if (value["depth_near"] == "matrix") item.world_depth_near = 0.0f;
         }
+        if (value.contains("face_offset") && value["face_offset"].is_number())
+            item.world_face_offset = std::clamp(value["face_offset"].get<float>(), 0.0f, 0.25f);
         if (value.contains("depth_margin") && value["depth_margin"].is_number())
             item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
         if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
