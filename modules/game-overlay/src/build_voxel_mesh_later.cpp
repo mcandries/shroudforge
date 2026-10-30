@@ -22,7 +22,7 @@ void run(const Job& job) {
     if (job.slot.expired()) return;
     try {
         const VoxelSource& s = *job.source;
-        auto mesh = std::make_shared<const VoxelMesh>(build_voxel_mesh(s.sx, s.sy, s.sz, *s.cells, s.colors, s.marks, s.levels));
+        auto mesh = std::make_shared<const VoxelMesh>(build_voxel_mesh(s.sx, s.sy, s.sz, *s.cells, s.colors, s.marks, s.levels, s.one_shape));
         if (auto slot = job.slot.lock()) slot->ready.store(std::move(mesh));
     } catch (const std::exception& error) {
         log_line("voxels: %s", error.what());

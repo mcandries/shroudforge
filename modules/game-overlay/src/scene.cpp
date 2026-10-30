@@ -134,7 +134,7 @@ bool is_text(const json& value) {
 
 // A slot to build from these cells once the zone is kept (start_meshes).
 std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<const std::string> cells,
-    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels) {
+    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels, bool one_shape = false) {
     auto source = std::make_shared<VoxelSource>();
     source->sx = sx;
     source->sy = sy;
@@ -143,6 +143,7 @@ std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<cons
     source->colors = colors;
     source->marks = marks;
     source->levels = levels;
+    source->one_shape = one_shape;
     auto slot = std::make_shared<VoxelSlot>();
     slot->source = std::move(source);
     return slot;
@@ -585,7 +586,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 own->data = text;
                 item.world_own_solids = std::move(own);
             }
-            item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false);
+            item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false,
+                cells.value("one_shape", false));
         }
         if (value.contains("solids")) {
             const auto& solids = value["solids"];
