@@ -64,18 +64,28 @@ float slope_factor(ivec2 p, float far) {
 bool bit_at(uint index) {
     return (blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u;
 }
+// How far a point (in cells) lies from a cell's box.
+float from_cell(vec3 p, ivec3 cell) {
+    vec3 out_of = max(max(vec3(cell) - p, p - vec3(cell + 1)), vec3(0.0));
+    return length(out_of);
+}
+bool filled_at(ivec3 cell, uint offset) {
+    if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, c.size.xyz))) return false;
+    return bit_at(offset + uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x));
+}
 // Whether the game's surface, `surface_at` of the way from `from` (in cells)
 // to the eye, is the one of a block seen through: walking the grid, it lies
-// in a filled cell, or no farther than the relief (eye.w, across the face
-// the walk left by: `slope` when it starts in the air) past where a run of
-// them ends. Air may be crossed only toward cells of the build. Out of the
-// grid: air.
-bool through_mass(vec3 from, float surface_at, float slope) {
+// in a filled cell, or no farther than the relief (eye.w, in cells) from
+// the box of the filled cell the walk just left (a corner's bumps count
+// diagonally), or from a cell of the build around it. Air may be crossed
+// only toward cells of the build. Out of the grid: air.
+bool through_mass(vec3 from, float surface_at) {
     vec3 to = c.eye.xyz - from;
     float length_to = length(to);
     if (length_to < 1e-4) return false;
     vec3 dir = to / length_to;
     float surface = surface_at * length_to;
+    vec3 seen = from + dir * surface;
     uint total = uint(c.size.x * c.size.y * c.size.z);
     uint build_from = ((total + 31u) / 32u) * 32u;
     // A hair toward the eye: off the cell boundary the edge lies on.
@@ -86,43 +96,51 @@ bool through_mass(vec3 from, float surface_at, float slope) {
     vec3 next = (vec3(cell) + max(vec3(step_by), vec3(0.0)) - p) * sign(dir) * inverse;
     next = mix(vec3(1e30), next, notEqual(step_by, ivec3(0)));
     float walked = 0.0;
-    int axis = -1;
-    bool was_filled = true;  // the edge itself lies on the build
+    // The cell behind the edge, the build's: the run the walk starts in.
+    ivec3 left = ivec3(floor(from - dir * 0.01));
+    bool was_filled = true;
     bool crossed_air = false;
     for (int i = 0; i < 768; ++i) {
         bool inside = all(greaterThanEqual(cell, ivec3(0))) && all(lessThan(cell, c.size.xyz));
-        uint index = inside ? uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x) : 0u;
-        bool filled = inside && bit_at(index);
+        bool filled = inside && filled_at(cell, 0u);
         if (filled) {
             // A block apart, after the air: it stands before the build.
-            if (crossed_air && !bit_at(build_from + index)) return false;
+            if (crossed_air && !filled_at(cell, build_from)) return false;
             if (walked >= surface) return true;
+            left = cell;
         } else {
             if (was_filled) {
-                // A run of blocks ends here: the surface is its own.
-                float along = axis < 0 ? slope : 1.0 / max(abs(dir[axis]), 0.1);
-                if (surface <= walked + c.eye.w * along) return true;
+                // A run of blocks ends here: the surface is its own when as
+                // near its last cell as the relief goes.
+                if (filled_at(left, 0u) && from_cell(seen, left) <= c.eye.w) return true;
                 crossed_air = true;
             }
-            // The surface in the air: a character, a tree, an object.
-            if (walked >= surface || !inside) return false;
+            if (walked >= surface || !inside) {
+                // The surface in the air: a removed block's relief around
+                // it, or else a character, a tree, an object.
+                ivec3 around = ivec3(floor(seen));
+                for (int z = -1; z <= 1; ++z)
+                    for (int y = -1; y <= 1; ++y)
+                        for (int x = -1; x <= 1; ++x) {
+                            ivec3 near_cell = around + ivec3(x, y, z);
+                            if (filled_at(near_cell, build_from) && from_cell(seen, near_cell) <= c.eye.w) return true;
+                        }
+                return false;
+            }
         }
         was_filled = filled;
         if (next.x < next.y && next.x < next.z) {
             walked = next.x;
             next.x += inverse.x;
             cell.x += step_by.x;
-            axis = 0;
         } else if (next.y < next.z) {
             walked = next.y;
             next.y += inverse.y;
             cell.y += step_by.y;
-            axis = 1;
         } else {
             walked = next.z;
             next.z += inverse.z;
             cell.z += step_by.z;
-            axis = 2;
         }
     }
     return false;
@@ -148,7 +166,7 @@ void main() {
         if (v_dash < 0.0) {
             if (hidden || behind_own) discard;
         } else if (c.mode == 4) {
-            if (hidden && !through_mass(v_cell / v_depth, 1.0 - v_depth / scene, slope)) discard;
+            if (hidden && !through_mass(v_cell / v_depth, 1.0 - v_depth / scene)) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
                 color.a = max(color.a, 220.0 / 255.0);
