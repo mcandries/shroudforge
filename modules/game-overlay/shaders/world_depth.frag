@@ -13,11 +13,13 @@
 // mode 3: the wire view showing what is hidden: as 2, but an edge hidden by
 // something before the build shows dashed instead of left out.
 // mode 4: the wire view in Remove mode: an edge hidden by the game's surface
-// is dashed when that surface is the one of the mass it lies in: walking
-// from it toward the eye, the cells of `blocks` (removed or not, or the
-// terrain) stay filled up to the game's surface; air before it, something
-// else stands in front (a character, a tree, a block apart) and it is left
-// out (30/10, the user's rule: material, air, material hides).
+// is dashed when that surface is the one of a block: walking from it toward
+// the eye through the cells of `blocks` (removed or not, or the terrain),
+// the game's surface is where a run of filled cells ends; air may be
+// crossed between cells of the build (removed, air, removed: still seen);
+// a kept block after air (a block apart before the build), or the surface
+// lying in the air (a character, a tree), and it is left out (30/10, the
+// user's rules).
 // In the wire view, margins (the game's blocks drawn past their cells) count
 // across the game's surface: seen at a grazing angle, its relief stands that
 // much farther before our faces along the view (30/10: dashes vanishing on
@@ -35,7 +37,8 @@ layout(push_constant) uniform Constants {
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
 // The world's blocks around the build (mode 4): a bit per cell, x fastest,
-// then y, then z.
+// then y, then z, filled (kept or the build's); then as many words, the
+// build's cells alone.
 layout(set = 0, binding = 2, std430) readonly buffer Blocks { uint bits[]; } blocks;
 layout(location = 0) in vec4 v_color;
 layout(location = 1) noperspective in float v_depth;
@@ -58,17 +61,23 @@ float slope_factor(ivec2 p, float far) {
     float t = min(length(vec2(gx, gy) * c.depth_scale) * c.focal / far, 8.0);
     return sqrt(1.0 + t * t);
 }
+bool bit_at(uint index) {
+    return (blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u;
+}
 // Whether the game's surface, `surface_at` of the way from `from` (in cells)
-// to the eye, is the one of the mass `from` lies in: the cells stay filled
-// up to it, or it lies no farther than the relief (eye.w, across the face
-// the walk leaves by: `slope` when it starts in the air) past where they
-// end. Out of the grid: air.
+// to the eye, is the one of a block seen through: walking the grid, it lies
+// in a filled cell, or no farther than the relief (eye.w, across the face
+// the walk left by: `slope` when it starts in the air) past where a run of
+// them ends. Air may be crossed only toward cells of the build. Out of the
+// grid: air.
 bool through_mass(vec3 from, float surface_at, float slope) {
     vec3 to = c.eye.xyz - from;
     float length_to = length(to);
     if (length_to < 1e-4) return false;
     vec3 dir = to / length_to;
     float surface = surface_at * length_to;
+    uint total = uint(c.size.x * c.size.y * c.size.z);
+    uint build_from = ((total + 31u) / 32u) * 32u;
     // A hair toward the eye: off the cell boundary the edge lies on.
     vec3 p = from + dir * 0.01;
     ivec3 cell = ivec3(floor(p));
@@ -78,18 +87,27 @@ bool through_mass(vec3 from, float surface_at, float slope) {
     next = mix(vec3(1e30), next, notEqual(step_by, ivec3(0)));
     float walked = 0.0;
     int axis = -1;
+    bool was_filled = true;  // the edge itself lies on the build
+    bool crossed_air = false;
     for (int i = 0; i < 768; ++i) {
         bool inside = all(greaterThanEqual(cell, ivec3(0))) && all(lessThan(cell, c.size.xyz));
-        bool filled = false;
-        if (inside) {
-            uint index = uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x);
-            filled = (blocks.bits[index >> 5u] & (1u << (index & 31u))) != 0u;
+        uint index = inside ? uint((cell.z * c.size.y + cell.y) * c.size.x + cell.x) : 0u;
+        bool filled = inside && bit_at(index);
+        if (filled) {
+            // A block apart, after the air: it stands before the build.
+            if (crossed_air && !bit_at(build_from + index)) return false;
+            if (walked >= surface) return true;
+        } else {
+            if (was_filled) {
+                // A run of blocks ends here: the surface is its own.
+                float along = axis < 0 ? slope : 1.0 / max(abs(dir[axis]), 0.1);
+                if (surface <= walked + c.eye.w * along) return true;
+                crossed_air = true;
+            }
+            // The surface in the air: a character, a tree, an object.
+            if (walked >= surface || !inside) return false;
         }
-        if (!filled) {
-            float along = axis < 0 ? slope : 1.0 / max(abs(dir[axis]), 0.1);
-            return surface <= walked + c.eye.w * along;
-        }
-        if (walked >= surface) return true;
+        was_filled = filled;
         if (next.x < next.y && next.x < next.z) {
             walked = next.x;
             next.x += inverse.x;
@@ -107,7 +125,7 @@ bool through_mass(vec3 from, float surface_at, float slope) {
             axis = 2;
         }
     }
-    return true;
+    return false;
 }
 void main() {
     if (c.mode == 1) {
