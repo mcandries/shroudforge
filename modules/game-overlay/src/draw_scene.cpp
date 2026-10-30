@@ -815,6 +815,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (gpu && item.world_own_solids) gpu->solid = true;
     if (gpu && wire_style) gpu->wire = true;
     if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
+    if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
     // Remove mode: what hides an edge is told by the world's blocks around.
     if (gpu && wire_style && item.world_hide_hidden && item.world_hidden_dashed && item.world_solids && !gpu->blocks) {
         gpu->blocks = item.world_solids;
@@ -989,7 +990,8 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             IM_COL32(0, 0, 0, static_cast<int>(item.world_cells_edge_opacity * 255.0f + 0.5f)));
         // A hidden part shown dashed: its edges in its color, nearly opaque,
         // whatever the edge opacity (none in the solid style).
-        const ImU32 dashed_edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 220));
+        const int dash_alpha = item.world_dash_opacity >= 0.0f ? static_cast<int>(item.world_dash_opacity * 255.0f + 0.5f) : 220;
+        const ImU32 dashed_edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, dash_alpha));
         const std::uint8_t face_edges = item.world_cells_smooth ? face.creases : std::uint8_t{0xF};
         // A piece of the face, u0..u1 x v0..v1 of its sides: its corners in
         // camera space, cut at the near plane; its edges only those on the
@@ -1129,7 +1131,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 float ca[3], cb[3];
                 in_blocks(wa, da, ca);
                 in_blocks(wb, db, cb);
-                const float fade = entry.back ? item.world_back_edges : 1.0f;
+                // A crease turned away: dashed at back_edges (its own opacity).
+                const float fade = !entry.back ? 1.0f
+                    : gpu->dash_alpha > 0.0 ? static_cast<float>(item.world_back_edges / gpu->dash_alpha) : 0.0f;
                 gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
                 gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
                 gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
