@@ -178,6 +178,9 @@ struct Item {
     // World: how far behind the game's surface its cells still show (meters),
     // against the game's depth; negative: as game-depth.on says.
     float world_depth_margin = -1.0f;
+    // World: the game's near distance for its depth (meters); 0: the GPU
+    // camera matrix's; negative: as game-depth.on says.
+    float world_depth_near = -1.0f;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

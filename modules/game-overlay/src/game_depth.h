@@ -45,7 +45,7 @@ SceneDepth scene_depth(VkExtent2D screen);
 // the game's surface (meters) a world cell still shows.
 enum class CameraMode { Gpu, Copy, Present };
 struct Settings {
-    double near_distance = 0.01;  // the GPU camera's, when found
+    double near_distance = 0.01;  // unless a world item asks for the GPU matrix's (depth_near)
     // The game's blocks jut out of their cells (relief, bevels): cells drawn
     // on them, to remove or replace, or built next to them, show that far
     // behind the game's surface.
