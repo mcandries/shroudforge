@@ -45,6 +45,7 @@ struct WorldDepthDraw {
     // Wire: how far before our nearest face something hides an edge entirely (meters).
     double own_tolerance = 0.3;
     double focal_pixels = 0.0;  // screen pixels per unit of tan, vertically
+    double dash_alpha = 220.0 / 255.0;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     // The wire view in Remove mode (hidden_dashed): an edge hidden by these
     // blocks of the world dashed, by anything else left out; the eye in
     // their cells.
