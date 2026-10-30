@@ -33,6 +33,7 @@ layout(push_constant) uniform Constants {
     float focal;  // screen pixels per unit of tan, vertically
     vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
+    float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
@@ -170,7 +171,7 @@ void main() {
             if (hidden && !through_mass(v_cell / v_depth, 1.0 - v_depth / scene)) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
-                color.a = max(color.a, 220.0 / 255.0);
+                color.a = c.dash_alpha;
             }
         } else {
             // What hides it stands before the build: nothing of it shows
@@ -179,7 +180,7 @@ void main() {
             if (c.mode == 2 && hidden && 1.0 / front - 1.0 / scene > c.own_tolerance * slope) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
-                color.a = max(color.a, 220.0 / 255.0);
+                color.a = c.dash_alpha;
             }
         }
         out_color = vec4(color.rgb, color.a * v_fade);
@@ -187,7 +188,7 @@ void main() {
     }
     if (hidden) {
         if (v_dash < 0.0 || fract(v_dash) >= 0.6) discard;
-        color.a = max(color.a, 220.0 / 255.0);
+        color.a = c.dash_alpha;
     }
     out_color = vec4(color.rgb, color.a * v_fade);
 }

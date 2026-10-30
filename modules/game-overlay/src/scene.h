@@ -201,10 +201,13 @@ struct Item {
     // stone built over in wood, the stone's cells farther).
     bool world_face_offsets_largest = false;
     // World, the wire view: the creases between two faces turned away from
-    // the eye drawn too, this opaque against the others (cells.back_edges, 0
-    // to 1; 0: not drawn). 30/10: a crease seen from one side vanished from
+    // the eye drawn too, dashed, this opaque (cells.back_edges, 0 to 1; 0:
+    // not drawn). 30/10: a crease seen from one side vanished from
     // the other, the build hard to read.
     float world_back_edges = 0.0f;
+    // World: a hidden edge's dashes this opaque (cells.dash_opacity, 0 to 1;
+    // negative: 220 / 255, nearly opaque, as before 31/10).
+    float world_dash_opacity = -1.0f;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

@@ -11,6 +11,7 @@ layout(push_constant) uniform Constants {
     float focal;  // screen pixels per unit of tan, vertically
     vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
+    float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
 } c;
 layout(location = 0) in vec2 position;
 layout(location = 1) in float depth;

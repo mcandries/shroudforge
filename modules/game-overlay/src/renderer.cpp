@@ -141,6 +141,7 @@ struct WorldDepthConstants {
     float focal;          // screen pixels per unit of tan, vertically (the wire view's slopes)
     float eye[4];         // mode 4: the eye in cells of the blocks' grid; [3] the relief's tolerance, in cells
     int32_t size[4];      // mode 4: the grid's size in cells
+    float dash_alpha;     // a hidden edge's dashes, this opaque
 };
 
 }  // namespace
@@ -1252,6 +1253,7 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     // wall); nearer, it is the build's own block.
     constants.own_tolerance = static_cast<float>(r.world_draw.own_tolerance / r.world_draw.near_distance);
     constants.focal = static_cast<float>(r.world_draw.focal_pixels);
+    constants.dash_alpha = static_cast<float>(r.world_draw.dash_alpha);
     if (const auto& blocks = r.world_draw.blocks) {
         for (int i = 0; i < 3; ++i) constants.eye[i] = static_cast<float>(r.world_draw.blocks_eye[i]);
         constants.eye[3] = static_cast<float>(r.world_draw.blocks_relief / blocks->cell);
@@ -1465,6 +1467,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.blocks.reset();
     r.world_draw.blocks_build.clear();
     r.world_draw.blocks_relief = 0.0;
+    r.world_draw.dash_alpha = 220.0 / 255.0;
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
     // camera draws.
