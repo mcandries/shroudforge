@@ -15,6 +15,14 @@ pub(crate) enum ChunkCells {
     Uniform(i32),
 }
 
+/// A value as read with `density_min`: a terrain cell (density in the high
+/// byte, material in the low one) less dense than it reads as empty. The
+/// ground's top cells are in part filled, from 1 to 254 (probe of 30/10):
+/// those under half show nothing; a building block has density 0.
+pub(crate) fn with_density(value: i32, density_min: i32) -> i32 {
+    if value >= 256 && (value >> 8) < density_min { 0 } else { value }
+}
+
 /// The value of a cell in `chunks`, -1 when its chunk was not read.
 pub(crate) fn chunk_value(chunks: &HashMap<[i32; 3], ChunkCells>, x: i32, y: i32, z: i32) -> i32 {
     let key = [x.div_euclid(CHUNK), y.div_euclid(CHUNK), z.div_euclid(CHUNK)];
@@ -60,6 +68,8 @@ pub(crate) struct ViewInput {
     /// Surface view: terrain only as a skin `depth` cells deep, and near the plan.
     pub surface: bool,
     pub depth: i32,
+    /// Terrain cells less dense read as empty (with_density); 1: any.
+    pub density_min: i32,
 }
 
 /// The characters of the view's categories (preview.CELL).
@@ -215,7 +225,7 @@ fn read_values(input: &ViewInput, size: [usize; 3]) -> Vec<i32> {
     for z in input.lo[2]..=input.hi[2] {
         for y in input.lo[1]..=input.hi[1] {
             for x in input.lo[0]..=input.hi[0] {
-                values.push(chunk_value(&input.chunks, x, y, z));
+                values.push(with_density(chunk_value(&input.chunks, x, y, z), input.density_min));
             }
         }
     }
@@ -286,7 +296,22 @@ mod tests {
             roofs: HashSet::new(),
             surface: false,
             depth: 3,
+            density_min: 1,
         }
+    }
+
+    #[test]
+    fn terrain_less_dense_than_density_min_reads_as_empty() {
+        assert_eq!(with_density(0x4B01, 128), 0, "the ground's top, in part filled");
+        assert_eq!(with_density(0x8001, 128), 0x8001, "half filled");
+        assert_eq!(with_density(0xFF01, 128), 0xFF01, "terrain");
+        assert_eq!(with_density(0x009B, 128), 0x009B, "a building block, density 0");
+        assert_eq!(with_density(0x4B01, 1), 0x4B01, "1: any");
+        assert_eq!(with_density(-1, 128), -1, "not read");
+        let mut view = input([0, 0, 0], [1, 0, 0]);
+        view.chunks.insert([0, 0, 0], packed(|x, _, _| if x == 0 { 0x4B01 } else { 0xFF01 }));
+        view.density_min = 128;
+        assert_eq!(build_voxel_view(&view).1, ".%");
     }
 
     fn packed(value_at: impl Fn(i32, i32, i32) -> u16) -> ChunkCells {
