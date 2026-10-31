@@ -68,8 +68,9 @@ struct WorldQuad {
     double corners[4][3]{};
     ImU32 color = IM_COL32(255, 255, 255, 96);
 };
-// Filled cells of the world (`solids` of a world item): the world items
-// behind them, seen from the camera, are drawn lighter. The corner of the
+// Filled cells of the world (`solids` of a world item): the path's lines and
+// quads behind them, seen from the camera, are drawn lighter; the wire view
+// walks them to tell what hides an edge (`bits`). The corner of the
 // first cell and the cell side in meters; 1 in `filled` for a filled cell,
 // x fastest, then y, then z.
 // A texture of the build drawn solid (a world item's cells.texture): BC7
