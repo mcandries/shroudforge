@@ -16,6 +16,7 @@
 #include "game_depth.h"
 #include "gpu_camera.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -311,10 +312,13 @@ VKAPI_ATTR void VKAPI_CALL CmdEndRenderingKHR(VkCommandBuffer buffer) {
     end_rendering(buffer);
 }
 
+// game-depth.on's light_probe, read before taking depth_mutex.
+std::atomic<bool> light_probe_on{false};
+
 void submitted(VkCommandBuffer buffer) {
     // Called under depth_mutex.
     // The scene's light, in any command buffer (the deferred lighting's own).
-    if (copy.has_camera) gpu::light_submitted(buffer, copy.camera.position);
+    if (copy.has_camera && light_probe_on) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
     if (found == recordings.end() || !found->second.copied) return;
     copy.submitted_at = presents;
@@ -328,6 +332,7 @@ void submitted(VkCommandBuffer buffer) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+    light_probe_on = settings().light_probe;
     {
         std::lock_guard lock(depth_mutex);
         for (uint32_t i = 0; i < count; ++i)
@@ -337,6 +342,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const 
 }
 
 void submitted2(uint32_t count, const VkSubmitInfo2* submits) {
+    light_probe_on = settings().light_probe;
     std::lock_guard lock(depth_mutex);
     for (uint32_t i = 0; i < count; ++i)
         for (uint32_t j = 0; j < submits[i].commandBufferInfoCount; ++j)
@@ -554,6 +560,7 @@ Settings settings() {
         const double value = std::atof(word.c_str() + equals + 1);
         if (name == "near" && value > 0.0) read.near_distance = value;
         if (name == "margin" && value >= 0.0) read.margin = value;
+        if (name == "light_probe") read.light_probe = value > 0.0;
         if (name == "camera") {
             const std::string mode = word.substr(equals + 1);
             read.camera = mode == "present" ? CameraMode::Present : mode == "copy" ? CameraMode::Copy : CameraMode::Gpu;
@@ -561,8 +568,8 @@ Settings settings() {
     }
     current = read;
     static const char* const kModes[] = {"the scene's, from the GPU", "read with the copy", "read at the present"};
-    log_line("game depth: near %.4g m, margin %.3g m, camera %s (unless a world item says)", current.near_distance,
-        current.margin, kModes[static_cast<int>(current.camera)]);
+    log_line("game depth: near %.4g m, margin %.3g m, camera %s (unless a world item says), light probe %s",
+        current.near_distance, current.margin, kModes[static_cast<int>(current.camera)], current.light_probe ? "on" : "off");
     return current;
 }
 
