@@ -600,9 +600,6 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture") &&
             value["cells"]["texture"].is_object())
             parse_world_texture(item, value["cells"]["texture"]);
-        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_glow") &&
-            value["cells"]["texture_glow"].is_number())
-            item.world_glow = std::clamp(value["cells"]["texture_glow"].get<float>(), 0.0f, 2.0f);
         if (value.contains("under_interface") && value["under_interface"].is_boolean())
             item.world_under_interface = value["under_interface"].get<bool>();
         if (value.contains("hud_blur") && value["hud_blur"].is_boolean())

@@ -227,7 +227,6 @@ struct WorldDepthConstants {
     // GLSL lays a vec4 on 16 bytes: tiling at 80 (31/10: once at 72, the top
     // and bottom read a tiling of 0, one texel spread over the face).
     float tiling[4];      // the solid style's textures: repeats a meter of the sides, top and bottom
-    float glow;           // the solid style's glow (cells.texture_glow)
 };
 static_assert(offsetof(WorldDepthConstants, tiling) == 80, "as the shaders' push constants");
 
@@ -2109,7 +2108,6 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     for (int i = 0; i < 3; ++i)
         if (r.world_draw.textured && r.world_draw.textures[i].data) normal_faces |= 1 << i;
     constants.normal_faces = static_cast<float>(normal_faces);
-    constants.glow = r.world_draw.glow;
     // The solid style textured: the eye in meters from the texture origin.
     if (r.world_draw.textured)
         for (int i = 0; i < 3; ++i) constants.eye[i] = static_cast<float>(r.world_draw.texture_eye[i]);
@@ -2350,7 +2348,6 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.dash_alpha = 220.0 / 255.0;
     r.world_draw.back_alpha = -1.0;
     r.world_draw.textured = false;
-    r.world_draw.glow = 1.0f;
     r.world_draw.relief = 1.0f;
     r.world_draw.textures = {};
     // The game's interface layer of the image shown, if it went there: it
