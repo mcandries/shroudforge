@@ -893,6 +893,10 @@ SceneSnapshot snapshot_scene() {
     SceneSnapshot snapshot;
     std::lock_guard lock(scene_mutex);
     snapshot.options = options;
+    // None shown, as scene_has_visible_zones says: the present path also
+    // runs without zones with the game's depth (31/10: the zones showed in
+    // the pause menu, where the mods pause too and cannot hide theirs).
+    if (!options.enabled || hidden || options.opacity <= 0.0f || (options.hide_in_menus && menu_open)) return snapshot;
     for (auto& [key, zone] : zones) {
         if (zone->visible) snapshot.zones.push_back(zone);
     }
