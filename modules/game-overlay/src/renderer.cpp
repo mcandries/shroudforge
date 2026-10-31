@@ -165,8 +165,12 @@ struct WorldDepthConstants {
     int32_t size[4];      // mode 4: the grid's size in cells
     float dash_alpha;     // a hidden edge's dashes, this opaque
     float back_alpha;     // the wire view: those behind the build's own faces
+    // GLSL lays a vec4 on 16 bytes: tiling at 80, not 72 (31/10: the top and
+    // bottom read a tiling of 0, one texel spread over the face).
+    float pad[2];
     float tiling[4];      // the solid style's textures: repeats a meter of the sides, top and bottom
 };
+static_assert(offsetof(WorldDepthConstants, tiling) == 80, "as the shaders' push constants");
 
 }  // namespace
 
