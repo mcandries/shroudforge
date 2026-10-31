@@ -175,9 +175,10 @@ struct WorldDepthConstants {
     int32_t size[4];      // mode 4: the grid's size in cells
     float dash_alpha;     // a hidden edge's dashes, this opaque
     float back_alpha;     // the wire view: those behind the build's own faces
-    // GLSL lays a vec4 on 16 bytes: tiling at 80, not 72 (31/10: the top and
-    // bottom read a tiling of 0, one texel spread over the face).
-    float pad[2];
+    float normal_y;       // the normal maps' green: 1 as stored, -1 the other way
+    float normal_faces;   // which faces have a normal map: 1 sides, 2 top, 4 bottom
+    // GLSL lays a vec4 on 16 bytes: tiling at 80 (31/10: once at 72, the top
+    // and bottom read a tiling of 0, one texel spread over the face).
     float tiling[4];      // the solid style's textures: repeats a meter of the sides, top and bottom
 };
 static_assert(offsetof(WorldDepthConstants, tiling) == 80, "as the shaders' push constants");
@@ -915,12 +916,12 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     const VkRenderPass pass = w.pass;
     // The game's depth, ours (the wire view), the world's blocks (its Remove
     // mode) and the solid style's textures (sides, top, bottom, then their
-    // ambient occlusion).
+    // ambient occlusion, then their normal maps).
     VkDescriptorSetLayoutBinding bindings[6] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-        {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9, VK_SHADER_STAGE_FRAGMENT_BIT},
         // The light view: the G-buffer's color and the image shown, smaller.
         {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
@@ -1063,7 +1064,7 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     light_info.maxLod = 8.0f;
     light_info.addressModeU = light_info.addressModeV = light_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (d.fn.CreateSampler(d.device, &light_info, nullptr, &w.light_sampler) != VK_SUCCESS) return false;
-    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10 * kFrames},
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13 * kFrames},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrames}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = kFrames;
@@ -1123,7 +1124,7 @@ bool ensure_buffer(DeviceData& d, VkBuffer& buffer, VkDeviceMemory& memory, void
 }
 
 // A texture made from `bytes` (levels from width x height down, in
-// `format`: BC7, BC4 or 1 x 1 RGBA), its staging buffer filled; copied later.
+// `format`: BC7, BC1, BC4, BC5 or 1 x 1 RGBA), its staging buffer filled; copied later.
 bool make_texture(DeviceData& d, WorldTextureGpu& t, VkFormat format, uint32_t width, uint32_t height, uint32_t levels,
         const void* bytes, VkDeviceSize size) {
     t.format = format;
@@ -1179,7 +1180,8 @@ void copy_texture(DeviceData& d, Renderer& r, VkCommandBuffer cb, WorldTextureGp
     std::vector<VkBufferImageCopy> copies;
     VkDeviceSize offset = 0;
     const bool rgba = t.format == VK_FORMAT_R8G8B8A8_UNORM;
-    const VkDeviceSize block = t.format == VK_FORMAT_BC4_UNORM_BLOCK ? 8 : 16;
+    const VkDeviceSize block =
+        t.format == VK_FORMAT_BC4_UNORM_BLOCK || t.format == VK_FORMAT_BC1_RGBA_UNORM_BLOCK ? 8 : 16;
     for (uint32_t level = 0; level < t.levels; ++level) {
         const uint32_t w = std::max(1u, t.width >> level), h = std::max(1u, t.height >> level);
         VkBufferImageCopy copy{};
@@ -1202,7 +1204,7 @@ void copy_texture(DeviceData& d, Renderer& r, VkCommandBuffer cb, WorldTextureGp
 }
 
 // The view of a solid-style texture for this frame: made and copied the
-// first time its data is seen (BC7 or BC4, as the game stores it: an UNORM view,
+// first time its data is seen (BC7, BC1, BC4 or BC5, as the game stores it: an UNORM view,
 // its values as stored, as the overlay's colors are), a white one otherwise.
 VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const WorldTexture* texture) {
     WorldDepthPipeline& w = r.world;
@@ -1217,10 +1219,14 @@ VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const W
     if (!texture || !texture->data) return w.white.view;
     WorldTextureGpu& t = w.textures[texture->data.get()];
     if (!t.image) {
-        const size_t bytes = bc7_bytes(texture->width, texture->height, texture->levels, texture->bc4);
+        const size_t bytes =
+            bc7_bytes(texture->width, texture->height, texture->levels, half_blocks(texture->format));
         t.data = texture->data;
-        if (!make_texture(d, t, texture->bc4 ? VK_FORMAT_BC4_UNORM_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK,
-                static_cast<uint32_t>(texture->width),
+        const VkFormat format = texture->format == TextureFormat::bc1 ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK
+            : texture->format == TextureFormat::bc4                   ? VK_FORMAT_BC4_UNORM_BLOCK
+            : texture->format == TextureFormat::bc5                   ? VK_FORMAT_BC5_UNORM_BLOCK
+                                                                      : VK_FORMAT_BC7_UNORM_BLOCK;
+        if (!make_texture(d, t, format, static_cast<uint32_t>(texture->width),
                 static_cast<uint32_t>(texture->height), static_cast<uint32_t>(texture->levels), texture->data->data(),
                 bytes)) {
             log_line("world textures: a texture of %dx%d not made", texture->width, texture->height);
@@ -1228,8 +1234,9 @@ VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const W
             w.textures.erase(texture->data.get());
             return w.white.view;
         }
+        static const char* kNames[4] = {"BC7", "BC1", "BC4", "BC5"};
         log_line("world textures: %dx%d %s, %d levels (%zu bytes) made", texture->width, texture->height,
-            texture->bc4 ? "BC4" : "BC7", texture->levels, bytes);
+            kNames[static_cast<int>(texture->format)], texture->levels, bytes);
     }
     if (!t.copied) copy_texture(d, r, cb, t);
     t.used_frame = r.next_frame;
@@ -1420,8 +1427,8 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     d.fn.UpdateDescriptorSets(d.device, 1, &blocks_write, 0, nullptr);
     // The solid style's textures (or white), made and copied as needed.
     tidy_textures(d, r);
-    VkDescriptorImageInfo texture_infos[6];
-    for (int i = 0; i < 6; ++i) {
+    VkDescriptorImageInfo texture_infos[9];
+    for (int i = 0; i < 9; ++i) {
         const VkImageView view_of = texture_view(d, r, cb, draw.textured ? &draw.textures[i] : nullptr);
         if (!view_of) return false;
         texture_infos[i] = {w.texture_sampler, view_of, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -1429,7 +1436,7 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     VkWriteDescriptorSet textures_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     textures_write.dstSet = w.sets[slot];
     textures_write.dstBinding = 3;
-    textures_write.descriptorCount = 6;
+    textures_write.descriptorCount = 9;
     textures_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textures_write.pImageInfo = texture_infos;
     d.fn.UpdateDescriptorSets(d.device, 1, &textures_write, 0, nullptr);
@@ -1594,6 +1601,11 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.back_alpha =
         static_cast<float>(r.world_draw.back_alpha >= 0.0 ? r.world_draw.back_alpha : r.world_draw.dash_alpha);
     for (int i = 0; i < 3; ++i) constants.tiling[i] = r.world_draw.textures[i].tiling;
+    constants.normal_y = r.world_draw.normal_flip ? -1.0f : 1.0f;
+    int normal_faces = 0;
+    for (int i = 0; i < 3; ++i)
+        if (r.world_draw.textured && r.world_draw.textures[6 + i].data) normal_faces |= 1 << i;
+    constants.normal_faces = static_cast<float>(normal_faces);
     // w: the light view on (its two images bound).
     constants.tiling[3] = r.world.light_ready ? 1.0f : 0.0f;
     if (const auto& blocks = r.world_draw.blocks) {
@@ -1814,6 +1826,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.back_alpha = -1.0;
     r.world_draw.textured = false;
     r.world_draw.texture_light = false;
+    r.world_draw.normal_flip = false;
     r.world_draw.textures = {};
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
