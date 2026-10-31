@@ -673,7 +673,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     if (textured && !gpu->textured) {
         gpu->textures = item.world_textures;
         gpu->textured = true;
-        gpu->texture_light = item.world_texture_light;
+        gpu->glow = item.world_glow;
         gpu->relief = item.world_relief;
         for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
     }

@@ -47,12 +47,6 @@ struct SceneDepth {
     bool has_camera = false;
     // The scene's camera as the game handed it to the GPU, when found.
     gpu::Camera gpu_camera;
-    // The light view: the color of the game's surfaces without light (its
-    // G-buffer), made smaller (R8G8B8A8_UNORM, SHADER_READ_ONLY_OPTIMAL),
-    // when a copy was submitted since the last present or the one before.
-    VkImage albedo{};
-    VkExtent2D albedo_extent{};
-    int albedo_id = 0;
 };
 SceneDepth scene_depth(VkExtent2D screen);
 

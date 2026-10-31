@@ -159,8 +159,8 @@ struct WorldDepthPipeline {
     std::map<const std::string*, WorldTextureGpu> textures;
     WorldTextureGpu white;
     VkSampler texture_sampler{};
-    // The light view: the image shown, made smaller before the overlay draws,
-    // and a view of the game's G-buffer color made smaller (game_depth.cpp).
+    // The image shown, made smaller before the overlay draws: the scene's
+    // brightness for the solid style.
     ScreenCopy screen_small;
     // The HUD's blurred scene: the image shown with the world items, made
     // smaller after they are drawn (fill_hud_blur).
@@ -188,8 +188,7 @@ struct WorldDepthPipeline {
     VkImageView hud_target_view{};
     VkFramebuffer hud_target_framebuffer{};
     bool screen_copied = false;  // this frame
-    bool light_ready = false;    // this frame: both images, and an item asking
-    std::unordered_map<int, VkImageView> albedo_views;  // by the copy's number
+    bool scene_ready = false;    // this frame: the copy bound for the solid style
     VkSampler light_sampler{};
     // Under the game's interface: the pass laying the interface layer
     // (game_depth.cpp) back over the world items, before the zones.
@@ -232,7 +231,8 @@ struct WorldDepthConstants {
     float normal_faces;   // which faces have a normal map: 1 sides, 2 top, 4 bottom
     // GLSL lays a vec4 on 16 bytes: tiling at 80 (31/10: once at 72, the top
     // and bottom read a tiling of 0, one texel spread over the face).
-    float tiling[4];      // the solid style's textures: repeats a meter of the sides, top and bottom
+    float tiling[4];      // the solid style's textures: repeats a meter of the sides, top and bottom; [3] the scene's brightness readable
+    float glow;           // the solid style's glow (cells.texture_glow)
 };
 static_assert(offsetof(WorldDepthConstants, tiling) == 80, "as the shaders' push constants");
 
@@ -863,7 +863,6 @@ void release_world(DeviceData& d, Renderer& r) {
         if (copy->image) d.fn.DestroyImage(d.device, copy->image, nullptr);
         if (copy->memory) d.fn.FreeMemory(d.device, copy->memory, nullptr);
     }
-    for (auto& [id, view] : w.albedo_views) d.fn.DestroyImageView(d.device, view, nullptr);
     if (w.light_sampler) d.fn.DestroySampler(d.device, w.light_sampler, nullptr);
     if (w.interface_pipeline) d.fn.DestroyPipeline(d.device, w.interface_pipeline, nullptr);
     if (w.interface_layout) d.fn.DestroyPipelineLayout(d.device, w.interface_layout, nullptr);
@@ -992,17 +991,16 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     // The game's depth, ours (the wire view), the world's blocks (its Remove
     // mode) and the solid style's textures (sides, top, bottom, then their
     // ambient occlusion, then their normal maps).
-    VkDescriptorSetLayoutBinding bindings[6] = {
+    VkDescriptorSetLayoutBinding bindings[5] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9, VK_SHADER_STAGE_FRAGMENT_BIT},
-        // The light view: the G-buffer's color and the image shown, smaller.
-        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+        // The image shown, smaller: the scene's brightness.
         {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
     };
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    set_info.bindingCount = 6;
+    set_info.bindingCount = 5;
     set_info.pBindings = bindings;
     if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.set_layout) != VK_SUCCESS) return false;
     VkPushConstantRange constants{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1139,7 +1137,7 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     light_info.maxLod = 8.0f;
     light_info.addressModeU = light_info.addressModeV = light_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (d.fn.CreateSampler(d.device, &light_info, nullptr, &w.light_sampler) != VK_SUCCESS) return false;
-    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13 * kFrames},
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12 * kFrames},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrames}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = kFrames;
@@ -1664,10 +1662,11 @@ bool shrink_screen(DeviceData& d, VkCommandBuffer cb, VkImage shown, VkExtent2D 
     return true;
 }
 
-// The light view: the image shown before the overlay draws (the scene alone
-// when the game's interface went to its layer), left for the shaders.
+// The scene's brightness: the image shown before the overlay draws (the
+// scene alone when the game's interface went to its layer), left for the
+// shaders.
 bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent) {
-    return shrink_screen(d, cb, shown, extent, r.world.screen_small, "light view");
+    return shrink_screen(d, cb, shown, extent, r.world.screen_small, "scene brightness");
 }
 
 // The HUD blur's targets: our image between its two passes, and a
@@ -1875,21 +1874,6 @@ void lay_interface(const ImDrawList*, const ImDrawCmd* command) {
     w.interface_laid = true;
 }
 
-// A view of the game's G-buffer color copy (game_depth.cpp), by its number.
-VkImageView albedo_view(DeviceData& d, Renderer& r, const depth::SceneDepth& scene) {
-    if (!scene.albedo) return VK_NULL_HANDLE;
-    VkImageView& view = r.world.albedo_views[scene.albedo_id];
-    if (!view) {
-        VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        info.image = scene.albedo;
-        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, depth::kLightLevels, 0, 1};
-        if (d.fn.CreateImageView(d.device, &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
-    }
-    return view;
-}
-
 // Staging buffers of textures copied frames ago freed; textures no item holds
 // any more, and unused for a few frames, released.
 void tidy_textures(DeviceData& d, Renderer& r) {
@@ -1992,23 +1976,17 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     textures_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textures_write.pImageInfo = texture_infos;
     d.fn.UpdateDescriptorSets(d.device, 1, &textures_write, 0, nullptr);
-    // The light view's two images (white where there are none: unlit).
-    const VkImageView albedo_of = albedo_view(d, r, scene);
-    w.light_ready = draw.texture_light && albedo_of && w.screen_copied;
-    VkDescriptorImageInfo light_infos[2] = {
-        {w.light_sampler, w.light_ready ? albedo_of : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {w.light_sampler, w.light_ready ? w.screen_small.view : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-    };
-    VkWriteDescriptorSet light_writes[2]{};
-    for (int i = 0; i < 2; ++i) {
-        light_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        light_writes[i].dstSet = w.sets[slot];
-        light_writes[i].dstBinding = 4 + i;
-        light_writes[i].descriptorCount = 1;
-        light_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        light_writes[i].pImageInfo = &light_infos[i];
-    }
-    d.fn.UpdateDescriptorSets(d.device, 2, light_writes, 0, nullptr);
+    // The image shown, smaller (white where there is none: a day's brightness).
+    w.scene_ready = draw.textured && w.screen_copied;
+    VkDescriptorImageInfo scene_info{w.light_sampler, w.scene_ready ? w.screen_small.view : w.white.view,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet scene_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    scene_write.dstSet = w.sets[slot];
+    scene_write.dstBinding = 5;
+    scene_write.descriptorCount = 1;
+    scene_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    scene_write.pImageInfo = &scene_info;
+    d.fn.UpdateDescriptorSets(d.device, 1, &scene_write, 0, nullptr);
     VkImageView& view = w.views[scene.id];
     if (!view) {
         VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -2156,8 +2134,9 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     for (int i = 0; i < 3; ++i)
         if (r.world_draw.textured && r.world_draw.textures[6 + i].data) normal_faces |= 1 << i;
     constants.normal_faces = static_cast<float>(normal_faces);
-    // w: the light view on (its two images bound).
-    constants.tiling[3] = r.world.light_ready ? 1.0f : 0.0f;
+    // w: the scene's brightness readable (its image bound).
+    constants.tiling[3] = r.world.scene_ready ? 1.0f : 0.0f;
+    constants.glow = r.world_draw.glow;
     if (const auto& blocks = r.world_draw.blocks) {
         for (int i = 0; i < 3; ++i) constants.eye[i] = static_cast<float>(r.world_draw.blocks_eye[i]);
         constants.eye[3] = static_cast<float>(r.world_draw.blocks_relief / blocks->cell);
@@ -2395,7 +2374,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.dash_alpha = 220.0 / 255.0;
     r.world_draw.back_alpha = -1.0;
     r.world_draw.textured = false;
-    r.world_draw.texture_light = false;
+    r.world_draw.glow = 1.0f;
     r.world_draw.relief = 1.0f;
     r.world_draw.textures = {};
     // The game's interface layer of the image shown, if it went there: it
@@ -2484,9 +2463,10 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     d.fn.BeginCommandBuffer(cb, &begin);
     if (picture && r.next_frame % 6 == 0) record_depth(d, r, cb, slot, scene_depth);
     VkFramebuffer world_framebuffer{};
-    // The light view: the image shown before the overlay draws on it (the
-    // scene alone when the game's interface went to its layer).
-    r.world.screen_copied = world_ready && r.world_draw.texture_light && target->copyable && scene_depth.albedo &&
+    // The scene's brightness for the solid style: the image shown before the
+    // overlay draws on it (the scene alone when the game's interface went to
+    // its layer).
+    r.world.screen_copied = world_ready && r.world_draw.textured && target->copyable &&
         copy_screen(d, r, cb, shown_image, target->extent);
     r.world.interface_ready = layer.image && prepare_interface_layer(d, r, cb, slot, layer);
     const bool world_drawn = world_ready && world_target(d, r, target->extent, target->views[image_index], world_framebuffer) &&
