@@ -518,8 +518,8 @@ bool read_enabled() {
 }  // namespace
 
 bool enabled() {
-    // Not with the game depth: both would take the same functions.
-    static const bool on = is_game_process() && read_enabled() && !depth::enabled();
+    // The game depth is then off: both would take the same functions.
+    static const bool on = is_game_process() && read_enabled();
     return on;
 }
 

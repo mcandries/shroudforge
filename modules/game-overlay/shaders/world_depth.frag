@@ -1,6 +1,6 @@
 #version 450
 // mode 0: a fragment behind the game's surface (its distance more than
-// `margin`, plus `extra` on an edge, past the game's) is left out; on an edge
+// `extra`, its face offset or an edge's 5 cm, past the game's) is left out; on an edge
 // to dash (`dash` >= 0, counted in dash periods along it), it shows as a dash
 // instead, nearly opaque.
 // mode 1: the depth pass of the wire view (our faces' nearest depth only).
@@ -15,8 +15,6 @@
 // hidden by the world alone `dash_alpha`: told by what hides it, not by
 // which way its faces turn (31/10: an edge changed as the eye crossed the
 // plane of a face, and edges inside the build showed as in front).
-// mode 3: the wire view showing what is hidden: as 2, but an edge hidden by
-// something before the build shows dashed instead of left out.
 // mode 4: the wire view in Remove mode: an edge hidden by the game's surface
 // is dashed when that surface is the one of a block: walking from it toward
 // the eye through the cells of `blocks` (removed or not, or the terrain),
@@ -32,9 +30,9 @@
 layout(push_constant) uniform Constants {
     vec2 to_clip;
     vec2 depth_scale;
-    float margin;
+    float pad;
     int mode;
-    float own_tolerance;  // in units of 1 / depth, as margin
+    float own_tolerance;  // in units of 1 / depth
     float focal;  // screen pixels per unit of tan, vertically
     vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
     ivec4 size;   // mode 4: the grid's size in cells
@@ -269,13 +267,13 @@ void main() {
     ivec2 texel = ivec2(gl_FragCoord.xy * c.depth_scale);
     float scene = texelFetch(game_depth, texel, 0).r;
     // Reversed depth: 1 / depth goes as the distance; nothing drawn there is 0.
-    bool hidden = scene > 0.0 && 1.0 / v_depth - 1.0 / scene > c.margin + v_extra;
+    bool hidden = scene > 0.0 && 1.0 / v_depth - 1.0 / scene > v_extra;
     vec4 color = v_color;
     if (c.mode >= 2) {
         float slope = 1.0;
         if (hidden) {
             slope = slope_factor(texel, 1.0 / scene);
-            hidden = 1.0 / v_depth - 1.0 / scene > (c.margin + v_extra) * slope;
+            hidden = 1.0 / v_depth - 1.0 / scene > v_extra * slope;
         }
         float own = texelFetch(own_depth, ivec2(gl_FragCoord.xy), 0).r;
         bool behind_own = own > 0.0 && v_depth < own * 0.9999;
@@ -289,10 +287,9 @@ void main() {
                 color.a = dashes_alpha;
             }
         } else {
-            // What hides it stands before the build: nothing of it shows
-            // (shown dashed in mode 3).
+            // What hides it stands before the build: nothing of it shows.
             float front = own > 0.0 ? own : v_depth;
-            if (c.mode == 2 && hidden && 1.0 / front - 1.0 / scene > c.own_tolerance * slope) discard;
+            if (hidden && 1.0 / front - 1.0 / scene > c.own_tolerance * slope) discard;
             if (hidden || behind_own) {
                 if (fract(v_dash) >= 0.6) discard;
                 color.a = dashes_alpha;

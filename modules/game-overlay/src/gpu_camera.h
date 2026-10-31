@@ -1,5 +1,5 @@
 // gpu_camera.cpp: the camera the game renders its scene with, read where it
-// hands it to the GPU (with game-depth.on), for world items to be drawn with
+// hands it to the GPU, for world items to be drawn with
 // the very camera of the image. Fed by game_depth.cpp's hooks.
 #pragma once
 
@@ -17,21 +17,6 @@ struct Camera {
     double block_eye[3]{};   // the 3 floats after it in the block (not quite the centre)
     bool valid = false;
 };
-
-// The scene's sun and light factors (keen::RenderForwardConstants or
-// keen::DeferredLightingConstants of the game's reflection: the same
-// ForwardDirectionalLightData and RenderLightFactors in both).
-struct Light {
-    float direction[3]{};  // toward the sun, or from it (to be seen)
-    float color[3]{};
-    float sun = 0.0f, point_lights = 0.0f, gi = 0.0f, emissive = 0.0f, exposure = 0.0f, exposure_correction = 0.0f;
-    bool valid = false;
-};
-// The last one read, if found.
-bool light(Light& out);
-// A command buffer submitted, any: the scene's light looked for in it (the
-// eye: the input camera's last).
-void light_submitted(VkCommandBuffer buffer, const double input_eye[3]);
 
 void buffer_created(VkBuffer buffer, VkDeviceSize size);
 void buffer_destroyed(VkBuffer buffer);
