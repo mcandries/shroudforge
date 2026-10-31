@@ -166,6 +166,22 @@ struct WorldDepthPipeline {
     // smaller after they are drawn (fill_hud_blur).
     ScreenCopy hud_small;
     bool hud_blur_said = false;
+    // Its Gaussian blur (fill_hud_blur): across into `hud_temp`, then down
+    // into the layer's image (game_depth.cpp), both the game's blur's size.
+    VkRenderPass hud_blur_pass{};
+    VkDescriptorSetLayout hud_blur_set_layout{};
+    VkPipelineLayout hud_blur_layout{};
+    VkPipeline hud_blur_pipeline{};
+    VkDescriptorPool hud_blur_pool{};
+    VkDescriptorSet hud_blur_sets[kFrames * 2]{};
+    VkImage hud_temp{};
+    VkDeviceMemory hud_temp_memory{};
+    VkImageView hud_temp_view{};
+    VkFramebuffer hud_temp_framebuffer{};
+    VkExtent2D hud_temp_extent{};
+    VkImage hud_target{};  // the layer's image the framebuffer below draws into
+    VkImageView hud_target_view{};
+    VkFramebuffer hud_target_framebuffer{};
     bool screen_copied = false;  // this frame
     bool light_ready = false;    // this frame: both images, and an item asking
     std::unordered_map<int, VkImageView> albedo_views;  // by the copy's number
@@ -817,6 +833,17 @@ void release_world(DeviceData& d, Renderer& r) {
     for (auto& [data, texture] : w.textures) release_texture(d, texture);
     release_texture(d, w.white);
     if (w.texture_sampler) d.fn.DestroySampler(d.device, w.texture_sampler, nullptr);
+    if (w.hud_temp_framebuffer) d.fn.DestroyFramebuffer(d.device, w.hud_temp_framebuffer, nullptr);
+    if (w.hud_temp_view) d.fn.DestroyImageView(d.device, w.hud_temp_view, nullptr);
+    if (w.hud_temp) d.fn.DestroyImage(d.device, w.hud_temp, nullptr);
+    if (w.hud_temp_memory) d.fn.FreeMemory(d.device, w.hud_temp_memory, nullptr);
+    if (w.hud_target_framebuffer) d.fn.DestroyFramebuffer(d.device, w.hud_target_framebuffer, nullptr);
+    if (w.hud_target_view) d.fn.DestroyImageView(d.device, w.hud_target_view, nullptr);
+    if (w.hud_blur_pipeline) d.fn.DestroyPipeline(d.device, w.hud_blur_pipeline, nullptr);
+    if (w.hud_blur_layout) d.fn.DestroyPipelineLayout(d.device, w.hud_blur_layout, nullptr);
+    if (w.hud_blur_set_layout) d.fn.DestroyDescriptorSetLayout(d.device, w.hud_blur_set_layout, nullptr);
+    if (w.hud_blur_pool) d.fn.DestroyDescriptorPool(d.device, w.hud_blur_pool, nullptr);
+    if (w.hud_blur_pass) d.fn.DestroyRenderPass(d.device, w.hud_blur_pass, nullptr);
     for (ScreenCopy* copy : {&w.screen_small, &w.hud_small}) {
         if (copy->view) d.fn.DestroyImageView(d.device, copy->view, nullptr);
         if (copy->image) d.fn.DestroyImage(d.device, copy->image, nullptr);
@@ -940,6 +967,7 @@ VkRenderPass depth_only_pass(DeviceData& d) {
 }
 
 bool create_interface_layer(DeviceData& d, Renderer& r);
+bool create_hud_blur(DeviceData& d, Renderer& r);
 
 bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     WorldDepthPipeline& w = r.world;
@@ -1114,6 +1142,7 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     log_line("game depth: world pipeline ready");
     // Under the interface: without it, the world items are drawn over it, as before.
     if (!create_interface_layer(d, r)) log_line("interface layer: no pipeline, the world items drawn over the interface");
+    if (!create_hud_blur(d, r)) log_line("HUD blur: no pipeline, the game's blur left alone");
     return true;
 }
 
@@ -1216,6 +1245,138 @@ bool create_interface_layer(DeviceData& d, Renderer& r) {
         // Without its sets the layer cannot be laid: never asked for.
         d.fn.DestroyPipeline(d.device, w.interface_pipeline, nullptr);
         w.interface_pipeline = VK_NULL_HANDLE;
+    }
+    return sets;
+}
+
+// The HUD blur's pass and pipeline (R8G8B8A8_UNORM, the game's blur's format):
+// a triangle over the target, one direction of a Gaussian blur.
+bool create_hud_blur(DeviceData& d, Renderer& r) {
+    WorldDepthPipeline& w = r.world;
+    VkAttachmentDescription attachment{};
+    attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkAttachmentReference color{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color;
+    // After what wrote its source and last read its target (the game's copy
+    // in an earlier submission); before the next pass or the game's copy.
+    VkSubpassDependency dependencies[2]{};
+    dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[0].dstSubpass = 0;
+    dependencies[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    dependencies[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].srcSubpass = 0;
+    dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencies[1].dstStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    VkRenderPassCreateInfo pass_info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    pass_info.attachmentCount = 1;
+    pass_info.pAttachments = &attachment;
+    pass_info.subpassCount = 1;
+    pass_info.pSubpasses = &subpass;
+    pass_info.dependencyCount = 2;
+    pass_info.pDependencies = dependencies;
+    if (d.fn.CreateRenderPass(d.device, &pass_info, nullptr, &w.hud_blur_pass) != VK_SUCCESS) return false;
+    VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = 1;
+    set_info.pBindings = &binding;
+    if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.hud_blur_set_layout) != VK_SUCCESS) return false;
+    VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 6 * sizeof(float)};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &w.hud_blur_set_layout;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push;
+    if (d.fn.CreatePipelineLayout(d.device, &layout_info, nullptr, &w.hud_blur_layout) != VK_SUCCESS) return false;
+    VkShaderModule vert = shader_module(d, kInterfaceLayerVert, sizeof(kInterfaceLayerVert));
+    VkShaderModule frag = shader_module(d, kHudBlurFrag, sizeof(kHudBlurFrag));
+    if (!vert || !frag) {
+        if (vert) d.fn.DestroyShaderModule(d.device, vert, nullptr);
+        if (frag) d.fn.DestroyShaderModule(d.device, frag, nullptr);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+        VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend_state{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend_state.attachmentCount = 1;
+    blend_state.pAttachments = &blend;
+    VkPipelineDepthStencilStateCreateInfo no_depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    const VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+    VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend_state;
+    pipeline_info.pDepthStencilState = &no_depth;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = w.hud_blur_layout;
+    pipeline_info.renderPass = w.hud_blur_pass;
+    const VkResult made =
+        d.fn.CreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &w.hud_blur_pipeline);
+    d.fn.DestroyShaderModule(d.device, vert, nullptr);
+    d.fn.DestroyShaderModule(d.device, frag, nullptr);
+    if (made != VK_SUCCESS) {
+        w.hud_blur_pipeline = VK_NULL_HANDLE;
+        return false;
+    }
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kFrames * 2};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.maxSets = kFrames * 2;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    VkDescriptorSetLayout layouts[kFrames * 2];
+    for (auto& layout : layouts) layout = w.hud_blur_set_layout;
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorSetCount = kFrames * 2;
+    allocate.pSetLayouts = layouts;
+    const bool sets = d.fn.CreateDescriptorPool(d.device, &pool_info, nullptr, &w.hud_blur_pool) == VK_SUCCESS &&
+        (allocate.descriptorPool = w.hud_blur_pool,
+            d.fn.AllocateDescriptorSets(d.device, &allocate, w.hud_blur_sets) == VK_SUCCESS);
+    if (!sets) {
+        d.fn.DestroyPipeline(d.device, w.hud_blur_pipeline, nullptr);
+        w.hud_blur_pipeline = VK_NULL_HANDLE;
     }
     return sets;
 }
@@ -1471,59 +1632,136 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
     return shrink_screen(d, cb, shown, extent, r.world.screen_small, "light view");
 }
 
+// The HUD blur's targets: our image between its two passes, and a
+// framebuffer on the layer's image (made again when either changes); false
+// when they cannot be.
+bool hud_blur_targets(DeviceData& d, Renderer& r, const depth::HudBlur& target) {
+    WorldDepthPipeline& w = r.world;
+    if (!w.hud_temp || w.hud_temp_extent.width != target.extent.width ||
+            w.hud_temp_extent.height != target.extent.height) {
+        if (w.hud_temp_framebuffer) d.fn.DestroyFramebuffer(d.device, w.hud_temp_framebuffer, nullptr);
+        if (w.hud_temp_view) d.fn.DestroyImageView(d.device, w.hud_temp_view, nullptr);
+        if (w.hud_temp) d.fn.DestroyImage(d.device, w.hud_temp, nullptr);
+        if (w.hud_temp_memory) d.fn.FreeMemory(d.device, w.hud_temp_memory, nullptr);
+        w.hud_temp_framebuffer = VK_NULL_HANDLE;
+        w.hud_temp_view = VK_NULL_HANDLE;
+        w.hud_temp = VK_NULL_HANDLE;
+        w.hud_temp_memory = VK_NULL_HANDLE;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        info.extent = {target.extent.width, target.extent.height, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (d.fn.CreateImage(d.device, &info, nullptr, &w.hud_temp) != VK_SUCCESS) return false;
+        VkMemoryRequirements requirements{};
+        d.fn.GetImageMemoryRequirements(d.device, w.hud_temp, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (allocate.memoryTypeIndex == UINT32_MAX ||
+            d.fn.AllocateMemory(d.device, &allocate, nullptr, &w.hud_temp_memory) != VK_SUCCESS ||
+            d.fn.BindImageMemory(d.device, w.hud_temp, w.hud_temp_memory, 0) != VK_SUCCESS)
+            return false;
+        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = w.hud_temp;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.hud_temp_view) != VK_SUCCESS) return false;
+        VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        framebuffer_info.renderPass = w.hud_blur_pass;
+        framebuffer_info.attachmentCount = 1;
+        framebuffer_info.pAttachments = &w.hud_temp_view;
+        framebuffer_info.width = target.extent.width;
+        framebuffer_info.height = target.extent.height;
+        framebuffer_info.layers = 1;
+        if (d.fn.CreateFramebuffer(d.device, &framebuffer_info, nullptr, &w.hud_temp_framebuffer) != VK_SUCCESS)
+            return false;
+        w.hud_temp_extent = target.extent;
+    }
+    if (w.hud_target != target.image || !w.hud_target_framebuffer) {
+        if (w.hud_target_framebuffer) d.fn.DestroyFramebuffer(d.device, w.hud_target_framebuffer, nullptr);
+        if (w.hud_target_view) d.fn.DestroyImageView(d.device, w.hud_target_view, nullptr);
+        w.hud_target_framebuffer = VK_NULL_HANDLE;
+        w.hud_target_view = VK_NULL_HANDLE;
+        w.hud_target = target.image;
+        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = target.image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.hud_target_view) != VK_SUCCESS) return false;
+        VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        framebuffer_info.renderPass = w.hud_blur_pass;
+        framebuffer_info.attachmentCount = 1;
+        framebuffer_info.pAttachments = &w.hud_target_view;
+        framebuffer_info.width = target.extent.width;
+        framebuffer_info.height = target.extent.height;
+        framebuffer_info.layers = 1;
+        if (d.fn.CreateFramebuffer(d.device, &framebuffer_info, nullptr, &w.hud_target_framebuffer) != VK_SUCCESS)
+            return false;
+    }
+    return true;
+}
+
 // The HUD's blurred scene (game_depth.cpp, hud_blur_target): the image shown
 // with the world items (the game's interface in its layer: the scene and the
-// build alone) made a quarter of its size, its levels down to 1/32, the 1/8
-// one (the game's blur's size) blitted over `target` (31/10: the 1/16 one
-// stretched was much blurrier than the game's); left in
+// build alone) made a quarter of its size, then blurred at the game's blur's
+// size as the game does (a Gaussian, sigma 1.25 of its texels, 31/10
+// capture), across into our image, down into the layer's; left in
 // SHADER_READ_ONLY_OPTIMAL, for the game's next frame.
-bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent,
+constexpr float kHudBlurSigma = 1.25f;
+
+bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, VkImage shown, VkExtent2D extent,
         const depth::HudBlur& target) {
     WorldDepthPipeline& w = r.world;
-    if (!target.image || !shrink_screen(d, cb, shown, extent, w.hud_small, "HUD blur")) return false;
-    constexpr uint32_t kLevel = 1;  // 1/8 of the screen
-    const VkExtent2D from{std::max(1u, w.hud_small.extent.width >> kLevel),
-        std::max(1u, w.hud_small.extent.height >> kLevel)};
-    VkImageMemoryBarrier before[2]{};
-    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    before[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    before[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    before[0].image = w.hud_small.image;
-    before[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, kLevel, 1, 0, 1};
-    // Ours: its last content, copied in an earlier frame, not needed.
-    before[1].srcAccessMask = 0;
-    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    before[1].image = target.image;
-    before[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    for (auto& barrier : before) barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-        nullptr, 2, before);
-    VkImageBlit blit{};
-    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, kLevel, 0, 1};
-    blit.srcOffsets[1] = {static_cast<int32_t>(from.width), static_cast<int32_t>(from.height), 1};
-    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    blit.dstOffsets[1] = {static_cast<int32_t>(target.extent.width), static_cast<int32_t>(target.extent.height), 1};
-    d.fn.CmdBlitImage(cb, w.hud_small.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-    VkImageMemoryBarrier after[2] = {before[0], before[1]};
-    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    after[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-        nullptr, 2, after);
+    if (!target.image || !w.hud_blur_pipeline || !hud_blur_targets(d, r, target) ||
+            !shrink_screen(d, cb, shown, extent, w.hud_small, "HUD blur"))
+        return false;
+    // Across: the quarter-size image read between its texels; down: the first pass.
+    const VkImageView sources[2] = {w.hud_small.view, w.hud_temp_view};
+    const VkFramebuffer targets[2] = {w.hud_temp_framebuffer, w.hud_target_framebuffer};
+    VkDescriptorImageInfo infos[2] = {
+        {w.light_sampler, sources[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {w.light_sampler, sources[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+    };
+    VkWriteDescriptorSet writes[2]{};
+    for (int i = 0; i < 2; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = w.hud_blur_sets[slot * 2 + i];
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &infos[i];
+    }
+    d.fn.UpdateDescriptorSets(d.device, 2, writes, 0, nullptr);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(target.extent.width),
+        static_cast<float>(target.extent.height), 0.0f, 1.0f};
+    const VkRect2D area{{0, 0}, target.extent};
+    for (int i = 0; i < 2; ++i) {
+        VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        begin.renderPass = w.hud_blur_pass;
+        begin.framebuffer = targets[i];
+        begin.renderArea = area;
+        d.fn.CmdBeginRenderPass(cb, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.hud_blur_pipeline);
+        d.fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.hud_blur_layout, 0, 1,
+            &w.hud_blur_sets[slot * 2 + i], 0, nullptr);
+        const float constants[6] = {1.0f / target.extent.width, 1.0f / target.extent.height, i == 0 ? 1.0f : 0.0f,
+            i == 0 ? 0.0f : 1.0f, 0.0f, kHudBlurSigma};
+        d.fn.CmdPushConstants(cb, w.hud_blur_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof constants, constants);
+        d.fn.CmdSetViewport(cb, 0, 1, &viewport);
+        d.fn.CmdSetScissor(cb, 0, 1, &area);
+        d.fn.CmdDraw(cb, 3, 1, 0, 0);
+        d.fn.CmdEndRenderPass(cb);
+    }
     if (!w.hud_blur_said) {
         w.hud_blur_said = true;
-        log_line("HUD blur: the scene with the world items blurred into %ux%u for the game's next frame",
-            target.extent.width, target.extent.height);
+        log_line("HUD blur: the scene with the world items blurred into %ux%u for the game's next frame (sigma %.2f)",
+            target.extent.width, target.extent.height, kHudBlurSigma);
     }
     return true;
 }
@@ -2106,6 +2344,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.texture_light = false;
     r.world_draw.relief = 1.0f;
     r.world_draw.under_interface = true;
+    r.world_draw.hud_blur = true;
     r.world_draw.textures = {};
     // The game's interface layer of the image shown, if it went there: it
     // must be laid back at this present.
@@ -2239,9 +2478,9 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         // The HUD's blurred scene with the build in it, for the game's next
         // frame: only from the scene alone (its interface in its layer), in a
         // format the game's blur shares.
-        hud_blur = r.world.interface_ready && target->copyable &&
+        hud_blur = r.world_draw.hud_blur && r.world.interface_ready && target->copyable &&
             (target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM) &&
-            fill_hud_blur(d, r, cb, shown_image, target->extent, depth::hud_blur_target());
+            fill_hud_blur(d, r, cb, slot, shown_image, target->extent, depth::hud_blur_target());
     }
     if (r.offscreen_used) {
         ImDrawData data;

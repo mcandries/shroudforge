@@ -237,6 +237,8 @@ struct Item {
     float world_relief = 1.0f;
     // cells.under_interface (true by default): drawn under the game's interface.
     bool world_under_interface = true;
+    // cells.hud_blur (true by default): the build in the HUD's blurred scene.
+    bool world_hud_blur = true;
     bool world_textured = false;
     // World: textures kept on the GPU though not drawn (cells.texture_keep,
     // the data of the mod's cached materials): drawn again, not made again.
