@@ -57,6 +57,10 @@ layout(location = 5) flat in float v_fade;
 layout(location = 6) flat in float v_tex;
 // The solid style's textures: sides, top, bottom (the game's BC7 levels).
 layout(set = 0, binding = 3) uniform sampler2D textures[3];
+// The light view (c.tiling.w on): the color of the game's surfaces without
+// light (its G-buffer) and the image shown, both a quarter of the screen.
+layout(set = 0, binding = 4) uniform sampler2D albedo_small;
+layout(set = 0, binding = 5) uniform sampler2D screen_small;
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -157,6 +161,36 @@ bool through_mass(vec3 from, float surface_at) {
     }
     return false;
 }
+// The light where a pixel of the build stands, lent by the game's surfaces
+// around it: the image shown divided by their color without light, summed
+// over taps in rings around it (the sky, with no depth, and too dark a color
+// left out; a surface far in depth from ours weighs less). White when no
+// tap holds.
+vec3 light_at() {
+    vec2 screen = 2.0 / c.to_clip;
+    vec2 at = gl_FragCoord.xy / screen;
+    float far = 1.0 / v_depth;
+    vec3 shown = vec3(0.0), color = vec3(0.0);
+    const float radii[3] = float[3](0.008, 0.025, 0.06);
+    for (int ring = 0; ring < 3; ++ring) {
+        for (int k = 0; k < 8; ++k) {
+            float angle = (float(k) + 0.5 * float(ring)) * 0.785398;
+            vec2 tap = at + vec2(cos(angle) * screen.y / screen.x, sin(angle)) * radii[ring];
+            if (any(lessThan(tap, vec2(0.0))) || any(greaterThan(tap, vec2(1.0)))) continue;
+            float scene = texelFetch(game_depth, ivec2(tap * screen * c.depth_scale), 0).r;
+            if (scene <= 0.0) continue;
+            vec3 a = texture(albedo_small, tap).rgb;
+            if (max(a.r, max(a.g, a.b)) < 0.03) continue;
+            float gap = abs(1.0 / scene - far) / far;
+            float weight = 1.0 / (1.0 + 8.0 * gap) / (1.0 + float(ring));
+            shown += weight * texture(screen_small, tap).rgb;
+            color += weight * a;
+        }
+    }
+    if (max(color.r, max(color.g, color.b)) < 0.02) return vec3(1.0);
+    return clamp(shown / max(color, vec3(0.02)), vec3(0.0), vec3(4.0));
+}
+
 // A face of the solid style textured as the game draws its material: the
 // texture of its sides, top or bottom, laid along the world's axes at the
 // game's tiling (v_cell: meters from the texture origin, times depth). The
@@ -171,6 +205,7 @@ vec4 textured(vec4 color) {
     vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
     vec3 bottom = texture(textures[2], plane * c.tiling.z).rgb;
     vec3 rgb = kind <= 2 ? side : kind == 3 ? top : bottom;
+    if (c.tiling.w > 0.5) rgb *= light_at();
     return vec4(color.rgb * rgb, color.a);
 }
 void main() {
