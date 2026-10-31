@@ -42,7 +42,7 @@ pub(crate) mod shroudforge {
         mod voxel_chunk_store;
         pub(crate) use create_mod_api::create;
         pub(crate) use dispatch_mod_ui_actions::{dispatch_ui_actions, invoke_mod_action};
-        pub(crate) use reserve_mod_input::register_input_reservations;
+        pub(crate) use reserve_mod_input::{register_input_reservations, release_input_reservations};
         pub(crate) use set_mod_settings::set_settings;
     }
 }
