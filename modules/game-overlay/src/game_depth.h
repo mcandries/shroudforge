@@ -55,6 +55,10 @@ struct Settings {
     // read as the game recorded the scene; `camera=present`, the one read at
     // the present, as without the game's depth.
     CameraMode camera = CameraMode::Gpu;
+    // `light_probe=1`: the probe of the scene's sun and light factors in every
+    // command buffer (gpu::light_submitted); off by default (31/10: not found
+    // in the scene's pass, a lead set aside for the game's own lighting).
+    bool light_probe = false;
 };
 Settings settings();
 // At each present, after the overlay drew: a frame ends.
