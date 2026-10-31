@@ -8,6 +8,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <vector>
+
 namespace overlay {
 struct DeviceData;
 }
@@ -22,6 +24,9 @@ PFN_vkVoidFunction function(const char* requested);
 
 // The swapchain's size: the scene's depth is shaped like it.
 void note_screen(VkExtent2D extent);
+// The swapchain's images: the scene is copied from them before the game
+// draws its interface on them (SceneDepth::scene).
+void note_swapchain(const std::vector<VkImage>& images, VkFormat format);
 // The last copy of the scene's depth (our image, in SHADER_READ_ONLY_OPTIMAL),
 // when one was submitted since the last present or the one before; `image`
 // is null otherwise.
@@ -43,6 +48,14 @@ struct SceneDepth {
     VkImage albedo{};
     VkExtent2D albedo_extent{};
     int albedo_id = 0;
+    // The scene without the game's interface: the swapchain image `scene_of`
+    // copied as the game began its first pass loading it (its interface,
+    // 31/10 capture), in an image of ours (its format, SHADER_READ_ONLY_OPTIMAL),
+    // when submitted since the last present.
+    VkImage scene{};
+    VkImage scene_of{};
+    VkFormat scene_format{};
+    int scene_id = 0;
 };
 SceneDepth scene_depth(VkExtent2D screen);
 

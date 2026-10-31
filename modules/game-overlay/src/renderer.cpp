@@ -160,6 +160,21 @@ struct WorldDepthPipeline {
     bool light_ready = false;    // this frame: both images, and an item asking
     std::unordered_map<int, VkImageView> albedo_views;  // by the copy's number
     VkSampler light_sampler{};
+    // Under the game's interface: the image shown copied before the overlay
+    // draws, the scene's copy (game_depth.cpp) viewed, and the pass putting
+    // the interface back.
+    VkImage shown{};
+    VkDeviceMemory shown_memory{};
+    VkImageView shown_view{};
+    VkExtent2D shown_extent{};
+    VkFormat shown_format{};
+    std::unordered_map<int, VkImageView> scene_views;  // by the copy's number
+    VkDescriptorSetLayout under_set_layout{};
+    VkPipelineLayout under_layout{};
+    VkPipeline under_pipeline{};
+    VkDescriptorPool under_pool{};
+    VkDescriptorSet under_sets[kFrames]{};
+    bool under_said = false;
     std::unordered_map<int, VkImageView> views;  // of the game's depth images, by their number
     bool drawn_logged = false;
 };
@@ -797,6 +812,14 @@ void release_world(DeviceData& d, Renderer& r) {
     if (w.screen_small_memory) d.fn.FreeMemory(d.device, w.screen_small_memory, nullptr);
     for (auto& [id, view] : w.albedo_views) d.fn.DestroyImageView(d.device, view, nullptr);
     if (w.light_sampler) d.fn.DestroySampler(d.device, w.light_sampler, nullptr);
+    if (w.shown_view) d.fn.DestroyImageView(d.device, w.shown_view, nullptr);
+    if (w.shown) d.fn.DestroyImage(d.device, w.shown, nullptr);
+    if (w.shown_memory) d.fn.FreeMemory(d.device, w.shown_memory, nullptr);
+    for (auto& [id, view] : w.scene_views) d.fn.DestroyImageView(d.device, view, nullptr);
+    if (w.under_pipeline) d.fn.DestroyPipeline(d.device, w.under_pipeline, nullptr);
+    if (w.under_layout) d.fn.DestroyPipelineLayout(d.device, w.under_layout, nullptr);
+    if (w.under_set_layout) d.fn.DestroyDescriptorSetLayout(d.device, w.under_set_layout, nullptr);
+    if (w.under_pool) d.fn.DestroyDescriptorPool(d.device, w.under_pool, nullptr);
     if (w.depth_framebuffer) d.fn.DestroyFramebuffer(d.device, w.depth_framebuffer, nullptr);
     if (w.depth_pass) d.fn.DestroyRenderPass(d.device, w.depth_pass, nullptr);
     if (w.depth_pipeline) d.fn.DestroyPipeline(d.device, w.depth_pipeline, nullptr);
@@ -907,6 +930,8 @@ VkRenderPass depth_only_pass(DeviceData& d) {
     VkRenderPass pass{};
     return d.fn.CreateRenderPass(d.device, &info, nullptr, &pass) == VK_SUCCESS ? pass : VK_NULL_HANDLE;
 }
+
+bool create_under_interface(DeviceData& d, Renderer& r);
 
 bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     WorldDepthPipeline& w = r.world;
@@ -1079,7 +1104,96 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     allocate.pSetLayouts = layouts;
     if (d.fn.AllocateDescriptorSets(d.device, &allocate, w.sets) != VK_SUCCESS) return false;
     log_line("game depth: world pipeline ready");
+    // Under the interface: without it, the world items are drawn over it, as before.
+    if (!create_under_interface(d, r)) log_line("under the interface: no pipeline, the world items drawn over it");
     return true;
+}
+
+// The pass putting the game's interface back over the world items: in the
+// zones' pass, before the zones.
+bool create_under_interface(DeviceData& d, Renderer& r) {
+    WorldDepthPipeline& w = r.world;
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+    };
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = 2;
+    set_info.pBindings = bindings;
+    if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.under_set_layout) != VK_SUCCESS) return false;
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &w.under_set_layout;
+    if (d.fn.CreatePipelineLayout(d.device, &layout_info, nullptr, &w.under_layout) != VK_SUCCESS) return false;
+    VkShaderModule vert = shader_module(d, kUnderInterfaceVert, sizeof(kUnderInterfaceVert));
+    VkShaderModule frag = shader_module(d, kUnderInterfaceFrag, sizeof(kUnderInterfaceFrag));
+    if (!vert || !frag) {
+        if (vert) d.fn.DestroyShaderModule(d.device, vert, nullptr);
+        if (frag) d.fn.DestroyShaderModule(d.device, frag, nullptr);
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex_input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+        VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend_state{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    blend_state.attachmentCount = 1;
+    blend_state.pAttachments = &blend;
+    VkPipelineDepthStencilStateCreateInfo no_depth{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    const VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+    VkGraphicsPipelineCreateInfo pipeline_info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &assembly;
+    pipeline_info.pViewportState = &viewport;
+    pipeline_info.pRasterizationState = &raster;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pColorBlendState = &blend_state;
+    pipeline_info.pDepthStencilState = &no_depth;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = w.under_layout;
+    pipeline_info.renderPass = w.zones_pass;
+    const VkResult made =
+        d.fn.CreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &w.under_pipeline);
+    d.fn.DestroyShaderModule(d.device, vert, nullptr);
+    d.fn.DestroyShaderModule(d.device, frag, nullptr);
+    if (made != VK_SUCCESS) return false;
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * kFrames};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.maxSets = kFrames;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    if (d.fn.CreateDescriptorPool(d.device, &pool_info, nullptr, &w.under_pool) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout layouts[kFrames];
+    for (auto& layout : layouts) layout = w.under_set_layout;
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = w.under_pool;
+    allocate.descriptorSetCount = kFrames;
+    allocate.pSetLayouts = layouts;
+    return d.fn.AllocateDescriptorSets(d.device, &allocate, w.under_sets) == VK_SUCCESS;
 }
 
 // The world pipelines for the presented image's format, created once (or
@@ -1246,7 +1360,7 @@ VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const W
 // The light view: the image shown, a quarter of its size, copied before the
 // overlay draws (the swapchain made copyable), left for the shaders; false
 // when it cannot be.
-bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent) {
+bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, bool scene, VkExtent2D extent) {
     WorldDepthPipeline& w = r.world;
     const VkExtent2D small{std::max(1u, extent.width / 4), std::max(1u, extent.height / 4)};
     if (!w.screen_small || w.screen_small_extent.width != small.width || w.screen_small_extent.height != small.height) {
@@ -1287,9 +1401,12 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
     const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageMemoryBarrier before[2]{};
     before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    // The image shown (PRESENT_SRC), or the scene before the interface (ours,
+    // SHADER_READ_ONLY): each put back in its layout.
+    const VkImageLayout layout = scene ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    before[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    before[0].oldLayout = layout;
     before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     before[0].image = shown;
     before[1].srcAccessMask = 0;
@@ -1313,14 +1430,145 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         1, &blit, VK_FILTER_LINEAR);
     VkImageMemoryBarrier after = before[0];
     after.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_SHADER_READ_BIT;
     after.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    after.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
-        nullptr, 0, nullptr, 1, &after);
+    after.newLayout = layout;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+        1, &after);
     // Its smaller levels: the light, smooth.
     depth::make_light_levels(cb, w.screen_small, small, d.fn.CmdPipelineBarrier, d.fn.CmdBlitImage);
     return true;
+}
+
+// Under the interface: the image shown (the game's interface on it) copied
+// whole before the overlay draws, for the interface to be put back; false
+// when it cannot be.
+bool copy_shown(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent, VkFormat format) {
+    WorldDepthPipeline& w = r.world;
+    if (!w.shown || w.shown_extent.width != extent.width || w.shown_extent.height != extent.height ||
+            w.shown_format != format) {
+        if (w.shown_view) d.fn.DestroyImageView(d.device, w.shown_view, nullptr);
+        if (w.shown) d.fn.DestroyImage(d.device, w.shown, nullptr);
+        if (w.shown_memory) d.fn.FreeMemory(d.device, w.shown_memory, nullptr);
+        w.shown = VK_NULL_HANDLE;
+        w.shown_memory = VK_NULL_HANDLE;
+        w.shown_view = VK_NULL_HANDLE;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = format;
+        info.extent = {extent.width, extent.height, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (d.fn.CreateImage(d.device, &info, nullptr, &w.shown) != VK_SUCCESS) return false;
+        VkMemoryRequirements requirements{};
+        d.fn.GetImageMemoryRequirements(d.device, w.shown, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (allocate.memoryTypeIndex == UINT32_MAX ||
+            d.fn.AllocateMemory(d.device, &allocate, nullptr, &w.shown_memory) != VK_SUCCESS ||
+            d.fn.BindImageMemory(d.device, w.shown, w.shown_memory, 0) != VK_SUCCESS)
+            return false;
+        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = w.shown;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = format;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.shown_view) != VK_SUCCESS) return false;
+        w.shown_extent = extent;
+        w.shown_format = format;
+    }
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = shown;
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = w.shown;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = region.srcSubresource;
+    region.extent = {extent.width, extent.height, 1};
+    d.fn.CmdCopyImage(cb, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, w.shown, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+        &region);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+        2, after);
+    return true;
+}
+
+// The slot's set for putting the interface back: the image shown and the
+// scene's copy (a view made once per copy); false without them.
+bool prepare_under_interface(DeviceData& d, Renderer& r, uint32_t slot, const depth::SceneDepth& scene) {
+    WorldDepthPipeline& w = r.world;
+    if (!w.under_pipeline || !w.shown_view || !scene.scene) return false;
+    VkImageView& scene_view = w.scene_views[scene.scene_id];
+    if (!scene_view) {
+        VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        info.image = scene.scene;
+        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        info.format = scene.scene_format;
+        info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &info, nullptr, &scene_view) != VK_SUCCESS) {
+            scene_view = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    VkDescriptorImageInfo infos[2] = {
+        {w.sampler, w.shown_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {w.sampler, scene_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+    };
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = w.under_sets[slot];
+    write.dstBinding = 0;
+    write.descriptorCount = 2;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = infos;
+    d.fn.UpdateDescriptorSets(d.device, 1, &write, 0, nullptr);
+    if (!w.under_said) {
+        w.under_said = true;
+        log_line("under the interface: the world items drawn under the game's interface (scene #%d)", scene.scene_id);
+    }
+    return true;
+}
+
+// The game's interface put back over the world items (in the zones' pass).
+void draw_under_interface(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, VkExtent2D extent) {
+    WorldDepthPipeline& w = r.world;
+    d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.under_pipeline);
+    d.fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.under_layout, 0, 1, &w.under_sets[slot], 0,
+        nullptr);
+    VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, extent};
+    d.fn.CmdSetViewport(cb, 0, 1, &viewport);
+    d.fn.CmdSetScissor(cb, 0, 1, &scissor);
+    d.fn.CmdDraw(cb, 3, 1, 0, 0);
 }
 
 // A view of the game's G-buffer color copy (game_depth.cpp), by its number.
@@ -1826,6 +2074,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.textured = false;
     r.world_draw.texture_light = false;
     r.world_draw.relief = 1.0f;
+    r.world_draw.under_interface = true;
     r.world_draw.textures = {};
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
@@ -1900,11 +2149,20 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     d.fn.BeginCommandBuffer(cb, &begin);
     if (picture && r.next_frame % 6 == 0) record_depth(d, r, cb, slot, scene_depth);
     VkFramebuffer world_framebuffer{};
-    // The light view: the image shown, before the overlay draws on it.
+    // The scene before the game's interface, copied this frame from the image shown.
+    const VkImage shown_image = target->images[image_index];
+    const bool scene_known = world_ready && scene_depth.scene && scene_depth.scene_of == shown_image &&
+        scene_depth.scene_format == target->format;
+    // The light view: the scene without the interface (else the image shown,
+    // before the overlay draws on it).
     r.world.screen_copied = world_ready && r.world_draw.texture_light && target->copyable && scene_depth.albedo &&
-        copy_screen(d, r, cb, target->images[image_index], target->extent);
+        copy_screen(d, r, cb, scene_known ? scene_depth.scene : shown_image, scene_known, target->extent);
     const bool world_drawn = world_ready && world_target(d, r, target->extent, target->views[image_index], world_framebuffer) &&
         prepare_world(d, r, cb, slot, scene_depth);
+    // Under the interface: the image shown copied before the overlay draws on it.
+    const bool under_interface = world_drawn && r.world_draw.under_interface && scene_known && target->copyable &&
+        copy_shown(d, r, cb, shown_image, target->extent, target->format) &&
+        prepare_under_interface(d, r, slot, scene_depth);
     const bool wire = world_drawn && r.world_draw.wire;
     if (wire) {
         // Our faces' nearest depth, sampled by the wire view in the zones' pass.
@@ -1967,6 +2225,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     if (wire)
         draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline,
             r.world_draw.blocks ? 4 : r.world_draw.show_hidden ? 3 : 2, r.world_draw.indices.size());
+    // The game's interface back over the world items, under the zones.
+    if (under_interface) draw_under_interface(d, r, cb, slot, target->extent);
     ImGui_ImplVulkan_RenderDrawData(zones, cb);
     d.fn.CmdEndRenderPass(cb);
     if (world_drawn) finish_world(d, cb, scene_depth);
