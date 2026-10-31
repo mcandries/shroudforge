@@ -29,6 +29,9 @@ struct Light {
 };
 // The last one read, if found.
 bool light(Light& out);
+// A command buffer submitted, any: the scene's light looked for in it (the
+// eye: the input camera's last).
+void light_submitted(VkCommandBuffer buffer, const double input_eye[3]);
 
 void buffer_created(VkBuffer buffer, VkDeviceSize size);
 void buffer_destroyed(VkBuffer buffer);
