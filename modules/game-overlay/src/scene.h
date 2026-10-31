@@ -73,16 +73,18 @@ struct WorldQuad {
 // first cell and the cell side in meters; 1 in `filled` for a filled cell,
 // x fastest, then y, then z.
 // A texture of the build drawn solid (a world item's cells.texture): BC7
-// levels as the game stores them, the largest first, `tiling` repeats a
-// meter (the game's tilingFactor).
+// (or BC4, one channel) levels as the game stores them, the largest first,
+// `tiling` repeats a meter (the game's tilingFactor).
 struct WorldTexture {
     std::shared_ptr<const std::string> data;
     int width = 0, height = 0, levels = 0;
+    bool bc4 = false;
     float tiling = 0.25f;
 };
 
-// Bytes of `levels` BC7 levels from width x height down.
-size_t bc7_bytes(int width, int height, int levels);
+// Bytes of `levels` BC7 levels from width x height down (8 bytes a block
+// instead of 16 for BC4).
+size_t bc7_bytes(int width, int height, int levels, bool bc4 = false);
 
 struct WorldSolids {
     int sx = 0, sy = 0, sz = 0;
@@ -226,7 +228,8 @@ struct Item {
     bool world_through_blocks = false;
     // World, the solid style: its faces textured as the game draws the
     // material, sides, top and bottom (cells.texture).
-    std::array<WorldTexture, 3> world_textures;
+    // Sides, top and bottom, then their ambient occlusion (no data: none).
+    std::array<WorldTexture, 6> world_textures;
     bool world_textured = false;
     // World: textures kept on the GPU though not drawn (cells.texture_keep,
     // the data of the mod's cached materials): drawn again, not made again.

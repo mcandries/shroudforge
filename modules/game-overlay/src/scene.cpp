@@ -145,38 +145,51 @@ bool is_text(const json& value) {
 
 }  // namespace
 
-size_t bc7_bytes(int width, int height, int levels) {
+size_t bc7_bytes(int width, int height, int levels, bool bc4) {
     size_t bytes = 0;
     for (int level = 0; level < levels; ++level) {
         const int w = std::max(1, width >> level), h = std::max(1, height >> level);
-        bytes += static_cast<size_t>((w + 3) / 4) * static_cast<size_t>((h + 3) / 4) * 16;
+        bytes += static_cast<size_t>((w + 3) / 4) * static_cast<size_t>((h + 3) / 4) * (bc4 ? 8 : 16);
     }
     return bytes;
 }
 
 namespace {
 
-// cells.texture = {side, top, bottom}, each {data = BC7 levels (a blob),
-// width, height, levels, tiling}: the faces of the solid style textured.
+// One texture: {data = BC7 or BC4 levels (a blob), width, height, levels,
+// format = "bc7" (default) or "bc4", tiling}.
+void parse_one_texture(const json& face, WorldTexture& out, const std::string& name) {
+    if (!face.contains("data") || !is_text(face["data"]) || !face.contains("width") ||
+        !face["width"].is_number_integer() || !face.contains("height") || !face["height"].is_number_integer() ||
+        !face.contains("levels") || !face["levels"].is_number_integer())
+        fail("world: cells.texture." + name + ": {data, width, height, levels, format, tiling}");
+    out.data = cells_text(face["data"]);
+    out.width = std::clamp(face["width"].get<int>(), 1, 4096);
+    out.height = std::clamp(face["height"].get<int>(), 1, 4096);
+    out.levels = std::clamp(face["levels"].get<int>(), 1, 13);
+    if (face.contains("format") && face["format"].is_string()) {
+        const std::string format = face["format"].get<std::string>();
+        if (format != "bc7" && format != "bc4") fail("world: cells.texture." + name + ".format: bc7 or bc4");
+        out.bc4 = format == "bc4";
+    }
+    if (face.contains("tiling") && face["tiling"].is_number())
+        out.tiling = std::clamp(face["tiling"].get<float>(), 0.001f, 64.0f);
+    if (out.data->size() < bc7_bytes(out.width, out.height, out.levels, out.bc4))
+        fail("world: cells.texture." + name + ": fewer bytes than its levels");
+}
+
+// cells.texture = {side, top, bottom}, each a texture (parse_one_texture)
+// and optionally `ao`, its ambient occlusion (a texture too, its first
+// channel read; laid as the color): the faces of the solid style textured.
 void parse_world_texture(Item& item, const json& texture) {
     static const char* kFaces[3] = {"side", "top", "bottom"};
     for (int i = 0; i < 3; ++i) {
         if (!texture.contains(kFaces[i]) || !texture[kFaces[i]].is_object())
             fail(std::string("world: cells.texture needs side, top and bottom; no ") + kFaces[i]);
         const json& face = texture[kFaces[i]];
-        if (!face.contains("data") || !is_text(face["data"]) || !face.contains("width") ||
-            !face["width"].is_number_integer() || !face.contains("height") || !face["height"].is_number_integer() ||
-            !face.contains("levels") || !face["levels"].is_number_integer())
-            fail(std::string("world: cells.texture.") + kFaces[i] + ": {data, width, height, levels, tiling}");
-        WorldTexture& out = item.world_textures[i];
-        out.data = cells_text(face["data"]);
-        out.width = std::clamp(face["width"].get<int>(), 1, 4096);
-        out.height = std::clamp(face["height"].get<int>(), 1, 4096);
-        out.levels = std::clamp(face["levels"].get<int>(), 1, 13);
-        if (face.contains("tiling") && face["tiling"].is_number())
-            out.tiling = std::clamp(face["tiling"].get<float>(), 0.001f, 64.0f);
-        if (out.data->size() < bc7_bytes(out.width, out.height, out.levels))
-            fail(std::string("world: cells.texture.") + kFaces[i] + ": fewer bytes than its levels");
+        parse_one_texture(face, item.world_textures[i], kFaces[i]);
+        if (face.contains("ao") && face["ao"].is_object())
+            parse_one_texture(face["ao"], item.world_textures[3 + i], std::string(kFaces[i]) + ".ao");
     }
     item.world_textured = true;
 }
