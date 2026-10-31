@@ -345,7 +345,8 @@ struct SceneSnapshot {
     Options options;
 };
 
-// What the present path reads at each frame (cheap: shared pointers).
+// What the present path reads at each frame (cheap: shared pointers): no
+// zone while the overlay is off, hidden, or a game menu open.
 SceneSnapshot snapshot_scene();
 // Whether any zone could be drawn, checked before doing any GPU work.
 bool scene_has_visible_zones();
