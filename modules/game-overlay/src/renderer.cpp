@@ -1473,14 +1473,15 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
 
 // The HUD's blurred scene (game_depth.cpp, hud_blur_target): the image shown
 // with the world items (the game's interface in its layer: the scene and the
-// build alone) made a quarter of its size, its levels down to 1/32, the
-// 1/16 one stretched over `target` (a blur like the game's, 31/10 capture);
-// left in SHADER_READ_ONLY_OPTIMAL, for the game's next frame.
+// build alone) made a quarter of its size, its levels down to 1/32, the 1/8
+// one (the game's blur's size) blitted over `target` (31/10: the 1/16 one
+// stretched was much blurrier than the game's); left in
+// SHADER_READ_ONLY_OPTIMAL, for the game's next frame.
 bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent,
         const depth::HudBlur& target) {
     WorldDepthPipeline& w = r.world;
     if (!target.image || !shrink_screen(d, cb, shown, extent, w.hud_small, "HUD blur")) return false;
-    constexpr uint32_t kLevel = 2;  // 1/16 of the screen
+    constexpr uint32_t kLevel = 1;  // 1/8 of the screen
     const VkExtent2D from{std::max(1u, w.hud_small.extent.width >> kLevel),
         std::max(1u, w.hud_small.extent.height >> kLevel)};
     VkImageMemoryBarrier before[2]{};
