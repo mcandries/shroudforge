@@ -235,10 +235,12 @@ struct Item {
     std::array<WorldTexture, 9> world_textures;
     // cells.texture_relief (0 to 1): how much the normal maps tilt the faces.
     float world_relief = 1.0f;
-    // cells.under_interface (true by default): drawn under the game's interface.
-    bool world_under_interface = true;
-    // cells.hud_blur (true by default): the build in the HUD's blurred scene.
-    bool world_hud_blur = true;
+    // World: `under_interface = true` while the overlay's world items are to
+    // lie under the game's interface (its interface layer, game_depth.cpp),
+    // whatever they hold; `hud_blur = true`, the HUD's blurred backgrounds
+    // made from them too. Off by default: the game draws as usual.
+    bool world_under_interface = false;
+    bool world_hud_blur = false;
     bool world_textured = false;
     // World: textures kept on the GPU though not drawn (cells.texture_keep,
     // the data of the mod's cached materials): drawn again, not made again.
