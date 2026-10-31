@@ -89,6 +89,9 @@ struct DrawResources {
     std::function<bool(LocalCamera&, int mode)> frame_camera;
     // A world item asks for the picture of the game's depth (diagnostic).
     std::function<void()> want_depth_picture;
+    // The zones of world items drawn on the list, the others not yet (the
+    // game's interface laid back between them, renderer.cpp); may be empty.
+    std::function<void(ImDrawList&)> world_drawn;
 };
 
 // Lays out and draws every zone of the snapshot on the draw list.
