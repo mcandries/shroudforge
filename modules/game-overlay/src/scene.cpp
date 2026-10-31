@@ -1039,8 +1039,7 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time", "hide_hidden", "only_in_solids"});
-    // Drawing the world items against the game's depth (game-depth.on).
+    status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time"});
     // Drawing the world items against the game's depth (off only while the render probe runs).
     if (depth::enabled()) status["features"].push_back("game_depth");
     // cells.texture: the solid style textured (BC7 levels, 31/10).
