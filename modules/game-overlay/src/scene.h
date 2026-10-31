@@ -233,8 +233,8 @@ struct Item {
     // Sides, top and bottom, then their ambient occlusion, then their normal
     // maps (no data: none).
     std::array<WorldTexture, 9> world_textures;
-    // cells.texture_normal_flip: the normal maps' green channel read the other way.
-    bool world_normal_flip = false;
+    // cells.texture_relief (0 to 1): how much the normal maps tilt the faces.
+    float world_relief = 1.0f;
     bool world_textured = false;
     // World: textures kept on the GPU though not drawn (cells.texture_keep,
     // the data of the mod's cached materials): drawn again, not made again.

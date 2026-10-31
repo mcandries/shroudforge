@@ -175,7 +175,7 @@ struct WorldDepthConstants {
     int32_t size[4];      // mode 4: the grid's size in cells
     float dash_alpha;     // a hidden edge's dashes, this opaque
     float back_alpha;     // the wire view: those behind the build's own faces
-    float normal_y;       // the normal maps' green: 1 as stored, -1 the other way
+    float relief;         // how much the normal maps tilt the faces (0 to 1)
     float normal_faces;   // which faces have a normal map: 1 sides, 2 top, 4 bottom
     // GLSL lays a vec4 on 16 bytes: tiling at 80 (31/10: once at 72, the top
     // and bottom read a tiling of 0, one texel spread over the face).
@@ -1601,7 +1601,7 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.back_alpha =
         static_cast<float>(r.world_draw.back_alpha >= 0.0 ? r.world_draw.back_alpha : r.world_draw.dash_alpha);
     for (int i = 0; i < 3; ++i) constants.tiling[i] = r.world_draw.textures[i].tiling;
-    constants.normal_y = r.world_draw.normal_flip ? -1.0f : 1.0f;
+    constants.relief = static_cast<float>(r.world_draw.relief);
     int normal_faces = 0;
     for (int i = 0; i < 3; ++i)
         if (r.world_draw.textured && r.world_draw.textures[6 + i].data) normal_faces |= 1 << i;
@@ -1826,7 +1826,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.back_alpha = -1.0;
     r.world_draw.textured = false;
     r.world_draw.texture_light = false;
-    r.world_draw.normal_flip = false;
+    r.world_draw.relief = 1.0f;
     r.world_draw.textures = {};
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever

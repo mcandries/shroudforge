@@ -631,9 +631,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_light") &&
             value["cells"]["texture_light"].is_boolean())
             item.world_texture_light = value["cells"]["texture_light"].get<bool>();
-        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_normal_flip") &&
-            value["cells"]["texture_normal_flip"].is_boolean())
-            item.world_normal_flip = value["cells"]["texture_normal_flip"].get<bool>();
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_relief") &&
+            value["cells"]["texture_relief"].is_number())
+            item.world_relief = std::clamp(value["cells"]["texture_relief"].get<float>(), 0.0f, 1.0f);
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_keep") &&
             value["cells"]["texture_keep"].is_array())
             parse_texture_keep(item, value["cells"]["texture_keep"]);
