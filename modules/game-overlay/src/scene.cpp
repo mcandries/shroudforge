@@ -181,21 +181,16 @@ void parse_one_texture(const json& face, WorldTexture& out, const std::string& n
         fail("world: cells.texture." + name + ": fewer bytes than its levels");
 }
 
-// cells.texture = {side, top, bottom}, each a texture (parse_one_texture)
-// and optionally `ao`, its ambient occlusion (a texture too, its first
-// channel read; laid as the color), and `normal`, its normal map (x and y in
-// its first two channels): the faces of the solid style textured.
+// cells.texture = {side, top, bottom}, each the normal map of those faces
+// of the material (parse_one_texture; x and y in its first two channels):
+// the relief of the solid style (a hologram, as the game draws a build to
+// place).
 void parse_world_texture(Item& item, const json& texture) {
     static const char* kFaces[3] = {"side", "top", "bottom"};
     for (int i = 0; i < 3; ++i) {
         if (!texture.contains(kFaces[i]) || !texture[kFaces[i]].is_object())
             fail(std::string("world: cells.texture needs side, top and bottom; no ") + kFaces[i]);
-        const json& face = texture[kFaces[i]];
-        parse_one_texture(face, item.world_textures[i], kFaces[i]);
-        if (face.contains("ao") && face["ao"].is_object())
-            parse_one_texture(face["ao"], item.world_textures[3 + i], std::string(kFaces[i]) + ".ao");
-        if (face.contains("normal") && face["normal"].is_object())
-            parse_one_texture(face["normal"], item.world_textures[6 + i], std::string(kFaces[i]) + ".normal");
+        parse_one_texture(texture[kFaces[i]], item.world_textures[i], kFaces[i]);
     }
     item.world_textured = true;
 }
