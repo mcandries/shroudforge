@@ -182,8 +182,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapc
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, data.images.data());
     probe::note_swapchain(data.images, info->imageFormat, info->imageExtent);
     depth::note_screen(info->imageExtent);
-    // The scene copied from its images before the game's interface: when copyable.
-    depth::note_swapchain(data.copyable ? data.images : std::vector<VkImage>{}, info->imageFormat);
+    // Its images: the game's interface may be drawn into layers of ours instead.
+    depth::note_swapchain(data.images, info->imageFormat);
     // The zones are drawn in a render pass, as a color attachment.
     const bool attachment = (info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
     data.drawable = attachment && drawable_format(info->imageFormat) && info->imageArrayLayers == 1;
@@ -217,7 +217,16 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
         std::lock_guard render(d->render_mutex);
         done = render_frame(*d, queue, *info);
     }
-    depth::presented();
+    std::vector<VkImage> shown;
+    if (depth::enabled()) {
+        std::lock_guard lock(state_mutex);
+        for (uint32_t i = 0; i < info->swapchainCount; ++i) {
+            auto found = d->swapchains.find(info->pSwapchains[i]);
+            if (found != d->swapchains.end() && info->pImageIndices[i] < found->second.images.size())
+                shown.push_back(found->second.images[info->pImageIndices[i]]);
+        }
+    }
+    depth::presented(shown);
     if (!done) return d->fn.QueuePresentKHR(queue, info);
     VkPresentInfoKHR patched = *info;
     patched.waitSemaphoreCount = 1;

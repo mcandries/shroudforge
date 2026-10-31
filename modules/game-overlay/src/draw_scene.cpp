@@ -1835,13 +1835,15 @@ void draw_scene(ImDrawList& list, const SceneSnapshot& scene, ImVec2 screen, con
         return !zone.items.empty() &&
             std::all_of(zone.items.begin(), zone.items.end(), [](const Item& item) { return item.kind == ItemKind::World; });
     };
-    for (const bool world : {true, false})
+    for (const bool world : {true, false}) {
         for (const auto& zone : scene.zones) {
             if (world_only(*zone) != world) continue;
             const Context c{list, resources, screen.y / zone->reference * scene.options.scale, scene.options.opacity,
                 zone->owner + "/" + zone->id};
             draw_zone(c, *zone, screen);
         }
+        if (world && resources.world_drawn) resources.world_drawn(list);
+    }
 }
 
 }  // namespace overlay

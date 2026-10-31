@@ -1,5 +1,5 @@
 #version 450
-// A triangle over the whole screen (the game's interface put back).
+// A triangle over the whole screen (the game's interface layer laid back).
 
 void main() {
     vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);

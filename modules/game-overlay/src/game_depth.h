@@ -24,8 +24,8 @@ PFN_vkVoidFunction function(const char* requested);
 
 // The swapchain's size: the scene's depth is shaped like it.
 void note_screen(VkExtent2D extent);
-// The swapchain's images: the scene is copied from them before the game
-// draws its interface on them (SceneDepth::scene).
+// The swapchain's images: the game's interface may be drawn into a layer of
+// ours instead of them (want_interface_layer).
 void note_swapchain(const std::vector<VkImage>& images, VkFormat format);
 // The last copy of the scene's depth (our image, in SHADER_READ_ONLY_OPTIMAL),
 // when one was submitted since the last present or the one before; `image`
@@ -48,16 +48,29 @@ struct SceneDepth {
     VkImage albedo{};
     VkExtent2D albedo_extent{};
     int albedo_id = 0;
-    // The scene without the game's interface: the swapchain image `scene_of`
-    // copied as the game began its first pass loading it (its interface,
-    // 31/10 capture), in an image of ours (its format, SHADER_READ_ONLY_OPTIMAL),
-    // when submitted since the last present.
-    VkImage scene{};
-    VkImage scene_of{};
-    VkFormat scene_format{};
-    int scene_id = 0;
 };
 SceneDepth scene_depth(VkExtent2D screen);
+
+// The game's interface layer. While the overlay wants it, the game's passes
+// on a swapchain image, from its first one of the frame loading it (its
+// interface, 31/10 capture: the scene is put there before, by a compute
+// pass), draw into an image of ours instead, cleared to transparent black
+// first: the interface's colors come out premultiplied, its alpha its
+// coverage (the game blends its interface by its alpha, 31/10 capture). The
+// swapchain image keeps the scene alone; the overlay lays the layer back over
+// its world items. `wanted` is read as the game records its passes: the
+// overlay says it after each frame it drew.
+void want_interface_layer(bool wanted);
+struct InterfaceLayer {
+    VkImage image{};
+    VkImageView view{};
+    VkImageLayout layout{};  // the one the game's passes left it in
+    int id = 0;              // the image's number, for the logs
+};
+// The layer drawn for swapchain image `image` and submitted since that image
+// was last presented, or none (`image` null). The overlay must lay it back
+// at this present: the game's interface is not on the image.
+InterfaceLayer take_interface_layer(VkImage image);
 
 // The light view's images: this many levels, each half the one before.
 constexpr uint32_t kLightLevels = 4;
@@ -87,7 +100,8 @@ struct Settings {
     bool light_probe = false;
 };
 Settings settings();
-// At each present, after the overlay drew: a frame ends.
-void presented();
+// At each present, after the overlay drew: a frame ends, `images` shown
+// (their interface layers free for their next frame).
+void presented(const std::vector<VkImage>& images);
 
 }  // namespace overlay::depth
