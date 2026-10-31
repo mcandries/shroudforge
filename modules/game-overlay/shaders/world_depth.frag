@@ -57,8 +57,8 @@ layout(location = 3) flat in float v_extra;
 layout(location = 4) noperspective in vec3 v_cell;
 layout(location = 5) flat in float v_fade;
 layout(location = 6) flat in float v_tex;
-// The solid style's textures: sides, top, bottom (the game's BC7 levels).
-layout(set = 0, binding = 3) uniform sampler2D textures[9];
+// The solid style's normal maps: sides, top, bottom (the game's levels).
+layout(set = 0, binding = 3) uniform sampler2D textures[3];
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -177,10 +177,11 @@ vec3 normal_of(vec4 stored, vec3 face, vec3 along, vec3 down) {
 // the game adds f x 2.5 x (0.752, 1.486, 4.002) as light. On the screen
 // that is (0.188, 0.371, 1) x (0.077 + 2.1 f), linear (three pixels of the
 // capture fitted: the stone's own color hardly shows), the blue at most 1.
-// c.glow scales f (1 as the game's). Laid along the world's axes at the
-// game's tiling (v_cell: meters from the texture origin, times depth). The
-// three normal maps are sampled alike and one kept (indexing them would
-// want the same index for all the draw).
+// c.glow scales f (1 as the game's). The material's color and ambient
+// occlusion are not used (31/10: read before, see the KB). Laid along the
+// world's axes at the game's tiling (v_cell: meters from the texture
+// origin, times depth). The three normal maps are sampled alike and one
+// kept (indexing them would want the same index for all the draw).
 const vec3 HOLO_HUE = vec3(0.188, 0.371, 1.0);
 vec3 to_srgb(vec3 linear) {
     return mix(linear * 12.92, 1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), linear));
@@ -194,9 +195,9 @@ vec4 textured(vec4 color) {
     vec3 face = kind == 1 ? vec3(sign, 0.0, 0.0) : kind == 2 ? vec3(0.0, 0.0, sign)
         : kind == 3 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
     vec3 n = face;
-    vec4 side_n = texture(textures[6], plane * c.tiling.x);
-    vec4 top_n = texture(textures[7], plane * c.tiling.y);
-    vec4 bottom_n = texture(textures[8], plane * c.tiling.z);
+    vec4 side_n = texture(textures[0], plane * c.tiling.x);
+    vec4 top_n = texture(textures[1], plane * c.tiling.y);
+    vec4 bottom_n = texture(textures[2], plane * c.tiling.z);
     int faces = int(c.normal_faces + 0.5);
     int bit = kind <= 2 ? 1 : kind == 3 ? 2 : 4;
     if ((faces & bit) != 0) {

@@ -62,7 +62,7 @@ struct WorldDepthDraw {
     std::vector<BlocksPart> blocks_build;
     // The solid style's textures (sides, top, bottom), from the first item
     // with them; their meters counted from texture_origin (a multiple of 64 m).
-    std::array<WorldTexture, 9> textures;
+    std::array<WorldTexture, 3> textures;  // the normal maps of the sides, top and bottom
     float relief = 1.0f;  // how much the normal maps tilt the faces
     bool textured = false;
     float glow = 1.0f;  // the hologram's glow (cells.texture_glow)
