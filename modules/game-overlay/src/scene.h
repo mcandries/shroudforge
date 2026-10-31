@@ -223,10 +223,6 @@ struct Item {
     // World: textures kept on the GPU though not drawn (cells.texture_keep,
     // the data of the mod's cached materials): drawn again, not made again.
     std::vector<std::shared_ptr<const std::string>> world_texture_keep;
-    // World, the solid style textured (a hologram, as the game draws a build
-    // to place): its glow along the joints of the material, 1 as the game's
-    // (cells.texture_glow, 0 to 2).
-    float world_glow = 1.0f;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;

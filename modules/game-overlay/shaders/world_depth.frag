@@ -42,7 +42,6 @@ layout(push_constant) uniform Constants {
     float relief;      // how much the normal maps tilt the faces (cells.texture_relief)
     float normal_faces;  // which faces have a normal map: 1 sides, 2 top, 4 bottom
     vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
-    float glow;        // the solid style's glow, 1 as the game's (cells.texture_glow)
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
 layout(set = 0, binding = 1) uniform sampler2D own_depth;
@@ -177,7 +176,7 @@ vec3 normal_of(vec4 stored, vec3 face, vec3 along, vec3 down) {
 // the game adds f x 2.5 x (0.752, 1.486, 4.002) as light. On the screen
 // that is (0.188, 0.371, 1) x (0.077 + 2.1 f), linear (three pixels of the
 // capture fitted: the stone's own color hardly shows), the blue at most 1.
-// c.glow scales f (1 as the game's). The material's color and ambient
+// The material's color and ambient
 // occlusion are not used (31/10: read before, see the KB). Laid along the
 // world's axes at the game's tiling (v_cell: meters from the texture
 // origin, times depth). The three normal maps are sampled alike and one
@@ -207,7 +206,7 @@ vec4 textured(vec4 color) {
     }
     vec3 to_eye = normalize(c.eye.xyz - p);
     float m = mix(1.0 - dot(n, face), 1.0 - dot(n, to_eye), clamp(dot(face, to_eye) * 0.5, 0.0, 1.0)) * 0.5;
-    float f = (1.0 - pow(1.0 - clamp(m, 0.0, 1.0), 3.0)) * c.glow;
+    float f = 1.0 - pow(1.0 - clamp(m, 0.0, 1.0), 3.0);
     vec3 linear = HOLO_HUE * clamp(0.077 + 2.1 * f, 0.0, 1.0);
     return vec4(to_srgb(linear), color.a);
 }
