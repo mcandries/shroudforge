@@ -67,7 +67,7 @@ struct WorldDepthDraw {
     // The solid style's textures (sides, top, bottom), from the first item
     // with them; their meters counted from texture_origin (a multiple of 64 m).
     std::array<WorldTexture, 9> textures;
-    bool normal_flip = false;  // the normal maps' green read the other way
+    float relief = 1.0f;  // how much the normal maps tilt the faces
     bool textured = false;
     bool texture_light = false;  // lit by the light view
     double texture_origin[3]{};

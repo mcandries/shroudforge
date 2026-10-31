@@ -13,7 +13,7 @@ layout(push_constant) uniform Constants {
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
-    float normal_y;    // the normal maps' green: 1 as stored, -1 the other way
+    float relief;      // how much the normal maps tilt the faces (cells.texture_relief)
     float normal_faces;  // which faces have a normal map: 1 sides, 2 top, 4 bottom
     vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
 } c;
