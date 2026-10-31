@@ -11,6 +11,11 @@
 // shaped like the screen, at least 30 % of its area): barriers and a copy
 // recorded into the game's command buffer, the game's image put back in its
 // layout. The overlay samples the copy, left in SHADER_READ_ONLY_OPTIMAL.
+//
+// Likewise the scene without the game's interface: the swapchain image is
+// copied before the game's first pass loading it (31/10, capture: its
+// interface; the scene is put on it before, by a compute pass), for the
+// overlay to draw its world items under the interface (renderer.cpp).
 
 #include "overlay.h"
 #include "game_depth.h"
@@ -21,6 +26,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 namespace overlay::depth {
 
@@ -68,6 +74,7 @@ struct FollowedColor {
 
 // The pass being recorded in a command buffer: its depth attachment.
 struct Recording {
+    bool scene_copied = false;    // the scene before the interface copied in this command buffer
     VkImage albedo{};             // the G-buffer's color being written, to copy as the pass ends
     VkImageLayout albedo_layout{};
     bool albedo_copied = false;   // a copy recorded in this command buffer
@@ -87,6 +94,8 @@ std::unordered_map<VkImage, FollowedColor> colors;
 std::unordered_map<VkImageView, VkImage> views;
 std::unordered_map<VkCommandBuffer, Recording> recordings;
 std::unordered_map<VkDeviceMemory, VkDeviceSize> memory_sizes;
+std::unordered_set<VkImage> presentable;  // the swapchain's images
+VkFormat presentable_format{};
 VkExtent2D screen{};  // the swapchain's
 int next_id = 1;
 
@@ -116,6 +125,20 @@ struct AlbedoCopy {
     uint64_t submitted_at = 0;
 };
 AlbedoCopy albedo;
+
+// The scene without the game's interface, copied from the swapchain image.
+struct SceneCopy {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkExtent2D extent{};
+    VkFormat format{};
+    int id = 0;
+    bool failed = false;
+    VkImage of{};                   // the swapchain image copied
+    uint64_t recorded_at = UINT64_MAX;  // the present count when last recorded (once a frame)
+    uint64_t submitted_at = UINT64_MAX;
+};
+SceneCopy scene_copy;
 
 Recording& recording_of(VkCommandBuffer buffer) {
     // Called under depth_mutex.
@@ -314,6 +337,91 @@ void record_albedo(VkCommandBuffer buffer, VkImage source, VkImageLayout layout,
     make_light_levels(buffer, albedo.image, albedo.extent, next.CmdPipelineBarrier, next.CmdBlitImage);
 }
 
+// Our image for the scene before the interface (under depth_mutex).
+bool make_scene_copy(VkExtent2D extent, VkFormat format) {
+    if (scene_copy.image && scene_copy.extent.width == extent.width && scene_copy.extent.height == extent.height &&
+            scene_copy.format == format)
+        return true;
+    if (scene_copy.failed || !device_data || !device_data->instance) return false;
+    DeviceData& d = *device_data;
+    SceneCopy made;
+    made.extent = extent;
+    made.format = format;
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {extent.width, extent.height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkMemoryRequirements requirements{};
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    const bool ok = d.fn.CreateImage(d.device, &info, nullptr, &made.image) == VK_SUCCESS &&
+        (d.fn.GetImageMemoryRequirements(d.device, made.image, &requirements), true) &&
+        (allocate.allocationSize = requirements.size,
+            allocate.memoryTypeIndex = device_local_memory(requirements.memoryTypeBits),
+            allocate.memoryTypeIndex != UINT32_MAX) &&
+        d.fn.AllocateMemory(d.device, &allocate, nullptr, &made.memory) == VK_SUCCESS &&
+        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS;
+    if (!ok) {
+        if (made.image) d.fn.DestroyImage(d.device, made.image, nullptr);
+        if (made.memory) d.fn.FreeMemory(d.device, made.memory, nullptr);
+        scene_copy.failed = true;
+        log_line("under the interface: no image of our own for the scene");
+        return false;
+    }
+    made.id = next_id++;
+    scene_copy = made;
+    log_line("under the interface: the scene copied into #%d %ux%u, before the game's first pass loading the screen",
+        scene_copy.id, extent.width, extent.height);
+    return true;
+}
+
+// The swapchain image copied into ours before the game's pass loading it
+// (`layout`, the one it has for that pass), put back in that layout.
+void record_scene_copy(VkCommandBuffer buffer, VkImage source, VkImageLayout layout) {
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = layout;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = source;
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = scene_copy.image;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = region.srcSubresource;
+    region.extent = {scene_copy.extent.width, scene_copy.extent.height, 1};
+    next.CmdCopyImage(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scene_copy.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = layout;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, after);
+}
+
 // The scene's depth, as the game's pass ends: worth a copy?
 bool scene_shaped(const Followed& image) {
     if (!screen.width || !screen.height || !image.extent.height) return false;
@@ -405,7 +513,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkImageVie
     const VkResult result = next.CreateImageView(device, info, allocator, view);
     if (result != VK_SUCCESS) return result;
     std::lock_guard lock(depth_mutex);
-    if (followed.count(info->image) || colors.count(info->image)) views[*view] = info->image;
+    if (followed.count(info->image) || colors.count(info->image) || presentable.count(info->image))
+        views[*view] = info->image;
     else views.erase(*view);  // a handle given again
     return result;
 }
@@ -426,6 +535,22 @@ void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
         Recording& recording = recording_of(buffer);
         recording.depth = VK_NULL_HANDLE;
         recording.scene = false;
+        // The game's first pass loading a swapchain image in this frame (its
+        // interface): the scene copied before it, outside any pass.
+        if (!(info->flags & VK_RENDERING_RESUMING_BIT) && scene_copy.recorded_at != presents)
+            for (uint32_t i = 0; i < info->colorAttachmentCount; ++i) {
+                const VkRenderingAttachmentInfo& attachment = info->pColorAttachments[i];
+                if (!attachment.imageView || attachment.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
+                auto view = views.find(attachment.imageView);
+                if (view == views.end() || !presentable.count(view->second)) continue;
+                if (screen.width && make_scene_copy(screen, presentable_format)) {
+                    record_scene_copy(buffer, view->second, attachment.imageLayout);
+                    recording.scene_copied = true;
+                    scene_copy.recorded_at = presents;
+                    scene_copy.of = view->second;
+                }
+                break;
+            }
         // The G-buffer: four color attachments or more, the first a
         // screen-shaped R8G8B8A8_UNORM, one an A2B10G10R10 (its normals).
         recording.albedo = VK_NULL_HANDLE;
@@ -521,6 +646,7 @@ void submitted(VkCommandBuffer buffer) {
     if (copy.has_camera && light_probe_on) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
     if (found != recordings.end() && found->second.albedo_copied) albedo.submitted_at = presents;
+    if (found != recordings.end() && found->second.scene_copied) scene_copy.submitted_at = presents;
     if (found == recordings.end() || !found->second.copied) return;
     copy.submitted_at = presents;
     copy.camera = found->second.camera;
@@ -729,6 +855,14 @@ void note_screen(VkExtent2D extent) {
     screen = extent;
 }
 
+void note_swapchain(const std::vector<VkImage>& images, VkFormat format) {
+    if (!enabled()) return;
+    std::lock_guard lock(depth_mutex);
+    presentable.clear();
+    presentable.insert(images.begin(), images.end());
+    presentable_format = format;
+}
+
 SceneDepth scene_depth(VkExtent2D) {
     SceneDepth found;
     if (!enabled()) return found;
@@ -741,6 +875,14 @@ SceneDepth scene_depth(VkExtent2D) {
         found.albedo = albedo.image;
         found.albedo_extent = albedo.extent;
         found.albedo_id = albedo.id;
+    }
+    // This frame's only: an older scene would differ from the image shown
+    // everywhere it moved.
+    if (scene_copy.image && scene_copy.submitted_at == presents) {
+        found.scene = scene_copy.image;
+        found.scene_of = scene_copy.of;
+        found.scene_format = scene_copy.format;
+        found.scene_id = scene_copy.id;
     }
     return found;
 }

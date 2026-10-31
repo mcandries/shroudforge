@@ -8,7 +8,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SHADERS = [("world_depth.vert", "kWorldDepthVert"), ("world_depth.frag", "kWorldDepthFrag")]
+SHADERS = [("world_depth.vert", "kWorldDepthVert"), ("world_depth.frag", "kWorldDepthFrag"),
+           ("under_interface.vert", "kUnderInterfaceVert"), ("under_interface.frag", "kUnderInterfaceFrag")]
 
 
 def glslc():
