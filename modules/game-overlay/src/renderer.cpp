@@ -169,9 +169,14 @@ struct WorldDepthPipeline {
     // Its Gaussian blur (fill_hud_blur): across into `hud_temp`, then down
     // into the layer's image (game_depth.cpp), both the game's blur's size.
     VkRenderPass hud_blur_pass{};
+    // The pass down mixed with our last blur (the game's keeps some of its
+    // last too): our image loaded, a pipeline blending by a constant.
+    VkRenderPass hud_blend_pass{};
     VkDescriptorSetLayout hud_blur_set_layout{};
     VkPipelineLayout hud_blur_layout{};
     VkPipeline hud_blur_pipeline{};
+    VkPipeline hud_blend_pipeline{};
+    bool hud_history = false;  // the layer's image holds our last blur
     VkDescriptorPool hud_blur_pool{};
     VkDescriptorSet hud_blur_sets[kFrames * 2]{};
     VkImage hud_temp{};
@@ -840,6 +845,8 @@ void release_world(DeviceData& d, Renderer& r) {
     if (w.hud_target_framebuffer) d.fn.DestroyFramebuffer(d.device, w.hud_target_framebuffer, nullptr);
     if (w.hud_target_view) d.fn.DestroyImageView(d.device, w.hud_target_view, nullptr);
     if (w.hud_blur_pipeline) d.fn.DestroyPipeline(d.device, w.hud_blur_pipeline, nullptr);
+    if (w.hud_blend_pipeline) d.fn.DestroyPipeline(d.device, w.hud_blend_pipeline, nullptr);
+    if (w.hud_blend_pass) d.fn.DestroyRenderPass(d.device, w.hud_blend_pass, nullptr);
     if (w.hud_blur_layout) d.fn.DestroyPipelineLayout(d.device, w.hud_blur_layout, nullptr);
     if (w.hud_blur_set_layout) d.fn.DestroyDescriptorSetLayout(d.device, w.hud_blur_set_layout, nullptr);
     if (w.hud_blur_pool) d.fn.DestroyDescriptorPool(d.device, w.hud_blur_pool, nullptr);
@@ -1249,6 +1256,14 @@ bool create_interface_layer(DeviceData& d, Renderer& r) {
     return sets;
 }
 
+// The HUD blur, as the game's (31/10, capture frame4945 and two videos): a
+// Gaussian of sigma 1.25 texels at its size (mean squared error 0.00005), and
+// each frame 80 % new, 20 % of the last (the capture's fit: 81 %; the videos:
+// the game's blur moves 0.7 times as much as ours did without it, which 80 %
+// gives).
+constexpr float kHudBlurSigma = 1.25f;
+constexpr float kHudBlurNew = 0.8f;
+
 // The HUD blur's pass and pipeline (R8G8B8A8_UNORM, the game's blur's format):
 // a triangle over the target, one direction of a Gaussian blur.
 bool create_hud_blur(DeviceData& d, Renderer& r) {
@@ -1275,7 +1290,8 @@ bool create_hud_blur(DeviceData& d, Renderer& r) {
     dependencies[0].srcStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     dependencies[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependencies[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    dependencies[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencies[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     dependencies[1].srcSubpass = 0;
     dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1290,6 +1306,10 @@ bool create_hud_blur(DeviceData& d, Renderer& r) {
     pass_info.dependencyCount = 2;
     pass_info.pDependencies = dependencies;
     if (d.fn.CreateRenderPass(d.device, &pass_info, nullptr, &w.hud_blur_pass) != VK_SUCCESS) return false;
+    // The same, our last blur kept (left by the game's copy in SHADER_READ_ONLY).
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (d.fn.CreateRenderPass(d.device, &pass_info, nullptr, &w.hud_blend_pass) != VK_SUCCESS) return false;
     VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT};
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     set_info.bindingCount = 1;
@@ -1353,12 +1373,22 @@ bool create_hud_blur(DeviceData& d, Renderer& r) {
     pipeline_info.pDynamicState = &dynamic;
     pipeline_info.layout = w.hud_blur_layout;
     pipeline_info.renderPass = w.hud_blur_pass;
-    const VkResult made =
+    VkResult made =
         d.fn.CreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &w.hud_blur_pipeline);
+    // Blending: kHudBlurNew of the new blur, the rest of the last.
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
+    blend.dstColorBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+    blend.colorBlendOp = blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend_state.blendConstants[3] = kHudBlurNew;
+    pipeline_info.renderPass = w.hud_blend_pass;
+    if (made == VK_SUCCESS)
+        made = d.fn.CreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &w.hud_blend_pipeline);
     d.fn.DestroyShaderModule(d.device, vert, nullptr);
     d.fn.DestroyShaderModule(d.device, frag, nullptr);
     if (made != VK_SUCCESS) {
-        w.hud_blur_pipeline = VK_NULL_HANDLE;
+        if (w.hud_blur_pipeline) d.fn.DestroyPipeline(d.device, w.hud_blur_pipeline, nullptr);
+        w.hud_blur_pipeline = w.hud_blend_pipeline = VK_NULL_HANDLE;
         return false;
     }
     VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kFrames * 2};
@@ -1376,7 +1406,8 @@ bool create_hud_blur(DeviceData& d, Renderer& r) {
             d.fn.AllocateDescriptorSets(d.device, &allocate, w.hud_blur_sets) == VK_SUCCESS);
     if (!sets) {
         d.fn.DestroyPipeline(d.device, w.hud_blur_pipeline, nullptr);
-        w.hud_blur_pipeline = VK_NULL_HANDLE;
+        d.fn.DestroyPipeline(d.device, w.hud_blend_pipeline, nullptr);
+        w.hud_blur_pipeline = w.hud_blend_pipeline = VK_NULL_HANDLE;
     }
     return sets;
 }
@@ -1694,6 +1725,7 @@ bool hud_blur_targets(DeviceData& d, Renderer& r, const depth::HudBlur& target) 
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
         view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        w.hud_history = false;
         if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.hud_target_view) != VK_SUCCESS) return false;
         VkFramebufferCreateInfo framebuffer_info{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         framebuffer_info.renderPass = w.hud_blur_pass;
@@ -1713,8 +1745,8 @@ bool hud_blur_targets(DeviceData& d, Renderer& r, const depth::HudBlur& target) 
 // build alone) made a quarter of its size, then blurred at the game's blur's
 // size as the game does (a Gaussian, sigma 1.25 of its texels, 31/10
 // capture), across into our image, down into the layer's; left in
-// SHADER_READ_ONLY_OPTIMAL, for the game's next frame.
-constexpr float kHudBlurSigma = 1.25f;
+// SHADER_READ_ONLY_OPTIMAL, for the game's next frame. Down, mixed with our
+// last blur when the layer's image holds it (kHudBlurNew new).
 
 bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, VkImage shown, VkExtent2D extent,
         const depth::HudBlur& target) {
@@ -1742,12 +1774,13 @@ bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
         static_cast<float>(target.extent.height), 0.0f, 1.0f};
     const VkRect2D area{{0, 0}, target.extent};
     for (int i = 0; i < 2; ++i) {
+        const bool blend = i == 1 && w.hud_history;
         VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        begin.renderPass = w.hud_blur_pass;
+        begin.renderPass = blend ? w.hud_blend_pass : w.hud_blur_pass;
         begin.framebuffer = targets[i];
         begin.renderArea = area;
         d.fn.CmdBeginRenderPass(cb, &begin, VK_SUBPASS_CONTENTS_INLINE);
-        d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.hud_blur_pipeline);
+        d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, blend ? w.hud_blend_pipeline : w.hud_blur_pipeline);
         d.fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.hud_blur_layout, 0, 1,
             &w.hud_blur_sets[slot * 2 + i], 0, nullptr);
         const float constants[6] = {1.0f / target.extent.width, 1.0f / target.extent.height, i == 0 ? 1.0f : 0.0f,
@@ -1758,10 +1791,11 @@ bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
         d.fn.CmdDraw(cb, 3, 1, 0, 0);
         d.fn.CmdEndRenderPass(cb);
     }
+    w.hud_history = true;
     if (!w.hud_blur_said) {
         w.hud_blur_said = true;
-        log_line("HUD blur: the scene with the world items blurred into %ux%u for the game's next frame (sigma %.2f)",
-            target.extent.width, target.extent.height, kHudBlurSigma);
+        log_line("HUD blur: the scene with the world items blurred into %ux%u for the game's next frame (sigma %.2f, "
+            "%.0f %% new)", target.extent.width, target.extent.height, kHudBlurSigma, kHudBlurNew * 100.0f);
     }
     return true;
 }
@@ -2539,6 +2573,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     // are drawn under it.
     keep_layer = world_drawn && r.world_draw.under_interface && r.world.interface_pipeline;
     hud_blur = hud_blur && keep_layer;
+    if (!hud_blur) r.world.hud_history = false;
     if (!r.first_frame_logged) {
         r.first_frame_logged = true;
         log_line("first overlay frame drawn (%zu zones)", scene.zones.size());
