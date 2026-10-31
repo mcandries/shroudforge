@@ -1,5 +1,5 @@
 // The camera the game renders its scene with, read where it hands it to the
-// GPU (with game-depth.on). The camera read from the runtime is the one of the
+// GPU. The camera read from the runtime is the one of the
 // player's inputs: about a frame behind the image (KB, 26/10/2026), and the
 // world items drawn with it slide against the game's depth. The frame
 // constants hold, per pass, a camera block: a view-projection matrix (16
@@ -61,7 +61,6 @@ struct Push {
 
 struct Recording {
     std::vector<Bind> binds;
-    std::vector<Bind> compute_binds;  // the scene's light may be a compute pass's (deferred lighting)
     std::vector<Push> pushes;
     bool in_scene = false, scene = false;
     size_t binds_at_scene_end = 0;
@@ -118,33 +117,6 @@ Recording& recording_of(VkCommandBuffer buffer) {
     return *cached;
 }
 
-// The scene's light, searched in every region bound in a command buffer that
-// holds the scene's pass (the deferred lighting comes after the scene's
-// pass): a keen::RenderForwardConstants (matrix at +48, eye at +256, the
-// sun's direction at +320, its color at +336, the light factors at +352) or
-// a keen::DeferredLightingConstants (light factors at +0, matrix at +112,
-// eye at +240, sun at +1424 and +1440), told by its reversed infinite
-// matrix, its eye near the input camera's and a unit direction.
-struct LightLayout {
-    const char* name;
-    uint32_t size, matrix, eye, direction, color, factors;
-};
-constexpr LightLayout kLightLayouts[2] = {
-    {"RenderForwardConstants", 384, 48, 256, 320, 336, 352},
-    {"DeferredLightingConstants", 1712, 112, 240, 1424, 1440, 0},
-};
-constexpr VkDeviceSize kLightSearchBytes = 8192;        // per region
-constexpr VkDeviceSize kLightSearchBudget = 256 * 1024;  // per search
-bool light_found = false;
-int light_layout = 0;
-VkDescriptorSet light_set{};
-uint32_t light_binding = 0, light_element = 0;
-VkDeviceSize light_inner = 0;
-uint32_t light_misses = 0;
-ULONGLONG last_light_search = 0, last_light_report = 0, last_light_read = 0;
-Light last_light;
-int light_searches = 0;
-
 // A camera block at `f` (matrix then eye), near the input camera's eye.
 bool camera_block(const float* f, const double around[3]) {
     for (int i = 0; i < 19; ++i)
@@ -163,34 +135,6 @@ bool camera_block(const float* f, const double around[3]) {
     return std::fabs(w) < 1.0f;
 }
 
-// Whether `f` holds a light of `layout` near the input camera's eye.
-bool light_block(const char* bytes, const LightLayout& layout, const double around[3]) {
-    const float* m = reinterpret_cast<const float*>(bytes + layout.matrix);
-    if (std::fabs(m[8]) > 0.02f || std::fabs(m[9]) > 0.02f || std::fabs(m[10]) > 0.02f) return false;
-    if (!(m[11] > 0.0f && m[11] < 1.0f)) return false;
-    const float n3 = std::sqrt(m[12] * m[12] + m[13] * m[13] + m[14] * m[14]);
-    if (!(n3 > 0.98f && n3 < 1.02f)) return false;
-    const float* eye = reinterpret_cast<const float*>(bytes + layout.eye);
-    for (int i = 0; i < 3; ++i)
-        if (!std::isfinite(eye[i]) || std::fabs(eye[i] - around[i]) > kCloseMeters) return false;
-    const float* d = reinterpret_cast<const float*>(bytes + layout.direction);
-    const float n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    return n > 0.98f && n < 1.02f;
-}
-
-void read_light(const char* bytes, const LightLayout& layout, Light& out) {
-    std::memcpy(out.direction, bytes + layout.direction, sizeof out.direction);
-    std::memcpy(out.color, bytes + layout.color, sizeof out.color);
-    const float* f = reinterpret_cast<const float*>(bytes + layout.factors);
-    out.sun = f[0];
-    out.point_lights = f[1];
-    out.gi = f[2];
-    out.emissive = f[3];
-    out.exposure = f[4];
-    out.exposure_correction = f[5];
-    out.valid = true;
-}
-
 // The bytes [offset, offset + size) of a buffer, in its mapped memory, or null.
 const char* mapped_at(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size) {
     auto info = buffers.find(buffer);
@@ -203,7 +147,7 @@ const char* mapped_at(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size) {
 }
 
 // What the scene's pass was given, as regions to read (under mutex).
-std::vector<Region> regions_of(const Recording& r, bool whole = false) {
+std::vector<Region> regions_of(const Recording& r) {
     std::vector<Region> regions;
     // The graphics sets bound at the scene's end, with their dynamic offsets.
     struct Bound {
@@ -211,7 +155,7 @@ std::vector<Region> regions_of(const Recording& r, bool whole = false) {
         std::vector<uint32_t> dynamic;
     };
     Bound state[32];
-    const size_t binds = whole ? r.binds.size() : std::min(r.binds_at_scene_end, r.binds.size());
+    const size_t binds = std::min(r.binds_at_scene_end, r.binds.size());
     for (size_t b = 0; b < binds; ++b) {
         const Bind& bind = r.binds[b];
         size_t next_dynamic = 0;
@@ -363,7 +307,6 @@ void descriptors_written(uint32_t count, const VkWriteDescriptorSet* writes) {
 void command_buffer_begun(VkCommandBuffer buffer) {
     Recording& r = recording_of(buffer);
     r.binds.clear();
-    r.compute_binds.clear();
     r.pushes.clear();
     r.in_scene = r.scene = false;
     r.binds_at_scene_end = 0;
@@ -371,21 +314,10 @@ void command_buffer_begun(VkCommandBuffer buffer) {
 
 void sets_bound(VkCommandBuffer buffer, VkPipelineBindPoint point, uint32_t first, uint32_t count,
         const VkDescriptorSet* sets, uint32_t dynamic_count, const uint32_t* dynamic) {
-    if (point == VK_PIPELINE_BIND_POINT_COMPUTE) {
-        Recording& r = recording_of(buffer);
-        if (r.compute_binds.size() >= kMaxBinds) return;
-        Bind bind;
-        bind.first = first;
-        bind.sets.assign(sets, sets + count);
-        if (dynamic_count) bind.dynamic.assign(dynamic, dynamic + dynamic_count);
-        r.compute_binds.push_back(std::move(bind));
-        return;
-    }
     if (point != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
     Recording& r = recording_of(buffer);
-    // After the scene's pass too (the deferred lighting's constants); the
-    // camera's search stops at binds_at_scene_end.
-    if (r.binds.size() >= kMaxBinds) return;
+    // Up to the scene's end: the camera's search reads the state there.
+    if ((r.scene && !r.in_scene) || r.binds.size() >= kMaxBinds) return;
     Bind bind;
     bind.first = first;
     bind.sets.assign(sets, sets + count);
@@ -413,130 +345,6 @@ void scene_ended(VkCommandBuffer buffer) {
     if (!r.in_scene) return;
     r.in_scene = false;
     r.binds_at_scene_end = r.binds.size();
-}
-
-// A region of every set bound in `binds` (each bind with its own dynamic
-// offsets), its set's handle in `sets`.
-void bound_regions(const std::vector<Bind>& binds, std::vector<Region>& regions, std::vector<VkDescriptorSet>& sets) {
-    for (const Bind& bind : binds) {
-        size_t next_dynamic = 0;
-        for (size_t i = 0; i < bind.sets.size(); ++i) {
-            auto entries = set_entries.find(bind.sets[i]);
-            if (entries == set_entries.end()) continue;
-            for (const Entry& entry : entries->second) {
-                VkDeviceSize offset = entry.offset;
-                if (entry.dynamic) offset += next_dynamic < bind.dynamic.size() ? bind.dynamic[next_dynamic++] : 0;
-                auto info = buffers.find(entry.buffer);
-                if (info == buffers.end()) continue;
-                const VkDeviceSize size = entry.range == VK_WHOLE_SIZE
-                    ? info->second.size - std::min(info->second.size, offset) : entry.range;
-                Region region{entry.buffer, offset, size, {}};
-                region.place.set = bind.first + static_cast<uint32_t>(i);
-                region.place.binding = entry.binding;
-                region.place.element = entry.element;
-                regions.push_back(region);
-                sets.push_back(bind.sets[i]);
-            }
-        }
-    }
-}
-
-bool binds_set(const std::vector<Bind>& binds, VkDescriptorSet set) {
-    for (const Bind& bind : binds)
-        for (VkDescriptorSet bound : bind.sets)
-            if (bound == set) return true;
-    return false;
-}
-
-// The scene's light, in any command buffer submitted: where it was found
-// (a buffer binding its set), read 5 times a second; else searched every 0.3 s
-// in the buffer submitted then (graphics and compute binds); said every 5 s.
-void follow_light(const Recording& recording, const double input_eye[3], ULONGLONG now) {
-    if (now - last_light_report >= 5000) {
-        last_light_report = now;
-        if (light_found && last_light.valid)
-            log_line("scene light: sun direction %.3f %.3f %.3f, color %.3f %.3f %.3f; factors sun %.3f, point lights "
-                "%.3f, gi %.3f, emissive %.3f, exposure %.4g, exposure correction %.4g", last_light.direction[0],
-                last_light.direction[1], last_light.direction[2], last_light.color[0], last_light.color[1],
-                last_light.color[2], last_light.sun, last_light.point_lights, last_light.gi, last_light.emissive,
-                last_light.exposure, last_light.exposure_correction);
-        else
-            log_line("scene light: not found yet (%d searches)", light_searches);
-    }
-    if (light_found) {
-        if (now - last_light_read < 200) return;
-        if (!binds_set(recording.binds, light_set) && !binds_set(recording.compute_binds, light_set)) return;
-        std::vector<Region> regions;
-        std::vector<VkDescriptorSet> sets;
-        bound_regions(recording.binds, regions, sets);
-        bound_regions(recording.compute_binds, regions, sets);
-        const LightLayout& layout = kLightLayouts[light_layout];
-        bool got = false;
-        for (size_t i = regions.size(); i-- > 0;) {
-            const Region& region = regions[i];
-            if (sets[i] != light_set || region.place.binding != light_binding || region.place.element != light_element ||
-                light_inner + layout.size > region.size)
-                continue;
-            if (const char* data = mapped_at(region.buffer, region.offset + light_inner, layout.size))
-                if (light_block(data, layout, input_eye)) {
-                    read_light(data, layout, last_light);
-                    got = true;
-                }
-            break;
-        }
-        if (got) {
-            last_light_read = now;
-            light_misses = 0;
-        } else if (++light_misses > 300) {
-            light_found = false;
-            log_line("scene light: lost where it was found, searched again");
-        }
-        return;
-    }
-    if (now - last_light_search < 300) return;  // a buffer each time: soon all kinds seen
-    last_light_search = now;
-    ++light_searches;
-    std::vector<Region> regions;
-    std::vector<VkDescriptorSet> sets;
-    bound_regions(recording.binds, regions, sets);
-    bound_regions(recording.compute_binds, regions, sets);
-    VkDeviceSize budget = kLightSearchBudget;
-    std::vector<char> bytes;
-    for (size_t i = 0; i < regions.size() && !light_found && budget; ++i) {
-        const Region& region = regions[i];
-        const VkDeviceSize size = std::min({region.size, kLightSearchBytes, budget});
-        if (size < kLightLayouts[0].size) continue;
-        const char* data = mapped_at(region.buffer, region.offset, size);
-        if (!data) continue;
-        budget -= size;
-        bytes.assign(data, data + size);
-        for (int k = 0; k < 2 && !light_found; ++k) {
-            const LightLayout& layout = kLightLayouts[k];
-            for (size_t at = 0; at + layout.size <= bytes.size(); at += 16) {
-                if (!light_block(bytes.data() + at, layout, input_eye)) continue;
-                light_found = true;
-                light_layout = k;
-                light_set = sets[i];
-                light_binding = region.place.binding;
-                light_element = region.place.element;
-                light_inner = at;
-                light_misses = 0;
-                last_light_read = now;
-                read_light(bytes.data() + at, layout, last_light);
-                log_line("scene light: a %s found in set %u, binding %u[%u], at +%llu (%zu graphics, %zu compute binds)",
-                    layout.name, region.place.set, light_binding, light_element, static_cast<unsigned long long>(at),
-                    recording.binds.size(), recording.compute_binds.size());
-                break;
-            }
-        }
-    }
-}
-
-void light_submitted(VkCommandBuffer buffer, const double input_eye[3]) {
-    std::lock_guard lock(mutex);
-    auto recording = recordings.find(buffer);
-    if (recording == recordings.end()) return;
-    follow_light(recording->second, input_eye, GetTickCount64());
 }
 
 bool submitted(VkCommandBuffer buffer, Camera& camera, const double input_eye[3]) {
@@ -630,13 +438,6 @@ bool submitted(VkCommandBuffer buffer, Camera& camera, const double input_eye[3]
         search_ms = 0.0;
     }
     return got;
-}
-
-bool light(Light& out) {
-    std::lock_guard lock(mutex);
-    if (!light_found || !last_light.valid) return false;
-    out = last_light;
-    return true;
 }
 
 }  // namespace overlay::depth::gpu
