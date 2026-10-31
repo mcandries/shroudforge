@@ -150,6 +150,16 @@ struct WorldDepthPipeline {
     std::map<const std::string*, WorldTextureGpu> textures;
     WorldTextureGpu white;
     VkSampler texture_sampler{};
+    // The light view: the image shown, made smaller before the overlay draws,
+    // and a view of the game's G-buffer color made smaller (game_depth.cpp).
+    VkImage screen_small{};
+    VkDeviceMemory screen_small_memory{};
+    VkImageView screen_small_view{};
+    VkExtent2D screen_small_extent{};
+    bool screen_copied = false;  // this frame
+    bool light_ready = false;    // this frame: both images, and an item asking
+    std::unordered_map<int, VkImageView> albedo_views;  // by the copy's number
+    VkSampler light_sampler{};
     std::unordered_map<int, VkImageView> views;  // of the game's depth images, by their number
     bool drawn_logged = false;
 };
@@ -781,6 +791,11 @@ void release_world(DeviceData& d, Renderer& r) {
     for (auto& [data, texture] : w.textures) release_texture(d, texture);
     release_texture(d, w.white);
     if (w.texture_sampler) d.fn.DestroySampler(d.device, w.texture_sampler, nullptr);
+    if (w.screen_small_view) d.fn.DestroyImageView(d.device, w.screen_small_view, nullptr);
+    if (w.screen_small) d.fn.DestroyImage(d.device, w.screen_small, nullptr);
+    if (w.screen_small_memory) d.fn.FreeMemory(d.device, w.screen_small_memory, nullptr);
+    for (auto& [id, view] : w.albedo_views) d.fn.DestroyImageView(d.device, view, nullptr);
+    if (w.light_sampler) d.fn.DestroySampler(d.device, w.light_sampler, nullptr);
     if (w.depth_framebuffer) d.fn.DestroyFramebuffer(d.device, w.depth_framebuffer, nullptr);
     if (w.depth_pass) d.fn.DestroyRenderPass(d.device, w.depth_pass, nullptr);
     if (w.depth_pipeline) d.fn.DestroyPipeline(d.device, w.depth_pipeline, nullptr);
@@ -900,14 +915,17 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     const VkRenderPass pass = w.pass;
     // The game's depth, ours (the wire view), the world's blocks (its Remove
     // mode) and the solid style's textures (sides, top, bottom).
-    VkDescriptorSetLayoutBinding bindings[4] = {
+    VkDescriptorSetLayoutBinding bindings[6] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3, VK_SHADER_STAGE_FRAGMENT_BIT},
+        // The light view: the G-buffer's color and the image shown, smaller.
+        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
     };
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    set_info.bindingCount = 4;
+    set_info.bindingCount = 6;
     set_info.pBindings = bindings;
     if (d.fn.CreateDescriptorSetLayout(d.device, &set_info, nullptr, &w.set_layout) != VK_SUCCESS) return false;
     VkPushConstantRange constants{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1038,7 +1056,11 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     texture_info.addressModeU = texture_info.addressModeV = texture_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     texture_info.maxLod = 16.0f;
     if (d.fn.CreateSampler(d.device, &texture_info, nullptr, &w.texture_sampler) != VK_SUCCESS) return false;
-    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 * kFrames},
+    VkSamplerCreateInfo light_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    light_info.magFilter = light_info.minFilter = VK_FILTER_LINEAR;
+    light_info.addressModeU = light_info.addressModeV = light_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (d.fn.CreateSampler(d.device, &light_info, nullptr, &w.light_sampler) != VK_SUCCESS) return false;
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kFrames},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrames}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = kFrames;
@@ -1209,6 +1231,103 @@ VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const W
     return t.view;
 }
 
+// The light view: the image shown, a quarter of its size, copied before the
+// overlay draws (the swapchain made copyable), left for the shaders; false
+// when it cannot be.
+bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent) {
+    WorldDepthPipeline& w = r.world;
+    const VkExtent2D small{std::max(1u, extent.width / 4), std::max(1u, extent.height / 4)};
+    if (!w.screen_small || w.screen_small_extent.width != small.width || w.screen_small_extent.height != small.height) {
+        if (w.screen_small_view) d.fn.DestroyImageView(d.device, w.screen_small_view, nullptr);
+        if (w.screen_small) d.fn.DestroyImage(d.device, w.screen_small, nullptr);
+        if (w.screen_small_memory) d.fn.FreeMemory(d.device, w.screen_small_memory, nullptr);
+        w.screen_small = VK_NULL_HANDLE;
+        w.screen_small_memory = VK_NULL_HANDLE;
+        w.screen_small_view = VK_NULL_HANDLE;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType = VK_IMAGE_TYPE_2D;
+        info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        info.extent = {small.width, small.height, 1};
+        info.mipLevels = 1;
+        info.arrayLayers = 1;
+        info.samples = VK_SAMPLE_COUNT_1_BIT;
+        info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (d.fn.CreateImage(d.device, &info, nullptr, &w.screen_small) != VK_SUCCESS) return false;
+        VkMemoryRequirements requirements{};
+        d.fn.GetImageMemoryRequirements(d.device, w.screen_small, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (allocate.memoryTypeIndex == UINT32_MAX ||
+            d.fn.AllocateMemory(d.device, &allocate, nullptr, &w.screen_small_memory) != VK_SUCCESS ||
+            d.fn.BindImageMemory(d.device, w.screen_small, w.screen_small_memory, 0) != VK_SUCCESS)
+            return false;
+        VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = w.screen_small;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.screen_small_view) != VK_SUCCESS) return false;
+        w.screen_small_extent = small;
+        log_line("light view: the image shown copied into %ux%u", small.width, small.height);
+    }
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = shown;
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = w.screen_small;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
+    blit.dstSubresource = blit.srcSubresource;
+    blit.dstOffsets[1] = {static_cast<int32_t>(small.width), static_cast<int32_t>(small.height), 1};
+    d.fn.CmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, w.screen_small, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &blit, VK_FILTER_LINEAR);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+        2, after);
+    return true;
+}
+
+// A view of the game's G-buffer color copy (game_depth.cpp), by its number.
+VkImageView albedo_view(DeviceData& d, Renderer& r, const depth::SceneDepth& scene) {
+    if (!scene.albedo) return VK_NULL_HANDLE;
+    VkImageView& view = r.world.albedo_views[scene.albedo_id];
+    if (!view) {
+        VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        info.image = scene.albedo;
+        info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        info.format = VK_FORMAT_R8G8B8A8_UNORM;
+        info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (d.fn.CreateImageView(d.device, &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
+    }
+    return view;
+}
+
 // Staging buffers of textures copied frames ago freed; textures no item holds
 // any more, and unused for a few frames, released.
 void tidy_textures(DeviceData& d, Renderer& r) {
@@ -1311,6 +1430,23 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     textures_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textures_write.pImageInfo = texture_infos;
     d.fn.UpdateDescriptorSets(d.device, 1, &textures_write, 0, nullptr);
+    // The light view's two images (white where there are none: unlit).
+    const VkImageView albedo_of = albedo_view(d, r, scene);
+    w.light_ready = draw.texture_light && albedo_of && w.screen_copied;
+    VkDescriptorImageInfo light_infos[2] = {
+        {w.light_sampler, w.light_ready ? albedo_of : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {w.light_sampler, w.light_ready ? w.screen_small_view : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+    };
+    VkWriteDescriptorSet light_writes[2]{};
+    for (int i = 0; i < 2; ++i) {
+        light_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        light_writes[i].dstSet = w.sets[slot];
+        light_writes[i].dstBinding = 4 + i;
+        light_writes[i].descriptorCount = 1;
+        light_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        light_writes[i].pImageInfo = &light_infos[i];
+    }
+    d.fn.UpdateDescriptorSets(d.device, 2, light_writes, 0, nullptr);
     VkImageView& view = w.views[scene.id];
     if (!view) {
         VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -1455,7 +1591,8 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.back_alpha =
         static_cast<float>(r.world_draw.back_alpha >= 0.0 ? r.world_draw.back_alpha : r.world_draw.dash_alpha);
     for (int i = 0; i < 3; ++i) constants.tiling[i] = r.world_draw.textures[i].tiling;
-    constants.tiling[3] = 0.0f;
+    // w: the light view on (its two images bound).
+    constants.tiling[3] = r.world.light_ready ? 1.0f : 0.0f;
     if (const auto& blocks = r.world_draw.blocks) {
         for (int i = 0; i < 3; ++i) constants.eye[i] = static_cast<float>(r.world_draw.blocks_eye[i]);
         constants.eye[3] = static_cast<float>(r.world_draw.blocks_relief / blocks->cell);
@@ -1672,6 +1809,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.dash_alpha = 220.0 / 255.0;
     r.world_draw.back_alpha = -1.0;
     r.world_draw.textured = false;
+    r.world_draw.texture_light = false;
     r.world_draw.textures = {};
     r.world_draw.face_indices = 0;
     // The scene's camera from the GPU, when found: its near distance whatever
@@ -1746,6 +1884,9 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     d.fn.BeginCommandBuffer(cb, &begin);
     if (picture && r.next_frame % 6 == 0) record_depth(d, r, cb, slot, scene_depth);
     VkFramebuffer world_framebuffer{};
+    // The light view: the image shown, before the overlay draws on it.
+    r.world.screen_copied = world_ready && r.world_draw.texture_light && target->copyable && scene_depth.albedo &&
+        copy_screen(d, r, cb, target->images[image_index], target->extent);
     const bool world_drawn = world_ready && world_target(d, r, target->extent, target->views[image_index], world_framebuffer) &&
         prepare_world(d, r, cb, slot, scene_depth);
     const bool wire = world_drawn && r.world_draw.wire;

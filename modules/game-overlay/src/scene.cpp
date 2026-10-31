@@ -598,6 +598,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture") &&
             value["cells"]["texture"].is_object())
             parse_world_texture(item, value["cells"]["texture"]);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_light") &&
+            value["cells"]["texture_light"].is_boolean())
+            item.world_texture_light = value["cells"]["texture_light"].get<bool>();
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_keep") &&
             value["cells"]["texture_keep"].is_array())
             parse_texture_keep(item, value["cells"]["texture_keep"]);

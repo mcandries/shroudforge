@@ -162,9 +162,18 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue2(VkDevice device, const VkDeviceQueueI
 VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* info,
         const VkAllocationCallbacks* allocator, VkSwapchainKHR* swapchain) {
     DeviceData* d = device_of(dispatch_key(device));
-    VkResult result = d->fn.CreateSwapchainKHR(device, info, allocator, swapchain);
+    // Copyable too, with the game's depth (the light view reads the image
+    // the game shows); without it if the surface refuses.
+    VkSwapchainCreateInfoKHR copyable = *info;
+    if (depth::enabled()) copyable.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkResult result = d->fn.CreateSwapchainKHR(device, &copyable, allocator, swapchain);
+    if (result != VK_SUCCESS && copyable.imageUsage != info->imageUsage) {
+        copyable.imageUsage = info->imageUsage;
+        result = d->fn.CreateSwapchainKHR(device, info, allocator, swapchain);
+    }
     if (result != VK_SUCCESS) return result;
     SwapchainData data;
+    data.copyable = (copyable.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
     data.format = info->imageFormat;
     data.extent = info->imageExtent;
     uint32_t count = 0;

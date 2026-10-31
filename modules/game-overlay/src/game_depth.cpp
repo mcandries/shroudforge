@@ -46,6 +46,7 @@ struct Next {
     // Called, not intercepted.
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier{};
     PFN_vkCmdCopyImage CmdCopyImage{};
+    PFN_vkCmdBlitImage CmdBlitImage{};
 };
 
 Next next;
@@ -58,8 +59,18 @@ struct Followed {
     VkExtent2D extent{};
 };
 
+// A color image of the game the light view may copy: its G-buffer's color
+// (R8G8B8A8_UNORM, made copyable) and normals (A2B10G10R10, told apart).
+struct FollowedColor {
+    VkFormat format{};
+    VkExtent2D extent{};
+};
+
 // The pass being recorded in a command buffer: its depth attachment.
 struct Recording {
+    VkImage albedo{};             // the G-buffer's color being written, to copy as the pass ends
+    VkImageLayout albedo_layout{};
+    bool albedo_copied = false;   // a copy recorded in this command buffer
     VkImage depth{};
     VkImageLayout layout{};
     bool stored = false;     // its depth is written and kept
@@ -72,6 +83,7 @@ struct Recording {
 
 std::mutex depth_mutex;
 std::unordered_map<VkImage, Followed> followed;
+std::unordered_map<VkImage, FollowedColor> colors;
 std::unordered_map<VkImageView, VkImage> views;
 std::unordered_map<VkCommandBuffer, Recording> recordings;
 std::unordered_map<VkDeviceMemory, VkDeviceSize> memory_sizes;
@@ -93,6 +105,17 @@ struct Copy {
 };
 Copy copy;
 uint64_t presents = 0;
+
+// The light view's copy of the G-buffer's color, a quarter of its size.
+struct AlbedoCopy {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkExtent2D extent{};
+    int id = 0;
+    bool failed = false;
+    uint64_t submitted_at = 0;
+};
+AlbedoCopy albedo;
 
 Recording& recording_of(VkCommandBuffer buffer) {
     // Called under depth_mutex.
@@ -159,6 +182,89 @@ bool make_copy(VkExtent2D extent, VkFormat format) {
     return true;
 }
 
+// Our image for the G-buffer's color made smaller (under depth_mutex).
+bool make_albedo(VkExtent2D source) {
+    const VkExtent2D extent{std::max(1u, source.width / 4), std::max(1u, source.height / 4)};
+    if (albedo.image && albedo.extent.width == extent.width && albedo.extent.height == extent.height) return true;
+    if (albedo.failed || !device_data || !device_data->instance) return false;
+    DeviceData& d = *device_data;
+    AlbedoCopy made;
+    made.extent = extent;
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent = {extent.width, extent.height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkMemoryRequirements requirements{};
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    const bool ok = d.fn.CreateImage(d.device, &info, nullptr, &made.image) == VK_SUCCESS &&
+        (d.fn.GetImageMemoryRequirements(d.device, made.image, &requirements), true) &&
+        (allocate.allocationSize = requirements.size,
+            allocate.memoryTypeIndex = device_local_memory(requirements.memoryTypeBits),
+            allocate.memoryTypeIndex != UINT32_MAX) &&
+        d.fn.AllocateMemory(d.device, &allocate, nullptr, &made.memory) == VK_SUCCESS &&
+        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS;
+    if (!ok) {
+        if (made.image) d.fn.DestroyImage(d.device, made.image, nullptr);
+        if (made.memory) d.fn.FreeMemory(d.device, made.memory, nullptr);
+        albedo.failed = true;
+        log_line("light view: no image of our own for the G-buffer's color");
+        return false;
+    }
+    made.id = next_id++;
+    albedo = made;
+    log_line("light view: the G-buffer's color copied into #%d %ux%u", albedo.id, extent.width, extent.height);
+    return true;
+}
+
+// The G-buffer's color made smaller into ours, as its pass ends, the game's
+// image put back in its layout.
+void record_albedo(VkCommandBuffer buffer, VkImage source, VkImageLayout layout, VkExtent2D extent) {
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = layout;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = source;
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = albedo.image;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = range;
+    }
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, before);
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
+    blit.dstSubresource = blit.srcSubresource;
+    blit.dstOffsets[1] = {static_cast<int32_t>(albedo.extent.width), static_cast<int32_t>(albedo.extent.height), 1};
+    next.CmdBlitImage(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, albedo.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+        VK_ACCESS_SHADER_READ_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = layout;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, after);
+}
+
 // The scene's depth, as the game's pass ends: worth a copy?
 bool scene_shaped(const Followed& image) {
     if (!screen.width || !screen.height || !image.extent.height) return false;
@@ -213,8 +319,21 @@ void record_copy(VkCommandBuffer buffer, VkImage source, VkImageLayout layout) {
 
 VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateInfo* info,
         const VkAllocationCallbacks* allocator, VkImage* image) {
-    const VkResult result = next.CreateImage(device, info, allocator, image);
+    // The light view: the game's large R8G8B8A8_UNORM color attachments made
+    // copyable (its G-buffer's color among them), its normals' format noted.
+    const bool attachment = (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && info->mipLevels == 1 &&
+        info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT && info->imageType == VK_IMAGE_TYPE_2D &&
+        info->extent.width >= 640;
+    const bool color = attachment && info->format == VK_FORMAT_R8G8B8A8_UNORM;
+    const bool normals = attachment && info->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    VkImageCreateInfo copyable = *info;
+    if (color) copyable.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const VkResult result = next.CreateImage(device, &copyable, allocator, image);
     if (result != VK_SUCCESS) return result;
+    if (color || normals) {
+        std::lock_guard lock(depth_mutex);
+        colors[*image] = {info->format, {info->extent.width, info->extent.height}};
+    }
     if (depth_format(info->format) && (info->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && info->mipLevels == 1 &&
             info->arrayLayers == 1 && info->samples == VK_SAMPLE_COUNT_1_BIT && info->imageType == VK_IMAGE_TYPE_2D) {
         std::lock_guard lock(depth_mutex);
@@ -227,6 +346,7 @@ VKAPI_ATTR void VKAPI_CALL DestroyImage(VkDevice device, VkImage image, const Vk
     {
         std::lock_guard lock(depth_mutex);
         followed.erase(image);
+        colors.erase(image);
     }
     next.DestroyImage(device, image, allocator);
 }
@@ -236,7 +356,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkImageVie
     const VkResult result = next.CreateImageView(device, info, allocator, view);
     if (result != VK_SUCCESS) return result;
     std::lock_guard lock(depth_mutex);
-    if (followed.count(info->image)) views[*view] = info->image;
+    if (followed.count(info->image) || colors.count(info->image)) views[*view] = info->image;
     else views.erase(*view);  // a handle given again
     return result;
 }
@@ -257,6 +377,29 @@ void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
         Recording& recording = recording_of(buffer);
         recording.depth = VK_NULL_HANDLE;
         recording.scene = false;
+        // The G-buffer: four color attachments or more, the first a
+        // screen-shaped R8G8B8A8_UNORM, one an A2B10G10R10 (its normals).
+        recording.albedo = VK_NULL_HANDLE;
+        if (info->colorAttachmentCount >= 4 && !(info->flags & VK_RENDERING_SUSPENDING_BIT)) {
+            const auto image_of = [&](uint32_t i) -> const std::pair<const VkImage, FollowedColor>* {
+                if (!info->pColorAttachments[i].imageView) return nullptr;
+                auto view = views.find(info->pColorAttachments[i].imageView);
+                if (view == views.end()) return nullptr;
+                auto found = colors.find(view->second);
+                return found == colors.end() ? nullptr : &*found;
+            };
+            const auto* first = image_of(0);
+            bool normals = false;
+            for (uint32_t i = 1; i < info->colorAttachmentCount; ++i) {
+                const auto* other = image_of(i);
+                normals = normals || (other && other->second.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+            }
+            if (first && first->second.format == VK_FORMAT_R8G8B8A8_UNORM && normals &&
+                    scene_shaped({0, first->second.format, first->second.extent})) {
+                recording.albedo = first->first;
+                recording.albedo_layout = info->pColorAttachments[0].imageLayout;
+            }
+        }
         if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
         auto view = views.find(info->pDepthAttachment->imageView);
         if (view == views.end()) return;
@@ -291,6 +434,14 @@ void end_rendering(VkCommandBuffer buffer) {
         recording.scene = false;
         gpu::scene_ended(buffer);
     }
+    if (recording.albedo) {
+        auto found = colors.find(recording.albedo);
+        if (found != colors.end() && make_albedo(found->second.extent)) {
+            record_albedo(buffer, recording.albedo, recording.albedo_layout, found->second.extent);
+            recording.albedo_copied = true;
+        }
+        recording.albedo = VK_NULL_HANDLE;
+    }
     const VkImage image = recording.depth;
     recording.depth = VK_NULL_HANDLE;
     if (!image || !recording.stored || recording.suspending) return;
@@ -320,6 +471,7 @@ void submitted(VkCommandBuffer buffer) {
     // The scene's light, in any command buffer (the deferred lighting's own).
     if (copy.has_camera && light_probe_on) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
+    if (found != recordings.end() && found->second.albedo_copied) albedo.submitted_at = presents;
     if (found == recordings.end() || !found->second.copied) return;
     copy.submitted_at = presents;
     copy.camera = found->second.camera;
@@ -508,6 +660,7 @@ void start(DeviceData& d, PFN_vkGetDeviceProcAddr next_gdpa) {
 #undef DEPTH_LOAD
     next.CmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(next_gdpa(d.device, "vkCmdPipelineBarrier"));
     next.CmdCopyImage = reinterpret_cast<PFN_vkCmdCopyImage>(next_gdpa(d.device, "vkCmdCopyImage"));
+    next.CmdBlitImage = reinterpret_cast<PFN_vkCmdBlitImage>(next_gdpa(d.device, "vkCmdBlitImage"));
     log_line("game depth: on (game-depth.on), device %p", static_cast<void*>(d.device));
 }
 
@@ -533,8 +686,14 @@ SceneDepth scene_depth(VkExtent2D) {
     std::lock_guard lock(depth_mutex);
     // A copy submitted since the last present or the one before.
     if (!copy.image || presents - copy.submitted_at > 1) return found;
-    return {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id, copy.camera,
+    found = {copy.image, copy.format, copy.extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, copy.id, copy.camera,
         copy.has_camera, copy.gpu_camera};
+    if (albedo.image && presents - albedo.submitted_at <= 1) {
+        found.albedo = albedo.image;
+        found.albedo_extent = albedo.extent;
+        found.albedo_id = albedo.id;
+    }
+    return found;
 }
 
 Settings settings() {

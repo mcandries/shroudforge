@@ -65,6 +65,7 @@ struct SwapchainData {
     std::vector<VkImageView> views;
     std::vector<VkFramebuffer> framebuffers;
     bool drawable = false;
+    bool copyable = false;  // made with TRANSFER_SRC (the light view)
 };
 
 struct Renderer;

@@ -68,6 +68,7 @@ struct WorldDepthDraw {
     // with them; their meters counted from texture_origin (a multiple of 64 m).
     std::array<WorldTexture, 3> textures;
     bool textured = false;
+    bool texture_light = false;  // lit by the light view
     double texture_origin[3]{};
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
