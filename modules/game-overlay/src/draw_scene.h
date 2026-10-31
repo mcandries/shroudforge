@@ -65,7 +65,7 @@ struct WorldDepthDraw {
     std::array<WorldTexture, 9> textures;
     float relief = 1.0f;  // how much the normal maps tilt the faces
     bool textured = false;
-    bool texture_light = false;  // lit by the light view
+    float glow = 1.0f;  // the hologram's glow (cells.texture_glow)
     double texture_origin[3]{};
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
