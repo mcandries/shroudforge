@@ -17,6 +17,10 @@
 // the scene is put on it before, by a compute pass), its passes on that image
 // draw into an image of ours, cleared to transparent black, for the overlay
 // to lay it back over its world items (renderer.cpp).
+//
+// The HUD's blurred scene (hud_blur_target): right after the game's barrier
+// making its 320x180 blur readable, the overlay's own blur (the scene with the
+// world items, from the last present) is copied over it.
 
 #include "overlay.h"
 #include "game_depth.h"
@@ -44,14 +48,13 @@ namespace {
     X(UnmapMemory, vkUnmapMemory) X(FreeMemory, vkFreeMemory) X(UpdateDescriptorSets, vkUpdateDescriptorSets) \
     X(CmdBindDescriptorSets, vkCmdBindDescriptorSets) X(CmdPushConstants, vkCmdPushConstants) \
     X(GetBufferDeviceAddress, vkGetBufferDeviceAddress) X(GetBufferDeviceAddressKHR, vkGetBufferDeviceAddressKHR) \
-    X(GetBufferDeviceAddressEXT, vkGetBufferDeviceAddressEXT)
+    X(GetBufferDeviceAddressEXT, vkGetBufferDeviceAddressEXT) X(CmdPipelineBarrier, vkCmdPipelineBarrier)
 
 struct Next {
 #define DEPTH_DECLARE(name, type) PFN_##type name{};
     DEPTH_FUNCTIONS(DEPTH_DECLARE)
 #undef DEPTH_DECLARE
     // Called, not intercepted.
-    PFN_vkCmdPipelineBarrier CmdPipelineBarrier{};
     PFN_vkCmdCopyImage CmdCopyImage{};
     PFN_vkCmdBlitImage CmdBlitImage{};
     PFN_vkCmdClearColorImage CmdClearColorImage{};
@@ -144,6 +147,19 @@ struct Layer {
 std::unordered_map<VkImage, Layer> layers;  // by swapchain image
 std::atomic<bool> layer_wanted{false};
 bool layer_failed = false;
+
+// The HUD's blurred scene: the game's images that may be it (small
+// R8G8B8A8_UNORM storage images, made copyable into), and ours.
+std::unordered_map<VkImage, VkExtent2D> blur_candidates;
+struct OwnBlur {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkExtent2D extent{};
+    bool failed = false;
+    bool said = false;
+};
+OwnBlur own_blur;
+std::atomic<bool> blur_filled{false};
 
 Recording& recording_of(VkCommandBuffer buffer) {
     // Called under depth_mutex.
@@ -427,6 +443,91 @@ void destroy_layers() {
     layers.clear();
 }
 
+// The game's HUD blur: an eighth of the screen (under depth_mutex).
+bool hud_blur_shaped(VkExtent2D extent) {
+    return screen.width && screen.height && extent.width && extent.height &&
+        std::abs(static_cast<int>(extent.width * 8) - static_cast<int>(screen.width)) <= 8 &&
+        std::abs(static_cast<int>(extent.height * 8) - static_cast<int>(screen.height)) <= 8;
+}
+
+// Our blur, the size of the game's (under depth_mutex); false when it cannot be.
+bool make_own_blur(VkExtent2D extent) {
+    if (own_blur.image) return true;
+    if (own_blur.failed || !device_data || !device_data->instance) return false;
+    DeviceData& d = *device_data;
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = VK_FORMAT_R8G8B8A8_UNORM;
+    info.extent = {extent.width, extent.height, 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkMemoryRequirements requirements{};
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    OwnBlur made;
+    const bool ok = d.fn.CreateImage(d.device, &info, nullptr, &made.image) == VK_SUCCESS &&
+        (d.fn.GetImageMemoryRequirements(d.device, made.image, &requirements), true) &&
+        (allocate.allocationSize = requirements.size,
+            allocate.memoryTypeIndex = device_local_memory(requirements.memoryTypeBits),
+            allocate.memoryTypeIndex != UINT32_MAX) &&
+        d.fn.AllocateMemory(d.device, &allocate, nullptr, &made.memory) == VK_SUCCESS &&
+        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS;
+    if (!ok) {
+        if (made.image) d.fn.DestroyImage(d.device, made.image, nullptr);
+        if (made.memory) d.fn.FreeMemory(d.device, made.memory, nullptr);
+        own_blur.failed = true;
+        log_line("HUD blur: no image of our own, the game's blur left alone");
+        return false;
+    }
+    made.extent = extent;
+    own_blur = made;
+    return true;
+}
+
+// Ours (SHADER_READ_ONLY, filled at the last present) copied over the game's
+// blur `image` (just made SHADER_READ_ONLY by the game's barrier), each put
+// back in SHADER_READ_ONLY_OPTIMAL.
+void record_blur_copy(VkCommandBuffer buffer, VkImage image) {
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[0].image = image;
+    before[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[1].image = own_blur.image;
+    for (auto& barrier : before) {
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    }
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = region.srcSubresource;
+    region.extent = {own_blur.extent.width, own_blur.extent.height, 1};
+    next.CmdCopyImage(buffer, own_blur.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, after);
+}
+
 // The scene's depth, as the game's pass ends: worth a copy?
 bool scene_shaped(const Followed& image) {
     if (!screen.width || !screen.height || !image.extent.height) return false;
@@ -488,10 +589,21 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImage(VkDevice device, const VkImageCreateI
         info->extent.width >= 640;
     const bool color = attachment && info->format == VK_FORMAT_R8G8B8A8_UNORM;
     const bool normals = attachment && info->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    // The HUD's blur may be among the small R8G8B8A8_UNORM storage images:
+    // made copyable into.
+    const bool blur = info->format == VK_FORMAT_R8G8B8A8_UNORM && (info->usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+        (info->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && info->mipLevels == 1 && info->arrayLayers == 1 &&
+        info->samples == VK_SAMPLE_COUNT_1_BIT && info->imageType == VK_IMAGE_TYPE_2D && info->extent.width <= 1024 &&
+        info->extent.height <= 1024;
     VkImageCreateInfo copyable = *info;
     if (color) copyable.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (blur) copyable.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     const VkResult result = next.CreateImage(device, &copyable, allocator, image);
     if (result != VK_SUCCESS) return result;
+    if (blur) {
+        std::lock_guard lock(depth_mutex);
+        blur_candidates[*image] = {info->extent.width, info->extent.height};
+    }
     if (color || normals) {
         std::lock_guard lock(depth_mutex);
         colors[*image] = {info->format, {info->extent.width, info->extent.height}};
@@ -509,6 +621,7 @@ VKAPI_ATTR void VKAPI_CALL DestroyImage(VkDevice device, VkImage image, const Vk
         std::lock_guard lock(depth_mutex);
         followed.erase(image);
         colors.erase(image);
+        blur_candidates.erase(image);
     }
     next.DestroyImage(device, image, allocator);
 }
@@ -657,6 +770,36 @@ void end_rendering(VkCommandBuffer buffer) {
     record_copy(buffer, image, recording.layout);
     recording.copied = true;
     recording.has_camera = local_camera_now(recording.camera);
+}
+
+// The game's barriers: right after the one making its HUD blur readable
+// (written by compute: GENERAL to SHADER_READ_ONLY), ours copied over it.
+VKAPI_ATTR void VKAPI_CALL CmdPipelineBarrier(VkCommandBuffer buffer, VkPipelineStageFlags source,
+        VkPipelineStageFlags destination, VkDependencyFlags flags, uint32_t memory_count, const VkMemoryBarrier* memory,
+        uint32_t buffer_count, const VkBufferMemoryBarrier* buffers, uint32_t image_count,
+        const VkImageMemoryBarrier* images) {
+    next.CmdPipelineBarrier(buffer, source, destination, flags, memory_count, memory, buffer_count, buffers, image_count,
+        images);
+    if (!image_count || !blur_filled.load(std::memory_order_acquire)) return;
+    std::lock_guard lock(depth_mutex);
+    if (!own_blur.image) return;
+    for (uint32_t i = 0; i < image_count; ++i) {
+        const VkImageMemoryBarrier& barrier = images[i];
+        if (barrier.newLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+                !(barrier.srcAccessMask & VK_ACCESS_SHADER_WRITE_BIT))
+            continue;
+        auto found = blur_candidates.find(barrier.image);
+        if (found == blur_candidates.end() || !hud_blur_shaped(found->second) ||
+                found->second.width != own_blur.extent.width || found->second.height != own_blur.extent.height)
+            continue;
+        record_blur_copy(buffer, barrier.image);
+        if (!own_blur.said) {
+            own_blur.said = true;
+            log_line("HUD blur: ours (the scene with the world items) copied over the game's %ux%u blur",
+                own_blur.extent.width, own_blur.extent.height);
+        }
+        return;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdEndRendering(VkCommandBuffer buffer) {
@@ -869,7 +1012,6 @@ void start(DeviceData& d, PFN_vkGetDeviceProcAddr next_gdpa) {
 #define DEPTH_LOAD(name, type) next.name = reinterpret_cast<PFN_##type>(next_gdpa(d.device, #type));
     DEPTH_FUNCTIONS(DEPTH_LOAD)
 #undef DEPTH_LOAD
-    next.CmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(next_gdpa(d.device, "vkCmdPipelineBarrier"));
     next.CmdCopyImage = reinterpret_cast<PFN_vkCmdCopyImage>(next_gdpa(d.device, "vkCmdCopyImage"));
     next.CmdBlitImage = reinterpret_cast<PFN_vkCmdBlitImage>(next_gdpa(d.device, "vkCmdBlitImage"));
     next.CmdClearColorImage = reinterpret_cast<PFN_vkCmdClearColorImage>(next_gdpa(d.device, "vkCmdClearColorImage"));
@@ -928,6 +1070,24 @@ SceneDepth scene_depth(VkExtent2D) {
 void want_interface_layer(bool wanted) {
     if (!enabled()) return;
     layer_wanted.store(wanted, std::memory_order_release);
+}
+
+HudBlur hud_blur_target() {
+    if (!enabled()) return {};
+    std::lock_guard lock(depth_mutex);
+    if (!own_blur.image)
+        for (auto& [image, extent] : blur_candidates)
+            if (hud_blur_shaped(extent)) {
+                make_own_blur(extent);
+                break;
+            }
+    if (!own_blur.image || !hud_blur_shaped(own_blur.extent)) return {};
+    return {own_blur.image, own_blur.extent};
+}
+
+void hud_blur_filled(bool filled) {
+    if (!enabled()) return;
+    blur_filled.store(filled, std::memory_order_release);
 }
 
 InterfaceLayer take_interface_layer(VkImage image) {
