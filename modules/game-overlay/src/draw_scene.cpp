@@ -826,6 +826,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         gpu->texture_light = item.world_texture_light;
         gpu->relief = item.world_relief;
         gpu->under_interface = item.world_under_interface;
+        gpu->hud_blur = item.world_hud_blur;
         for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
     }
     if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;

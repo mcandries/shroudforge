@@ -9,7 +9,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHADERS = [("world_depth.vert", "kWorldDepthVert"), ("world_depth.frag", "kWorldDepthFrag"),
-           ("interface_layer.vert", "kInterfaceLayerVert"), ("interface_layer.frag", "kInterfaceLayerFrag")]
+           ("interface_layer.vert", "kInterfaceLayerVert"), ("interface_layer.frag", "kInterfaceLayerFrag"),
+           ("hud_blur.frag", "kHudBlurFrag")]
 
 
 def glslc():
