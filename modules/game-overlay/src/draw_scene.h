@@ -67,6 +67,7 @@ struct WorldDepthDraw {
     bool textured = false;
     float glow = 1.0f;  // the hologram's glow (cells.texture_glow)
     double texture_origin[3]{};
+    double texture_eye[3]{};  // the eye in meters from texture_origin (the hologram's view)
     size_t face_indices = 0;  // the faces' indices come first
     std::vector<WorldDepthVertex> vertices;
     std::vector<std::uint32_t> indices;
