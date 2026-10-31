@@ -46,6 +46,13 @@ struct SceneDepth {
 };
 SceneDepth scene_depth(VkExtent2D screen);
 
+// The light view's images: this many levels, each half the one before.
+constexpr uint32_t kLightLevels = 4;
+// Levels 1 to kLightLevels - 1 of `image` (level 0 in TRANSFER_DST_OPTIMAL,
+// written) blitted from level 0 down; all left in SHADER_READ_ONLY_OPTIMAL.
+void make_light_levels(VkCommandBuffer buffer, VkImage image, VkExtent2D extent, PFN_vkCmdPipelineBarrier barrier_fn,
+    PFN_vkCmdBlitImage blit_fn);
+
 // Read from game-depth.on (`near=0.01 margin=0.15`), again when it changes:
 // the game's near distance (its depth is near / distance) and how far behind
 // the game's surface (meters) a world cell still shows.
