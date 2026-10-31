@@ -1058,6 +1058,8 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     if (d.fn.CreateSampler(d.device, &texture_info, nullptr, &w.texture_sampler) != VK_SUCCESS) return false;
     VkSamplerCreateInfo light_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     light_info.magFilter = light_info.minFilter = VK_FILTER_LINEAR;
+    light_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    light_info.maxLod = 8.0f;
     light_info.addressModeU = light_info.addressModeV = light_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (d.fn.CreateSampler(d.device, &light_info, nullptr, &w.light_sampler) != VK_SUCCESS) return false;
     VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * kFrames},
@@ -1248,11 +1250,11 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         info.imageType = VK_IMAGE_TYPE_2D;
         info.format = VK_FORMAT_R8G8B8A8_UNORM;
         info.extent = {small.width, small.height, 1};
-        info.mipLevels = 1;
+        info.mipLevels = depth::kLightLevels;
         info.arrayLayers = 1;
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         if (d.fn.CreateImage(d.device, &info, nullptr, &w.screen_small) != VK_SUCCESS) return false;
         VkMemoryRequirements requirements{};
         d.fn.GetImageMemoryRequirements(d.device, w.screen_small, &requirements);
@@ -1267,7 +1269,7 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         view_info.image = w.screen_small;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, depth::kLightLevels, 0, 1};
         if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.screen_small_view) != VK_SUCCESS) return false;
         w.screen_small_extent = small;
         log_line("light view: the image shown copied into %ux%u", small.width, small.height);
@@ -1289,6 +1291,7 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.subresourceRange = range;
     }
+    before[1].subresourceRange.levelCount = depth::kLightLevels;
     d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
         nullptr, 2, before);
     VkImageBlit blit{};
@@ -1298,18 +1301,15 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
     blit.dstOffsets[1] = {static_cast<int32_t>(small.width), static_cast<int32_t>(small.height), 1};
     d.fn.CmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, w.screen_small, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1, &blit, VK_FILTER_LINEAR);
-    VkImageMemoryBarrier after[2] = {before[0], before[1]};
-    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    after[0].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
-        2, after);
+    VkImageMemoryBarrier after = before[0];
+    after.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    after.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+        nullptr, 0, nullptr, 1, &after);
+    // Its smaller levels: the light, smooth.
+    depth::make_light_levels(cb, w.screen_small, small, d.fn.CmdPipelineBarrier, d.fn.CmdBlitImage);
     return true;
 }
 
@@ -1322,7 +1322,7 @@ VkImageView albedo_view(DeviceData& d, Renderer& r, const depth::SceneDepth& sce
         info.image = scene.albedo;
         info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         info.format = VK_FORMAT_R8G8B8A8_UNORM;
-        info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, depth::kLightLevels, 0, 1};
         if (d.fn.CreateImageView(d.device, &info, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
     }
     return view;

@@ -182,6 +182,56 @@ bool make_copy(VkExtent2D extent, VkFormat format) {
     return true;
 }
 
+}  // namespace
+
+void make_light_levels(VkCommandBuffer buffer, VkImage image, VkExtent2D extent, PFN_vkCmdPipelineBarrier barrier_fn,
+        PFN_vkCmdBlitImage blit_fn) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    for (uint32_t level = 1; level < kLightLevels; ++level) {
+        // The level above, written: a source now; this one, a destination.
+        VkImageMemoryBarrier pair[2] = {barrier, barrier};
+        pair[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        pair[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        pair[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pair[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        pair[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 1, 0, 1};
+        pair[1].srcAccessMask = 0;
+        pair[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        pair[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        pair[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pair[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+        barrier_fn(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
+            pair);
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1};
+        blit.srcOffsets[1] = {static_cast<int32_t>(std::max(1u, extent.width >> (level - 1))),
+            static_cast<int32_t>(std::max(1u, extent.height >> (level - 1))), 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+        blit.dstOffsets[1] = {static_cast<int32_t>(std::max(1u, extent.width >> level)),
+            static_cast<int32_t>(std::max(1u, extent.height >> level)), 1};
+        blit_fn(buffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+            VK_FILTER_LINEAR);
+    }
+    // Every level but the last a source now, the last a destination: all for the shaders.
+    VkImageMemoryBarrier done[2] = {barrier, barrier};
+    done[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    done[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    done[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    done[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    done[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kLightLevels - 1, 0, 1};
+    done[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    done[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    done[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    done[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    done[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, kLightLevels - 1, 1, 0, 1};
+    barrier_fn(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 2,
+        done);
+}
+
+namespace {
+
 // Our image for the G-buffer's color made smaller (under depth_mutex).
 bool make_albedo(VkExtent2D source) {
     const VkExtent2D extent{std::max(1u, source.width / 4), std::max(1u, source.height / 4)};
@@ -194,11 +244,11 @@ bool make_albedo(VkExtent2D source) {
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = VK_FORMAT_R8G8B8A8_UNORM;
     info.extent = {extent.width, extent.height, 1};
-    info.mipLevels = 1;
+    info.mipLevels = kLightLevels;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkMemoryRequirements requirements{};
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -242,6 +292,7 @@ void record_albedo(VkCommandBuffer buffer, VkImage source, VkImageLayout layout,
         barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.subresourceRange = range;
     }
+    before[1].subresourceRange.levelCount = kLightLevels;
     next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, before);
     VkImageBlit blit{};
@@ -251,18 +302,16 @@ void record_albedo(VkCommandBuffer buffer, VkImage source, VkImageLayout layout,
     blit.dstOffsets[1] = {static_cast<int32_t>(albedo.extent.width), static_cast<int32_t>(albedo.extent.height), 1};
     next.CmdBlitImage(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, albedo.image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-    VkImageMemoryBarrier after[2] = {before[0], before[1]};
-    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+    VkImageMemoryBarrier after = before[0];
+    after.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_SHADER_READ_BIT;
-    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    after[0].newLayout = layout;
-    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    after.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after.newLayout = layout;
     next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-        nullptr, 2, after);
+        nullptr, 1, &after);
+    // Its smaller levels: the light, smooth.
+    make_light_levels(buffer, albedo.image, albedo.extent, next.CmdPipelineBarrier, next.CmdBlitImage);
 }
 
 // The scene's depth, as the game's pass ends: worth a copy?

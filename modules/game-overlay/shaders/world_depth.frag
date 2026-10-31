@@ -162,28 +162,34 @@ bool through_mass(vec3 from, float surface_at) {
     return false;
 }
 // The light where a pixel of the build stands, lent by the game's surfaces
-// around it: the image shown divided by their color without light, summed
-// over taps in rings around it (the sky, with no depth, and too dark a color
-// left out; a surface far in depth from ours weighs less). White when no
-// tap holds.
+// around it: the image shown divided by their color without light, both at
+// a smaller level (160 x 90 for 2560 x 1440: a smooth light, not the
+// shadows and details behind the build copied on it), summed over taps in
+// rings around it. Left out: the sky (no depth), too dark a color, and what
+// stands in front of the build (a character: 31/10, its hair repeated
+// around it); a surface far behind weighs less. White when no tap holds.
 vec3 light_at() {
     vec2 screen = 2.0 / c.to_clip;
     vec2 at = gl_FragCoord.xy / screen;
     float far = 1.0 / v_depth;
     vec3 shown = vec3(0.0), color = vec3(0.0);
-    const float radii[3] = float[3](0.008, 0.025, 0.06);
-    for (int ring = 0; ring < 3; ++ring) {
-        for (int k = 0; k < 8; ++k) {
+    const float radii[4] = float[4](0.0, 0.02, 0.05, 0.1);
+    const float level = 2.0;
+    for (int ring = 0; ring < 4; ++ring) {
+        int taps = ring == 0 ? 1 : 8;
+        for (int k = 0; k < taps; ++k) {
             float angle = (float(k) + 0.5 * float(ring)) * 0.785398;
             vec2 tap = at + vec2(cos(angle) * screen.y / screen.x, sin(angle)) * radii[ring];
             if (any(lessThan(tap, vec2(0.0))) || any(greaterThan(tap, vec2(1.0)))) continue;
             float scene = texelFetch(game_depth, ivec2(tap * screen * c.depth_scale), 0).r;
             if (scene <= 0.0) continue;
-            vec3 a = texture(albedo_small, tap).rgb;
+            float scene_far = 1.0 / scene;
+            if (scene_far < far * 0.92) continue;  // in front of the build
+            vec3 a = textureLod(albedo_small, tap, level).rgb;
             if (max(a.r, max(a.g, a.b)) < 0.03) continue;
-            float gap = abs(1.0 / scene - far) / far;
-            float weight = 1.0 / (1.0 + 8.0 * gap) / (1.0 + float(ring));
-            shown += weight * texture(screen_small, tap).rgb;
+            float gap = (scene_far - far) / far;
+            float weight = 1.0 / (1.0 + 4.0 * gap) / (1.0 + 0.5 * float(ring));
+            shown += weight * textureLod(screen_small, tap, level).rgb;
             color += weight * a;
         }
     }
