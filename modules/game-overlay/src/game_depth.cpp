@@ -313,6 +313,8 @@ VKAPI_ATTR void VKAPI_CALL CmdEndRenderingKHR(VkCommandBuffer buffer) {
 
 void submitted(VkCommandBuffer buffer) {
     // Called under depth_mutex.
+    // The scene's light, in any command buffer (the deferred lighting's own).
+    if (copy.has_camera) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
     if (found == recordings.end() || !found->second.copied) return;
     copy.submitted_at = presents;
