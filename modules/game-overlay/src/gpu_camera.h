@@ -18,6 +18,18 @@ struct Camera {
     bool valid = false;
 };
 
+// The scene's sun and light factors (keen::RenderForwardConstants or
+// keen::DeferredLightingConstants of the game's reflection: the same
+// ForwardDirectionalLightData and RenderLightFactors in both).
+struct Light {
+    float direction[3]{};  // toward the sun, or from it (to be seen)
+    float color[3]{};
+    float sun = 0.0f, point_lights = 0.0f, gi = 0.0f, emissive = 0.0f, exposure = 0.0f, exposure_correction = 0.0f;
+    bool valid = false;
+};
+// The last one read, if found.
+bool light(Light& out);
+
 void buffer_created(VkBuffer buffer, VkDeviceSize size);
 void buffer_destroyed(VkBuffer buffer);
 void buffer_bound(VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset);
