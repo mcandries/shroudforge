@@ -56,7 +56,7 @@ layout(location = 4) noperspective in vec3 v_cell;
 layout(location = 5) flat in float v_fade;
 layout(location = 6) flat in float v_tex;
 // The solid style's textures: sides, top, bottom (the game's BC7 levels).
-layout(set = 0, binding = 3) uniform sampler2D textures[3];
+layout(set = 0, binding = 3) uniform sampler2D textures[6];
 // The light view (c.tiling.w on): the color of the game's surfaces without
 // light (its G-buffer) and the image shown, both a quarter of the screen.
 layout(set = 0, binding = 4) uniform sampler2D albedo_small;
@@ -165,17 +165,21 @@ bool through_mass(vec3 from, float surface_at) {
 // around it: the image shown divided by their color without light, both at
 // a smaller level (160 x 90 for 2560 x 1440: a smooth light, not the
 // shadows and details behind the build copied on it), summed over taps in
-// rings around it. Left out: the sky (no depth), too dark a color, and what
-// stands in front of the build (a character: 31/10, its hair repeated
-// around it); a surface far behind weighs less. White when no tap holds.
+// rings around it, out to a third of the screen. Left out: the sky (no
+// depth), too dark a color, and what stands in front of the build (a
+// character: 31/10, its hair repeated around it). A surface at the build's
+// depth weighs the most (within 10 %: half); one far behind lends its
+// brightness only, not its hue (31/10, capture frame3818: the game's haze
+// over a far forest taken for a blue light). White when no tap holds.
 vec3 light_at() {
     vec2 screen = 2.0 / c.to_clip;
     vec2 at = gl_FragCoord.xy / screen;
     float far = 1.0 / v_depth;
     vec3 shown = vec3(0.0), color = vec3(0.0);
-    const float radii[4] = float[4](0.0, 0.02, 0.05, 0.1);
+    float near = 0.0, all_taps = 0.0;
+    const float radii[5] = float[5](0.0, 0.03, 0.08, 0.16, 0.3);
     const float level = 2.0;
-    for (int ring = 0; ring < 4; ++ring) {
+    for (int ring = 0; ring < 5; ++ring) {
         int taps = ring == 0 ? 1 : 8;
         for (int k = 0; k < taps; ++k) {
             float angle = (float(k) + 0.5 * float(ring)) * 0.785398;
@@ -187,18 +191,24 @@ vec3 light_at() {
             if (scene_far < far * 0.92) continue;  // in front of the build
             vec3 a = textureLod(albedo_small, tap, level).rgb;
             if (max(a.r, max(a.g, a.b)) < 0.03) continue;
-            float gap = (scene_far - far) / far;
-            float weight = 1.0 / (1.0 + 4.0 * gap) / (1.0 + 0.5 * float(ring));
+            float gap = abs(scene_far - far) / far / 0.1;
+            float close = 1.0 / (1.0 + gap * gap);
+            float ring_weight = 1.0 / (1.0 + 0.5 * float(ring));
+            float weight = ring_weight * (0.03 + close);
             shown += weight * textureLod(screen_small, tap, level).rgb;
             color += weight * a;
+            near += ring_weight * close;
+            all_taps += ring_weight;
         }
     }
     if (max(color.r, max(color.g, color.b)) < 0.02) return vec3(1.0);
-    return clamp(shown / max(color, vec3(0.02)), vec3(0.0), vec3(4.0));
+    vec3 light = clamp(shown / max(color, vec3(0.02)), vec3(0.0), vec3(4.0));
+    float brightness = dot(light, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(brightness), light, clamp(3.0 * near / all_taps, 0.0, 1.0));
 }
 
 // A face of the solid style textured as the game draws its material: the
-// texture of its sides, top or bottom, laid along the world's axes at the
+// texture of its sides, top or bottom, darkened by its ambient occlusion, laid along the world's axes at the
 // game's tiling (v_cell: meters from the texture origin, times depth). The
 // three are sampled alike and one kept (indexing them would want the same
 // index for all the draw).
@@ -211,6 +221,11 @@ vec4 textured(vec4 color) {
     vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
     vec3 bottom = texture(textures[2], plane * c.tiling.z).rgb;
     vec3 rgb = kind <= 2 ? side : kind == 3 ? top : bottom;
+    // Their ambient occlusion (white when the material has none).
+    float side_ao = texture(textures[3], plane * c.tiling.x).r;
+    float top_ao = texture(textures[4], plane * c.tiling.y).r;
+    float bottom_ao = texture(textures[5], plane * c.tiling.z).r;
+    rgb *= kind <= 2 ? side_ao : kind == 3 ? top_ao : bottom_ao;
     if (c.tiling.w > 0.5) rgb *= light_at();
     return vec4(color.rgb * rgb, color.a);
 }
