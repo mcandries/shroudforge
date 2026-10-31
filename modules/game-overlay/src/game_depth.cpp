@@ -12,10 +12,11 @@
 // recorded into the game's command buffer, the game's image put back in its
 // layout. The overlay samples the copy, left in SHADER_READ_ONLY_OPTIMAL.
 //
-// Likewise the scene without the game's interface: the swapchain image is
-// copied before the game's first pass loading it (31/10, capture: its
-// interface; the scene is put on it before, by a compute pass), for the
-// overlay to draw its world items under the interface (renderer.cpp).
+// The game's interface layer (want_interface_layer): from the game's first
+// pass of a frame loading a swapchain image (31/10, capture: its interface;
+// the scene is put on it before, by a compute pass), its passes on that image
+// draw into an image of ours, cleared to transparent black, for the overlay
+// to lay it back over its world items (renderer.cpp).
 
 #include "overlay.h"
 #include "game_depth.h"
@@ -53,6 +54,7 @@ struct Next {
     PFN_vkCmdPipelineBarrier CmdPipelineBarrier{};
     PFN_vkCmdCopyImage CmdCopyImage{};
     PFN_vkCmdBlitImage CmdBlitImage{};
+    PFN_vkCmdClearColorImage CmdClearColorImage{};
 };
 
 Next next;
@@ -74,7 +76,7 @@ struct FollowedColor {
 
 // The pass being recorded in a command buffer: its depth attachment.
 struct Recording {
-    bool scene_copied = false;    // the scene before the interface copied in this command buffer
+    std::vector<VkImage> layers;  // swapchain images whose interface it draws into our layer
     VkImage albedo{};             // the G-buffer's color being written, to copy as the pass ends
     VkImageLayout albedo_layout{};
     bool albedo_copied = false;   // a copy recorded in this command buffer
@@ -96,6 +98,7 @@ std::unordered_map<VkCommandBuffer, Recording> recordings;
 std::unordered_map<VkDeviceMemory, VkDeviceSize> memory_sizes;
 std::unordered_set<VkImage> presentable;  // the swapchain's images
 VkFormat presentable_format{};
+std::unordered_map<VkImageView, VkFormat> presentable_views;  // the game's views of them, their format
 VkExtent2D screen{};  // the swapchain's
 int next_id = 1;
 
@@ -126,19 +129,21 @@ struct AlbedoCopy {
 };
 AlbedoCopy albedo;
 
-// The scene without the game's interface, copied from the swapchain image.
-struct SceneCopy {
+// The game's interface drawn into an image of ours, one per swapchain image.
+struct Layer {
     VkImage image{};
     VkDeviceMemory memory{};
+    VkImageView view{};
     VkExtent2D extent{};
     VkFormat format{};
     int id = 0;
-    bool failed = false;
-    VkImage of{};                   // the swapchain image copied
-    uint64_t recorded_at = UINT64_MAX;  // the present count when last recorded (once a frame)
-    uint64_t submitted_at = UINT64_MAX;
+    VkImageLayout layout{};  // the game's passes'
+    bool begun = false;      // cleared and drawn into since its image was last presented
+    bool submitted = false;  // a command buffer drawing into it submitted since
 };
-SceneCopy scene_copy;
+std::unordered_map<VkImage, Layer> layers;  // by swapchain image
+std::atomic<bool> layer_wanted{false};
+bool layer_failed = false;
 
 Recording& recording_of(VkCommandBuffer buffer) {
     // Called under depth_mutex.
@@ -337,89 +342,89 @@ void record_albedo(VkCommandBuffer buffer, VkImage source, VkImageLayout layout,
     make_light_levels(buffer, albedo.image, albedo.extent, next.CmdPipelineBarrier, next.CmdBlitImage);
 }
 
-// Our image for the scene before the interface (under depth_mutex).
-bool make_scene_copy(VkExtent2D extent, VkFormat format) {
-    if (scene_copy.image && scene_copy.extent.width == extent.width && scene_copy.extent.height == extent.height &&
-            scene_copy.format == format)
-        return true;
-    if (scene_copy.failed || !device_data || !device_data->instance) return false;
+// The interface layer of a swapchain image, made the screen's size in the
+// format of the game's view of it (under depth_mutex); false when it cannot
+// be (then the game draws its interface as usual).
+bool make_layer(Layer& layer, VkFormat format) {
+    if (layer.image) return layer.format == format && layer.extent.width == screen.width &&
+        layer.extent.height == screen.height;
+    if (layer_failed || !device_data || !device_data->instance || !screen.width || !screen.height) return false;
     DeviceData& d = *device_data;
-    SceneCopy made;
-    made.extent = extent;
+    Layer made;
+    made.extent = screen;
     made.format = format;
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = format;
-    info.extent = {extent.width, extent.height, 1};
+    info.extent = {screen.width, screen.height, 1};
     info.mipLevels = 1;
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkMemoryRequirements requirements{};
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     const bool ok = d.fn.CreateImage(d.device, &info, nullptr, &made.image) == VK_SUCCESS &&
         (d.fn.GetImageMemoryRequirements(d.device, made.image, &requirements), true) &&
         (allocate.allocationSize = requirements.size,
             allocate.memoryTypeIndex = device_local_memory(requirements.memoryTypeBits),
             allocate.memoryTypeIndex != UINT32_MAX) &&
         d.fn.AllocateMemory(d.device, &allocate, nullptr, &made.memory) == VK_SUCCESS &&
-        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS;
+        d.fn.BindImageMemory(d.device, made.image, made.memory, 0) == VK_SUCCESS &&
+        (view_info.image = made.image, d.fn.CreateImageView(d.device, &view_info, nullptr, &made.view) == VK_SUCCESS);
     if (!ok) {
         if (made.image) d.fn.DestroyImage(d.device, made.image, nullptr);
         if (made.memory) d.fn.FreeMemory(d.device, made.memory, nullptr);
-        scene_copy.failed = true;
-        log_line("under the interface: no image of our own for the scene");
+        layer_failed = true;
+        log_line("interface layer: no image of our own, the game's interface drawn as usual");
         return false;
     }
     made.id = next_id++;
-    scene_copy = made;
-    log_line("under the interface: the scene copied into #%d %ux%u, before the game's first pass loading the screen",
-        scene_copy.id, extent.width, extent.height);
+    layer = made;
+    log_line("interface layer: #%d %ux%u (format %d), the game's interface drawn into it from its first pass "
+        "loading the screen", layer.id, screen.width, screen.height, static_cast<int>(format));
     return true;
 }
 
-// The swapchain image copied into ours before the game's pass loading it
-// (`layout`, the one it has for that pass), put back in that layout.
-void record_scene_copy(VkCommandBuffer buffer, VkImage source, VkImageLayout layout) {
+// The layer cleared to transparent black before the game's first pass draws
+// into it (whatever its render area), then in that pass's layout.
+void record_layer_clear(VkCommandBuffer buffer, const Layer& layer, VkImageLayout layout) {
     const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VkImageMemoryBarrier before[2]{};
-    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    before[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    before[0].oldLayout = layout;
-    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    before[0].image = source;
-    before[1].srcAccessMask = 0;
-    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    before[1].image = scene_copy.image;
-    for (auto& barrier : before) {
-        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.subresourceRange = range;
-    }
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange = range;
+    barrier.image = layer.image;
+    // Its last content (laid back by the overlay) is not needed.
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-        nullptr, 2, before);
-    VkImageCopy region{};
-    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.dstSubresource = region.srcSubresource;
-    region.extent = {scene_copy.extent.width, scene_copy.extent.height, 1};
-    next.CmdCopyImage(buffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scene_copy.image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    VkImageMemoryBarrier after[2] = {before[0], before[1]};
-    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    after[0].newLayout = layout;
-    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-        nullptr, 2, after);
+        nullptr, 1, &barrier);
+    const VkClearColorValue transparent{};
+    next.CmdClearColorImage(buffer, layer.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &transparent, 1, &range);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = layout;
+    next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+        nullptr, 0, nullptr, 1, &barrier);
+}
+
+void destroy_layers() {
+    // Called under depth_mutex, the device idle.
+    DeviceData& d = *device_data;
+    for (auto& [image, layer] : layers) {
+        if (layer.view) d.fn.DestroyImageView(d.device, layer.view, nullptr);
+        if (layer.image) d.fn.DestroyImage(d.device, layer.image, nullptr);
+        if (layer.memory) d.fn.FreeMemory(d.device, layer.memory, nullptr);
+    }
+    layers.clear();
 }
 
 // The scene's depth, as the game's pass ends: worth a copy?
@@ -516,6 +521,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkImageVie
     if (followed.count(info->image) || colors.count(info->image) || presentable.count(info->image))
         views[*view] = info->image;
     else views.erase(*view);  // a handle given again
+    if (presentable.count(info->image)) presentable_views[*view] = info->format;
+    else presentable_views.erase(*view);
     return result;
 }
 
@@ -528,28 +535,52 @@ VKAPI_ATTR VkResult VKAPI_CALL BeginCommandBuffer(VkCommandBuffer buffer, const 
     return next.BeginCommandBuffer(buffer, info);
 }
 
-void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
+// A pass of the game given to the next layer with some of its attachments
+// changed: its copy.
+struct Redirected {
+    VkRenderingInfo info{};
+    std::vector<VkRenderingAttachmentInfo> colors;
+};
+
+// The pass to hand on: `info`, or `redirected` drawing into our interface
+// layers instead of the swapchain images.
+const VkRenderingInfo* begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info, Redirected& redirected) {
+    const VkRenderingInfo* given = info;
     bool scene = false;
     {
         std::lock_guard lock(depth_mutex);
         Recording& recording = recording_of(buffer);
         recording.depth = VK_NULL_HANDLE;
         recording.scene = false;
-        // The game's first pass loading a swapchain image in this frame (its
-        // interface): the scene copied before it, outside any pass.
-        if (!(info->flags & VK_RENDERING_RESUMING_BIT) && scene_copy.recorded_at != presents)
+        // The interface layer: from the game's first pass of the frame
+        // loading a swapchain image (its interface), its passes on that image
+        // draw into our layer, cleared first, outside any pass.
+        if (layer_wanted.load(std::memory_order_acquire) && !layer_failed)
             for (uint32_t i = 0; i < info->colorAttachmentCount; ++i) {
                 const VkRenderingAttachmentInfo& attachment = info->pColorAttachments[i];
-                if (!attachment.imageView || attachment.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD) continue;
+                if (!attachment.imageView) continue;
                 auto view = views.find(attachment.imageView);
                 if (view == views.end() || !presentable.count(view->second)) continue;
-                if (screen.width && make_scene_copy(screen, presentable_format)) {
-                    record_scene_copy(buffer, view->second, attachment.imageLayout);
-                    recording.scene_copied = true;
-                    scene_copy.recorded_at = presents;
-                    scene_copy.of = view->second;
+                auto format = presentable_views.find(attachment.imageView);
+                Layer& layer = layers[view->second];
+                const bool first = !layer.begun;
+                if (first && (attachment.loadOp != VK_ATTACHMENT_LOAD_OP_LOAD || (info->flags & VK_RENDERING_RESUMING_BIT)))
+                    continue;
+                if (format == presentable_views.end() || !make_layer(layer, format->second)) continue;
+                if (first) {
+                    record_layer_clear(buffer, layer, attachment.imageLayout);
+                    layer.begun = true;
+                    layer.submitted = false;
                 }
-                break;
+                layer.layout = attachment.imageLayout;
+                if (given == info) {
+                    redirected.info = *info;
+                    redirected.colors.assign(info->pColorAttachments, info->pColorAttachments + info->colorAttachmentCount);
+                    redirected.info.pColorAttachments = redirected.colors.data();
+                    given = &redirected.info;
+                }
+                redirected.colors[i].imageView = layer.view;
+                recording.layers.push_back(view->second);
             }
         // The G-buffer: four color attachments or more, the first a
         // screen-shaped R8G8B8A8_UNORM, one an A2B10G10R10 (its normals).
@@ -574,9 +605,9 @@ void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
                 recording.albedo_layout = info->pColorAttachments[0].imageLayout;
             }
         }
-        if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return;
+        if (!info->pDepthAttachment || !info->pDepthAttachment->imageView) return given;
         auto view = views.find(info->pDepthAttachment->imageView);
-        if (view == views.end()) return;
+        if (view == views.end()) return given;
         recording.depth = view->second;
         recording.layout = info->pDepthAttachment->imageLayout;
         recording.stored = info->pDepthAttachment->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
@@ -588,16 +619,17 @@ void begin_rendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
         recording.scene = scene;
     }
     if (scene) gpu::scene_begun(buffer);
+    return given;
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdBeginRendering(VkCommandBuffer buffer, const VkRenderingInfo* info) {
-    begin_rendering(buffer, info);
-    next.CmdBeginRendering(buffer, info);
+    thread_local Redirected redirected;
+    next.CmdBeginRendering(buffer, begin_rendering(buffer, info, redirected));
 }
 
 VKAPI_ATTR void VKAPI_CALL CmdBeginRenderingKHR(VkCommandBuffer buffer, const VkRenderingInfo* info) {
-    begin_rendering(buffer, info);
-    next.CmdBeginRenderingKHR(buffer, info);
+    thread_local Redirected redirected;
+    next.CmdBeginRenderingKHR(buffer, begin_rendering(buffer, info, redirected));
 }
 
 // After the game's pass ends: its scene depth copied, when it wrote one.
@@ -646,7 +678,11 @@ void submitted(VkCommandBuffer buffer) {
     if (copy.has_camera && light_probe_on) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
     if (found != recordings.end() && found->second.albedo_copied) albedo.submitted_at = presents;
-    if (found != recordings.end() && found->second.scene_copied) scene_copy.submitted_at = presents;
+    if (found != recordings.end())
+        for (VkImage image : found->second.layers) {
+            auto layer = layers.find(image);
+            if (layer != layers.end() && layer->second.begun) layer->second.submitted = true;
+        }
     if (found == recordings.end() || !found->second.copied) return;
     copy.submitted_at = presents;
     copy.camera = found->second.camera;
@@ -836,6 +872,8 @@ void start(DeviceData& d, PFN_vkGetDeviceProcAddr next_gdpa) {
     next.CmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(next_gdpa(d.device, "vkCmdPipelineBarrier"));
     next.CmdCopyImage = reinterpret_cast<PFN_vkCmdCopyImage>(next_gdpa(d.device, "vkCmdCopyImage"));
     next.CmdBlitImage = reinterpret_cast<PFN_vkCmdBlitImage>(next_gdpa(d.device, "vkCmdBlitImage"));
+    next.CmdClearColorImage = reinterpret_cast<PFN_vkCmdClearColorImage>(next_gdpa(d.device, "vkCmdClearColorImage"));
+    if (!next.CmdClearColorImage) layer_failed = true;
     log_line("game depth: on (game-depth.on), device %p", static_cast<void*>(d.device));
 }
 
@@ -857,7 +895,15 @@ void note_screen(VkExtent2D extent) {
 
 void note_swapchain(const std::vector<VkImage>& images, VkFormat format) {
     if (!enabled()) return;
+    // The old images' layers, once the GPU is done with them (a new swapchain is rare).
+    bool any = false;
+    {
+        std::lock_guard lock(depth_mutex);
+        any = !layers.empty();
+    }
+    if (any && device_data) device_data->fn.DeviceWaitIdle(device_data->device);
     std::lock_guard lock(depth_mutex);
+    if (any && device_data) destroy_layers();
     presentable.clear();
     presentable.insert(images.begin(), images.end());
     presentable_format = format;
@@ -876,15 +922,20 @@ SceneDepth scene_depth(VkExtent2D) {
         found.albedo_extent = albedo.extent;
         found.albedo_id = albedo.id;
     }
-    // This frame's only: an older scene would differ from the image shown
-    // everywhere it moved.
-    if (scene_copy.image && scene_copy.submitted_at == presents) {
-        found.scene = scene_copy.image;
-        found.scene_of = scene_copy.of;
-        found.scene_format = scene_copy.format;
-        found.scene_id = scene_copy.id;
-    }
     return found;
+}
+
+void want_interface_layer(bool wanted) {
+    if (!enabled()) return;
+    layer_wanted.store(wanted, std::memory_order_release);
+}
+
+InterfaceLayer take_interface_layer(VkImage image) {
+    if (!enabled()) return {};
+    std::lock_guard lock(depth_mutex);
+    auto found = layers.find(image);
+    if (found == layers.end() || !found->second.begun || !found->second.submitted) return {};
+    return {found->second.image, found->second.view, found->second.layout, found->second.id};
 }
 
 Settings settings() {
@@ -923,10 +974,16 @@ Settings settings() {
     return current;
 }
 
-void presented() {
+void presented(const std::vector<VkImage>& images) {
     if (!enabled()) return;
     std::lock_guard lock(depth_mutex);
     ++presents;
+    for (VkImage image : images) {
+        auto layer = layers.find(image);
+        if (layer == layers.end()) continue;
+        layer->second.begun = false;
+        layer->second.submitted = false;
+    }
 }
 
 }  // namespace overlay::depth
