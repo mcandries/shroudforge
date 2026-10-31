@@ -40,7 +40,7 @@ layout(push_constant) uniform Constants {
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
-    float normal_y;    // the normal maps' green: 1 as stored, -1 the other way
+    float relief;      // how much the normal maps tilt the faces (cells.texture_relief)
     float normal_faces;  // which faces have a normal map: 1 sides, 2 top, 4 bottom
     vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
 } c;
@@ -210,13 +210,13 @@ vec3 light_at() {
 }
 
 // The relief of a face from its normal map (x and y in its first two
-// channels, z made from them), laid as its color (u along `along`, v along
-// `down`): lit from above (a side, from above and in front), against the
-// flat face so lit; 1 where it is flat.
+// channels, the green toward the image's top, as the game stores it: 31/10,
+// tested in game; z made from them; tilted by c.relief), laid as its color
+// (u along `along`, v along `down`): lit from above (a side, from above and
+// in front), against the flat face so lit; 1 where it is flat.
 float relief(vec4 stored, vec3 face, vec3 along, vec3 down) {
-    vec2 xy = stored.rg * 2.0 - 1.0;
-    vec3 n = normalize(along * xy.x + down * (xy.y * c.normal_y) +
-        face * sqrt(max(1.0 - dot(xy, xy), 0.0)));
+    vec2 xy = (stored.rg * 2.0 - 1.0) * c.relief;
+    vec3 n = normalize(along * xy.x - down * xy.y + face * sqrt(max(1.0 - dot(xy, xy), 0.0)));
     vec3 light = abs(face.y) > 0.5 ? face : normalize(face + vec3(0.0, 0.8, 0.0));
     return clamp(max(dot(n, light), 0.0) / max(dot(face, light), 0.2), 0.35, 1.6);
 }
@@ -237,11 +237,13 @@ vec4 textured(vec4 color) {
     vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
     vec3 bottom = texture(textures[2], plane * c.tiling.z).rgb;
     vec3 rgb = kind <= 2 ? side : kind == 3 ? top : bottom;
-    // Their ambient occlusion (white when the material has none).
-    float side_ao = texture(textures[3], plane * c.tiling.x).r;
-    float top_ao = texture(textures[4], plane * c.tiling.y).r;
-    float bottom_ao = texture(textures[5], plane * c.tiling.z).r;
-    rgb *= kind <= 2 ? side_ao : kind == 3 ? top_ao : bottom_ao;
+    // Their ambient occlusion (white when the material has none), against
+    // its mean (its smallest level): the light lent by the game's surfaces
+    // already holds theirs (31/10: counted twice, the wall too dark).
+    float side_ao = texture(textures[3], plane * c.tiling.x).r / max(textureLod(textures[3], vec2(0.5), 16.0).r, 0.25);
+    float top_ao = texture(textures[4], plane * c.tiling.y).r / max(textureLod(textures[4], vec2(0.5), 16.0).r, 0.25);
+    float bottom_ao = texture(textures[5], plane * c.tiling.z).r / max(textureLod(textures[5], vec2(0.5), 16.0).r, 0.25);
+    rgb *= min(kind <= 2 ? side_ao : kind == 3 ? top_ao : bottom_ao, 1.5);
     // Their normal maps: the face's outward normal, and the world's axes
     // along which its texture's u and v run.
     vec4 side_n = texture(textures[6], plane * c.tiling.x);
