@@ -208,11 +208,9 @@ struct Item {
     // (`solids`, and the cells drawn, counted as blocks), as hidden_dashed
     // does in Remove mode (cells.through_blocks: Build's wire view, 31/10).
     bool world_through_blocks = false;
-    // World, the solid style: its faces textured as the game draws the
-    // material, sides, top and bottom (cells.texture).
-    // Sides, top and bottom, then their ambient occlusion, then their normal
-    // maps (no data: none).
-    std::array<WorldTexture, 9> world_textures;
+    // World, the solid style: the normal maps of the material's sides, top
+    // and bottom (cells.texture).
+    std::array<WorldTexture, 3> world_textures;
     // cells.texture_relief (0 to 1): how much the normal maps tilt the faces.
     float world_relief = 1.0f;
     // World: `under_interface = true` while the overlay's world items are to

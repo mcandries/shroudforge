@@ -990,7 +990,7 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT},
-        {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9, VK_SHADER_STAGE_FRAGMENT_BIT},
+        {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3, VK_SHADER_STAGE_FRAGMENT_BIT},
     };
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     set_info.bindingCount = 4;
@@ -1130,7 +1130,7 @@ bool create_world(DeviceData& d, Renderer& r, VkFormat format) {
     light_info.maxLod = 8.0f;
     light_info.addressModeU = light_info.addressModeV = light_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     if (d.fn.CreateSampler(d.device, &light_info, nullptr, &w.light_sampler) != VK_SUCCESS) return false;
-    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 11 * kFrames},
+    VkDescriptorPoolSize pool_sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 * kFrames},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrames}};
     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pool_info.maxSets = kFrames;
@@ -1949,8 +1949,8 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     d.fn.UpdateDescriptorSets(d.device, 1, &blocks_write, 0, nullptr);
     // The solid style's textures (or white), made and copied as needed.
     tidy_textures(d, r);
-    VkDescriptorImageInfo texture_infos[9];
-    for (int i = 0; i < 9; ++i) {
+    VkDescriptorImageInfo texture_infos[3];
+    for (int i = 0; i < 3; ++i) {
         const VkImageView view_of = texture_view(d, r, cb, draw.textured ? &draw.textures[i] : nullptr);
         if (!view_of) return false;
         texture_infos[i] = {w.texture_sampler, view_of, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -1958,7 +1958,7 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     VkWriteDescriptorSet textures_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     textures_write.dstSet = w.sets[slot];
     textures_write.dstBinding = 3;
-    textures_write.descriptorCount = 9;
+    textures_write.descriptorCount = 3;
     textures_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     textures_write.pImageInfo = texture_infos;
     d.fn.UpdateDescriptorSets(d.device, 1, &textures_write, 0, nullptr);
@@ -2107,7 +2107,7 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.relief = static_cast<float>(r.world_draw.relief);
     int normal_faces = 0;
     for (int i = 0; i < 3; ++i)
-        if (r.world_draw.textured && r.world_draw.textures[6 + i].data) normal_faces |= 1 << i;
+        if (r.world_draw.textured && r.world_draw.textures[i].data) normal_faces |= 1 << i;
     constants.normal_faces = static_cast<float>(normal_faces);
     constants.glow = r.world_draw.glow;
     // The solid style textured: the eye in meters from the texture origin.
