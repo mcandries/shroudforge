@@ -36,6 +36,15 @@ constexpr uint32_t kFrames = 4;
 constexpr uint32_t kDrawsPerFrame = 2;
 constexpr wchar_t kDefaultFont[] = L"C:\\Windows\\Fonts\\segoeui.ttf";
 
+// The image shown made a quarter of its size, with its smaller levels down
+// to depth::kLightLevels (shrink_screen).
+struct ScreenCopy {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    VkImageView view{};
+    VkExtent2D extent{};
+};
+
 struct FrameSlot {
     VkCommandBuffer command_buffer{};
     VkFence fence{};
@@ -152,10 +161,11 @@ struct WorldDepthPipeline {
     VkSampler texture_sampler{};
     // The light view: the image shown, made smaller before the overlay draws,
     // and a view of the game's G-buffer color made smaller (game_depth.cpp).
-    VkImage screen_small{};
-    VkDeviceMemory screen_small_memory{};
-    VkImageView screen_small_view{};
-    VkExtent2D screen_small_extent{};
+    ScreenCopy screen_small;
+    // The HUD's blurred scene: the image shown with the world items, made
+    // smaller after they are drawn (fill_hud_blur).
+    ScreenCopy hud_small;
+    bool hud_blur_said = false;
     bool screen_copied = false;  // this frame
     bool light_ready = false;    // this frame: both images, and an item asking
     std::unordered_map<int, VkImageView> albedo_views;  // by the copy's number
@@ -807,9 +817,11 @@ void release_world(DeviceData& d, Renderer& r) {
     for (auto& [data, texture] : w.textures) release_texture(d, texture);
     release_texture(d, w.white);
     if (w.texture_sampler) d.fn.DestroySampler(d.device, w.texture_sampler, nullptr);
-    if (w.screen_small_view) d.fn.DestroyImageView(d.device, w.screen_small_view, nullptr);
-    if (w.screen_small) d.fn.DestroyImage(d.device, w.screen_small, nullptr);
-    if (w.screen_small_memory) d.fn.FreeMemory(d.device, w.screen_small_memory, nullptr);
+    for (ScreenCopy* copy : {&w.screen_small, &w.hud_small}) {
+        if (copy->view) d.fn.DestroyImageView(d.device, copy->view, nullptr);
+        if (copy->image) d.fn.DestroyImage(d.device, copy->image, nullptr);
+        if (copy->memory) d.fn.FreeMemory(d.device, copy->memory, nullptr);
+    }
     for (auto& [id, view] : w.albedo_views) d.fn.DestroyImageView(d.device, view, nullptr);
     if (w.light_sampler) d.fn.DestroySampler(d.device, w.light_sampler, nullptr);
     if (w.interface_pipeline) d.fn.DestroyPipeline(d.device, w.interface_pipeline, nullptr);
@@ -1369,19 +1381,19 @@ VkImageView texture_view(DeviceData& d, Renderer& r, VkCommandBuffer cb, const W
     return t.view;
 }
 
-// The light view: the image shown, a quarter of its size, copied before the
-// overlay draws (the swapchain made copyable; the scene alone when the game's
-// interface went to its layer), left for the shaders; false when it cannot be.
-bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent) {
-    WorldDepthPipeline& w = r.world;
+// The image shown (PRESENT_SRC, the swapchain made copyable) copied into
+// `copy`, a quarter of its size, its smaller levels made: all left in
+// SHADER_READ_ONLY_OPTIMAL; false when it cannot be. `what` names it in the log.
+bool shrink_screen(DeviceData& d, VkCommandBuffer cb, VkImage shown, VkExtent2D extent, ScreenCopy& copy,
+        const char* what) {
     const VkExtent2D small{std::max(1u, extent.width / 4), std::max(1u, extent.height / 4)};
-    if (!w.screen_small || w.screen_small_extent.width != small.width || w.screen_small_extent.height != small.height) {
-        if (w.screen_small_view) d.fn.DestroyImageView(d.device, w.screen_small_view, nullptr);
-        if (w.screen_small) d.fn.DestroyImage(d.device, w.screen_small, nullptr);
-        if (w.screen_small_memory) d.fn.FreeMemory(d.device, w.screen_small_memory, nullptr);
-        w.screen_small = VK_NULL_HANDLE;
-        w.screen_small_memory = VK_NULL_HANDLE;
-        w.screen_small_view = VK_NULL_HANDLE;
+    if (!copy.image || copy.extent.width != small.width || copy.extent.height != small.height) {
+        if (copy.view) d.fn.DestroyImageView(d.device, copy.view, nullptr);
+        if (copy.image) d.fn.DestroyImage(d.device, copy.image, nullptr);
+        if (copy.memory) d.fn.FreeMemory(d.device, copy.memory, nullptr);
+        copy.image = VK_NULL_HANDLE;
+        copy.memory = VK_NULL_HANDLE;
+        copy.view = VK_NULL_HANDLE;
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         info.imageType = VK_IMAGE_TYPE_2D;
         info.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1391,24 +1403,24 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
         info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        if (d.fn.CreateImage(d.device, &info, nullptr, &w.screen_small) != VK_SUCCESS) return false;
+        if (d.fn.CreateImage(d.device, &info, nullptr, &copy.image) != VK_SUCCESS) return false;
         VkMemoryRequirements requirements{};
-        d.fn.GetImageMemoryRequirements(d.device, w.screen_small, &requirements);
+        d.fn.GetImageMemoryRequirements(d.device, copy.image, &requirements);
         VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocate.allocationSize = requirements.size;
         allocate.memoryTypeIndex = memory_type(d, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (allocate.memoryTypeIndex == UINT32_MAX ||
-            d.fn.AllocateMemory(d.device, &allocate, nullptr, &w.screen_small_memory) != VK_SUCCESS ||
-            d.fn.BindImageMemory(d.device, w.screen_small, w.screen_small_memory, 0) != VK_SUCCESS)
+            d.fn.AllocateMemory(d.device, &allocate, nullptr, &copy.memory) != VK_SUCCESS ||
+            d.fn.BindImageMemory(d.device, copy.image, copy.memory, 0) != VK_SUCCESS)
             return false;
         VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view_info.image = w.screen_small;
+        view_info.image = copy.image;
         view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = VK_FORMAT_R8G8B8A8_UNORM;
         view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, depth::kLightLevels, 0, 1};
-        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &w.screen_small_view) != VK_SUCCESS) return false;
-        w.screen_small_extent = small;
-        log_line("light view: the image shown copied into %ux%u", small.width, small.height);
+        if (d.fn.CreateImageView(d.device, &view_info, nullptr, &copy.view) != VK_SUCCESS) return false;
+        copy.extent = small;
+        log_line("%s: the image shown copied into %ux%u", what, small.width, small.height);
     }
     const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     VkImageMemoryBarrier before[2]{};
@@ -1424,7 +1436,7 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
     before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    before[1].image = w.screen_small;
+    before[1].image = copy.image;
     for (auto& barrier : before) {
         barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.subresourceRange = range;
@@ -1437,7 +1449,7 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
     blit.srcOffsets[1] = {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height), 1};
     blit.dstSubresource = blit.srcSubresource;
     blit.dstOffsets[1] = {static_cast<int32_t>(small.width), static_cast<int32_t>(small.height), 1};
-    d.fn.CmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, w.screen_small, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    d.fn.CmdBlitImage(cb, shown, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, copy.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1, &blit, VK_FILTER_LINEAR);
     VkImageMemoryBarrier after = before[0];
     after.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -1449,7 +1461,69 @@ bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, 
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
         1, &after);
     // Its smaller levels: the light, smooth.
-    depth::make_light_levels(cb, w.screen_small, small, d.fn.CmdPipelineBarrier, d.fn.CmdBlitImage);
+    depth::make_light_levels(cb, copy.image, small, d.fn.CmdPipelineBarrier, d.fn.CmdBlitImage);
+    return true;
+}
+
+// The light view: the image shown before the overlay draws (the scene alone
+// when the game's interface went to its layer), left for the shaders.
+bool copy_screen(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent) {
+    return shrink_screen(d, cb, shown, extent, r.world.screen_small, "light view");
+}
+
+// The HUD's blurred scene (game_depth.cpp, hud_blur_target): the image shown
+// with the world items (the game's interface in its layer: the scene and the
+// build alone) made a quarter of its size, its levels down to 1/32, the
+// 1/16 one stretched over `target` (a blur like the game's, 31/10 capture);
+// left in SHADER_READ_ONLY_OPTIMAL, for the game's next frame.
+bool fill_hud_blur(DeviceData& d, Renderer& r, VkCommandBuffer cb, VkImage shown, VkExtent2D extent,
+        const depth::HudBlur& target) {
+    WorldDepthPipeline& w = r.world;
+    if (!target.image || !shrink_screen(d, cb, shown, extent, w.hud_small, "HUD blur")) return false;
+    constexpr uint32_t kLevel = 2;  // 1/16 of the screen
+    const VkExtent2D from{std::max(1u, w.hud_small.extent.width >> kLevel),
+        std::max(1u, w.hud_small.extent.height >> kLevel)};
+    VkImageMemoryBarrier before[2]{};
+    before[0].sType = before[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    before[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    before[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    before[0].image = w.hud_small.image;
+    before[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, kLevel, 1, 0, 1};
+    // Ours: its last content, copied in an earlier frame, not needed.
+    before[1].srcAccessMask = 0;
+    before[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    before[1].image = target.image;
+    before[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    for (auto& barrier : before) barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, before);
+    VkImageBlit blit{};
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, kLevel, 0, 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(from.width), static_cast<int32_t>(from.height), 1};
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[1] = {static_cast<int32_t>(target.extent.width), static_cast<int32_t>(target.extent.height), 1};
+    d.fn.CmdBlitImage(cb, w.hud_small.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    VkImageMemoryBarrier after[2] = {before[0], before[1]};
+    after[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    after[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    after[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+        nullptr, 2, after);
+    if (!w.hud_blur_said) {
+        w.hud_blur_said = true;
+        log_line("HUD blur: the scene with the world items blurred into %ux%u for the game's next frame",
+            target.extent.width, target.extent.height);
+    }
     return true;
 }
 
@@ -1635,7 +1709,7 @@ bool prepare_world(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot
     w.light_ready = draw.texture_light && albedo_of && w.screen_copied;
     VkDescriptorImageInfo light_infos[2] = {
         {w.light_sampler, w.light_ready ? albedo_of : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-        {w.light_sampler, w.light_ready ? w.screen_small_view : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {w.light_sampler, w.light_ready ? w.screen_small.view : w.white.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
     };
     VkWriteDescriptorSet light_writes[2]{};
     for (int i = 0; i < 2; ++i) {
@@ -1919,10 +1993,16 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     // after a frame drawn here with the world items under it (whatever
     // returns early says no: the overlay could not lay it back).
     bool keep_layer = false;
+    // Our HUD blur, filled at this present for the game's next frame.
+    bool hud_blur = false;
     struct LayerWish {
         bool& keep;
-        ~LayerWish() { depth::want_interface_layer(keep); }
-    } layer_wish{keep_layer};
+        bool& blur;
+        ~LayerWish() {
+            depth::want_interface_layer(keep);
+            depth::hud_blur_filled(blur);
+        }
+    } layer_wish{keep_layer, hud_blur};
     update_player_options();
     SwapchainData* target = nullptr;
     uint32_t image_index = 0;
@@ -2156,6 +2236,12 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         written.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 1, &written, 0, nullptr, 0, nullptr);
+        // The HUD's blurred scene with the build in it, for the game's next
+        // frame: only from the scene alone (its interface in its layer), in a
+        // format the game's blur shares.
+        hud_blur = r.world.interface_ready && target->copyable &&
+            (target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM) &&
+            fill_hud_blur(d, r, cb, shown_image, target->extent, depth::hud_blur_target());
     }
     if (r.offscreen_used) {
         ImDrawData data;
@@ -2212,6 +2298,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     // The game's interface under its layer from now on, while the world items
     // are drawn under it.
     keep_layer = world_drawn && r.world_draw.under_interface && r.world.interface_pipeline;
+    hud_blur = hud_blur && keep_layer;
     if (!r.first_frame_logged) {
         r.first_frame_logged = true;
         log_line("first overlay frame drawn (%zu zones)", scene.zones.size());
