@@ -72,11 +72,28 @@ struct WorldQuad {
 // behind them, seen from the camera, are drawn lighter. The corner of the
 // first cell and the cell side in meters; 1 in `filled` for a filled cell,
 // x fastest, then y, then z.
+// A texture of the build drawn solid (a world item's cells.texture): BC7
+// (or BC1, BC4, BC5) levels as the game stores them, the largest first,
+// `tiling` repeats a meter (the game's tilingFactor).
+enum class TextureFormat { bc7, bc1, bc4, bc5 };
+struct WorldTexture {
+    std::shared_ptr<const std::string> data;
+    int width = 0, height = 0, levels = 0;
+    TextureFormat format = TextureFormat::bc7;
+    float tiling = 0.25f;
+};
+
+// Bytes of `levels` levels from width x height down: 16 a block of 4 x 4,
+// 8 for BC1 and BC4 (`half`).
+size_t bc7_bytes(int width, int height, int levels, bool half = false);
+inline bool half_blocks(TextureFormat format) { return format == TextureFormat::bc1 || format == TextureFormat::bc4; }
+
 struct WorldSolids {
     int sx = 0, sy = 0, sz = 0;
     double origin[3]{};
     double cell = 0.5;
     std::vector<std::uint8_t> filled;
+    std::vector<std::uint32_t> bits;  // `filled` a bit per cell, for the GPU (the wire view in Remove mode)
     std::shared_ptr<const std::string> data;  // The run-length text they were decoded from.
 };
 enum class Align { Start, Center, End };
@@ -169,6 +186,69 @@ struct Item {
     // the eye is outside it: elsewhere what hides them is not known, and they
     // would show in front of the world.
     bool world_only_in_solids = false;
+    // World: asks for the picture of the game's depth (game-depth.on), a diagnostic.
+    bool world_depth_picture = false;
+    // World: the camera drawing it against the game's depth (game-depth.on):
+    // 0 the scene's from the GPU, 1 read with the depth's copy, 2 read at the
+    // present; -1 as game-depth.on says.
+    int world_depth_camera = -1;
+    // World: how far behind the game's surface its cells still show (meters),
+    // against the game's depth; negative: as game-depth.on says.
+    float world_depth_margin = -1.0f;
+    // World: the game's near distance for its depth (meters); 0: the GPU
+    // camera matrix's; negative: as game-depth.on says.
+    float world_depth_near = -1.0f;
+    // World: the GPU camera's matrix kept as the game gives it, with its
+    // temporal anti-aliasing jitter (depth_jitter = "keep"); by default
+    // taken out, the build steady on the image (30/10: shimmering by a pixel
+    // with FSR 3, not without anti-aliasing or with FXAA).
+    bool world_depth_jitter_kept = false;
+    // World: its cells drawn this much larger (meters) where their surface is
+    // open, as the game draws its blocks past their cells; they stay on the
+    // grid. Faces pushed out, their edges longer at an outer corner, shorter
+    // at an inner one.
+    float world_face_offset = 0.0f;
+    // World: per cell character, its own face_offset: sides, top (+y),
+    // bottom (-y) (the game's blocks: each material its own, KB 30/10).
+    std::vector<std::pair<unsigned char, std::array<float, 3>>> world_face_offsets;
+    // World: every face drawn with the largest offsets of the characters it
+    // holds, direction by direction (face_offsets_largest): a build's faces
+    // all as far out, whatever block was there (30/10: steps on a wall of
+    // stone built over in wood, the stone's cells farther).
+    bool world_face_offsets_largest = false;
+    // World, the wire view: the creases between two faces turned away from
+    // the eye drawn too, dashed, this opaque (cells.back_edges, 0 to 1; 0:
+    // not drawn). 30/10: a crease seen from one side vanished from
+    // the other, the build hard to read.
+    float world_back_edges = 0.0f;
+    // World: a hidden edge's dashes this opaque (cells.dash_opacity, 0 to 1;
+    // negative: 220 / 255, nearly opaque, as before 31/10).
+    float world_dash_opacity = -1.0f;
+    // World, the wire view: what hides an edge told by the world's blocks
+    // (`solids`, and the cells drawn, counted as blocks), as hidden_dashed
+    // does in Remove mode (cells.through_blocks: Build's wire view, 31/10).
+    bool world_through_blocks = false;
+    // World, the solid style: its faces textured as the game draws the
+    // material, sides, top and bottom (cells.texture).
+    // Sides, top and bottom, then their ambient occlusion, then their normal
+    // maps (no data: none).
+    std::array<WorldTexture, 9> world_textures;
+    // cells.texture_relief (0 to 1): how much the normal maps tilt the faces.
+    float world_relief = 1.0f;
+    // World: `under_interface = true` while the overlay's world items are to
+    // lie under the game's interface (its interface layer, game_depth.cpp),
+    // whatever they hold; `hud_blur = true`, the HUD's blurred backgrounds
+    // made from them too. Off by default: the game draws as usual.
+    bool world_under_interface = false;
+    bool world_hud_blur = false;
+    bool world_textured = false;
+    // World: textures kept on the GPU though not drawn (cells.texture_keep,
+    // the data of the mod's cached materials): drawn again, not made again.
+    std::vector<std::shared_ptr<const std::string>> world_texture_keep;
+    // World, the solid style textured: lit as the game lights what stands
+    // around (cells.texture_light, the light view: the image shown divided by
+    // the color of the game's surfaces, around each pixel).
+    bool world_texture_light = false;
     std::shared_ptr<const WorldSolids> world_own_solids;
     // World: the camera foreseen this many seconds ahead (0 to 0.2).
     float camera_lead = 0.0f;
@@ -269,7 +349,8 @@ struct SceneSnapshot {
     Options options;
 };
 
-// What the present path reads at each frame (cheap: shared pointers).
+// What the present path reads at each frame (cheap: shared pointers): no
+// zone while the overlay is off, hidden, or a game menu open.
 SceneSnapshot snapshot_scene();
 // Whether any zone could be drawn, checked before doing any GPU work.
 bool scene_has_visible_zones();

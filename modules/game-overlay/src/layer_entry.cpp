@@ -8,6 +8,8 @@
 // With no zone, or anything unexpected, the game presents untouched.
 
 #include "overlay.h"
+#include "game_depth.h"
+#include "render_probe.h"
 
 #include <intrin.h>
 
@@ -117,6 +119,8 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice physical_device, co
         std::lock_guard lock(state_mutex);
         devices[dispatch_key(*device)] = d;
     }
+    probe::start(*device, next_gdpa);
+    depth::start(*d, next_gdpa);
     log_line("device %p created, called from %s, layers below: %s", static_cast<void*>(*device),
         module_name(_ReturnAddress()).c_str(), below.c_str());
     return VK_SUCCESS;
@@ -158,15 +162,28 @@ VKAPI_ATTR void VKAPI_CALL GetDeviceQueue2(VkDevice device, const VkDeviceQueueI
 VKAPI_ATTR VkResult VKAPI_CALL CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* info,
         const VkAllocationCallbacks* allocator, VkSwapchainKHR* swapchain) {
     DeviceData* d = device_of(dispatch_key(device));
-    VkResult result = d->fn.CreateSwapchainKHR(device, info, allocator, swapchain);
+    // Copyable too, with the game's depth (the light view reads the image
+    // the game shows); without it if the surface refuses.
+    VkSwapchainCreateInfoKHR copyable = *info;
+    if (depth::enabled()) copyable.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkResult result = d->fn.CreateSwapchainKHR(device, &copyable, allocator, swapchain);
+    if (result != VK_SUCCESS && copyable.imageUsage != info->imageUsage) {
+        copyable.imageUsage = info->imageUsage;
+        result = d->fn.CreateSwapchainKHR(device, info, allocator, swapchain);
+    }
     if (result != VK_SUCCESS) return result;
     SwapchainData data;
+    data.copyable = (copyable.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
     data.format = info->imageFormat;
     data.extent = info->imageExtent;
     uint32_t count = 0;
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, nullptr);
     data.images.resize(count);
     d->fn.GetSwapchainImagesKHR(device, *swapchain, &count, data.images.data());
+    probe::note_swapchain(data.images, info->imageFormat, info->imageExtent);
+    depth::note_screen(info->imageExtent);
+    // Its images: the game's interface may be drawn into layers of ours instead.
+    depth::note_swapchain(data.images, info->imageFormat);
     // The zones are drawn in a render pass, as a color attachment.
     const bool attachment = (info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
     data.drawable = attachment && drawable_format(info->imageFormat) && info->imageArrayLayers == 1;
@@ -194,11 +211,22 @@ VKAPI_ATTR void VKAPI_CALL DestroySwapchainKHR(VkDevice device, VkSwapchainKHR s
 
 VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     DeviceData* d = device_of(dispatch_key(queue));
+    probe::presented();
     VkSemaphore done = VK_NULL_HANDLE;
     {
         std::lock_guard render(d->render_mutex);
         done = render_frame(*d, queue, *info);
     }
+    std::vector<VkImage> shown;
+    if (depth::enabled()) {
+        std::lock_guard lock(state_mutex);
+        for (uint32_t i = 0; i < info->swapchainCount; ++i) {
+            auto found = d->swapchains.find(info->pSwapchains[i]);
+            if (found != d->swapchains.end() && info->pImageIndices[i] < found->second.images.size())
+                shown.push_back(found->second.images[info->pImageIndices[i]]);
+        }
+    }
+    depth::presented(shown);
     if (!done) return d->fn.QueuePresentKHR(queue, info);
     VkPresentInfoKHR patched = *info;
     patched.waitSemaphoreCount = 1;
@@ -216,7 +244,8 @@ PFN_vkVoidFunction device_function(const char* requested) {
     INTERCEPT(CreateSwapchainKHR);
     INTERCEPT(DestroySwapchainKHR);
     INTERCEPT(QueuePresentKHR);
-    return nullptr;
+    if (PFN_vkVoidFunction own = depth::function(requested)) return own;
+    return probe::function(requested);
 }
 
 }  // namespace

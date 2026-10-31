@@ -10,6 +10,7 @@ pub(crate) struct ViewBase {
     hi: [i32; 3],
     surface: bool,
     depth: i32,
+    density_min: i32,
     /// The chunks it was read from, held: a chunk replaced in the store is
     /// another allocation, never one at the same address.
     chunks: HashMap<[i32; 3], ChunkCells>,
@@ -41,6 +42,7 @@ pub(crate) fn view_base(input: &ViewInput, size: [usize; 3]) -> (Arc<Vec<i32>>, 
                 hi: input.hi,
                 surface: input.surface,
                 depth: input.depth,
+                density_min: input.density_min,
                 chunks: input.chunks.clone(),
                 values: values.clone(),
                 skin: skin.clone(),
@@ -55,6 +57,7 @@ fn same_base(base: &ViewBase, input: &ViewInput) -> bool {
         && base.hi == input.hi
         && base.surface == input.surface
         && (!input.surface || base.depth == input.depth)
+        && base.density_min == input.density_min
         && base.chunks.len() == input.chunks.len()
         && input.chunks.iter().all(|(key, cells)| match (base.chunks.get(key), cells) {
             (Some(ChunkCells::Packed(a)), ChunkCells::Packed(b)) => Arc::ptr_eq(a, b),
@@ -88,6 +91,7 @@ mod tests {
             surface: true,
             depth: 3,
             bases: Some(bases.clone()),
+            density_min: 1,
         }
     }
 

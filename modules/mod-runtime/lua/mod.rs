@@ -32,6 +32,7 @@ pub(crate) mod shroudforge {
         pub(crate) mod game_overlay;
         mod pass_overlay_blobs;
         mod read_monotonic_clock;
+        mod read_game_content;
         pub(crate) mod read_runtime_operations;
         mod read_ui_locale;
         mod resolve_overlay_paths;

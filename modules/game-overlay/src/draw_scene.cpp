@@ -15,8 +15,11 @@
 #include <iterator>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace overlay {
+
+void log_line(const char* format, ...);  // log.cpp
 
 namespace {
 
@@ -420,9 +423,22 @@ struct WorldView {
     double eye[3]{}, right[3]{}, up[3]{}, forward[3]{};
     double focal_x = 1.0, focal_y = 1.0;
     ImVec2 screen;
+    // With the GPU camera's matrix: camera space is its clip x, y and w (w the
+    // distance along the gaze, in meters), focal_x and focal_y 1: the very
+    // projection of the image. Its clip y goes up (30/10: taken as Vulkan's,
+    // down, world items mirrored as the view pitched): the game flips its
+    // viewport.
+    bool matrix = false;
+    double m[16]{};
 
     // Camera space of a world point: x right, y up, z forward (meters).
     void to_camera(const double point[3], double out[3]) const {
+        if (matrix) {
+            out[0] = m[0] * point[0] + m[1] * point[1] + m[2] * point[2] + m[3];
+            out[1] = m[4] * point[0] + m[5] * point[1] + m[6] * point[2] + m[7];
+            out[2] = m[12] * point[0] + m[13] * point[1] + m[14] * point[2] + m[15];
+            return;
+        }
         const double d[3] = {point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
         out[0] = d[0] * right[0] + d[1] * right[1] + d[2] * right[2];
         out[1] = d[0] * up[0] + d[1] * up[1] + d[2] * up[2];
@@ -434,10 +450,21 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr) {
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr,
+    bool keep_jitter = false) {
     LocalCamera camera;
     if (!local_camera(camera, lead)) return false;
     if (read) *read = camera;
+    // The camera the game drew the scene with, when known: the cursor stays
+    // the one read now.
+    if (drawn) {
+        for (int i = 0; i < 3; ++i) camera.position[i] = drawn->position[i];
+        for (int i = 0; i < 4; ++i) camera.orientation[i] = drawn->orientation[i];
+        camera.fov_y = drawn->fov_y;
+        camera.fov_x = drawn->fov_x;
+        camera.has_matrix = drawn->has_matrix;
+        for (int i = 0; i < 16; ++i) camera.matrix[i] = drawn->matrix[i];
+    }
     const double* q = camera.orientation;
     const auto rotate = [&](double x, double y, double z, double out[3]) {
         // v + 2w (q x v) + 2 q x (q x v)
@@ -452,8 +479,27 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr)
     rotate(0.0, 0.0, 1.0, view.forward);
     view.screen = ImGui::GetIO().DisplaySize;
     if (view.screen.x <= 0.0f || view.screen.y <= 0.0f) return false;
+    if (camera.has_matrix) {
+        view.matrix = true;
+        for (int i = 0; i < 16; ++i) view.m[i] = camera.matrix[i];
+        // The temporal anti-aliasing's jitter: a fraction of a pixel added
+        // to clip x and y as w times a new offset each frame, rows 0 and 1
+        // taking a part of the gaze row 3. The camera's right and up are
+        // square to its gaze: what of row 3 they hold is the jitter.
+        if (!keep_jitter) {
+            const double gaze = view.m[12] * view.m[12] + view.m[13] * view.m[13] + view.m[14] * view.m[14];
+            for (int row = 0; row < 2 && gaze > 0.0; ++row) {
+                double* r = view.m + row * 4;
+                const double k = (r[0] * view.m[12] + r[1] * view.m[13] + r[2] * view.m[14]) / gaze;
+                for (int i = 0; i < 4; ++i) r[i] -= k * view.m[12 + i];
+            }
+        }
+        view.focal_x = 1.0;
+        view.focal_y = 1.0;
+        return true;
+    }
     view.focal_y = std::tan(camera.fov_y * 0.5);
-    view.focal_x = view.focal_y * view.screen.x / view.screen.y;
+    view.focal_x = camera.fov_x > 0.0 ? std::tan(camera.fov_x * 0.5) : view.focal_y * view.screen.x / view.screen.y;
     return view.focal_y > 0.0;
 }
 
@@ -708,6 +754,28 @@ void dashed_line(const Context& c, ImVec2 a, ImVec2 b, ImU32 color, float width)
     }
 }
 
+// The characters of a mesh's outer faces, kept for the last few meshes.
+const std::array<bool, 128>& characters_of(const std::shared_ptr<const VoxelMesh>& mesh) {
+    struct Entry {
+        std::weak_ptr<const VoxelMesh> mesh;
+        const VoxelMesh* raw = nullptr;
+        std::array<bool, 128> present{};
+    };
+    static std::vector<Entry> entries;
+    for (const Entry& entry : entries)
+        if (entry.raw == mesh.get() && entry.mesh.lock() == mesh) return entry.present;
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& e) { return e.mesh.expired(); }),
+        entries.end());
+    if (entries.size() >= 16) entries.erase(entries.begin());
+    Entry entry;
+    entry.mesh = mesh;
+    entry.raw = mesh.get();
+    for (const VoxelFace& face : mesh->faces)
+        if (!face.inner && face.ch < 128) entry.present[face.ch] = true;
+    entries.push_back(entry);
+    return entries.back().present;
+}
+
 // A box of cells in the world (`cells` of a world item): the faces turned to
 // the camera filled with their cell's color, lit by their direction, the
 // farthest first (at most kMaxWorldFaces); then over all of them their edges,
@@ -724,21 +792,105 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     struct Shown {
         double depth;
         double corners[4][3];  // Camera space.
+        double world[4][3];    // Meters.
         ImVec2 points[8];
+        float point_depths[8];  // As the game's: near / distance.
+        double point_world[8][3];  // Meters.
         int count;
         ImU32 fill, edge;
         std::uint8_t edges;
         bool dashed;  // Hidden, shown by its edges dashed only.
+        double margin;  // more margin against the game's depth (the wire view's offsets), meters
+        bool back;      // turned away from the eye: only its creases with another turned away (back_edges)
+        int direction;  // the face's (axis * 2 + positive)
     };
+    // Against the game's depth (game-depth.on): every face sent to the
+    // renderer, which leaves out, pixel by pixel, what the game's surface
+    // hides; no test here.
+    // The wire view goes there whether hidden faces are hidden or not
+    // (30/10: drawn by ImGui, its edges over everything and its offsets as
+    // geometry, a block removed looked two deep).
+    const bool wire_style = item.world_cells_smooth && !item.world_own_solids;
+    WorldDepthDraw* gpu = (item.world_hide_hidden || wire_style) && c.resources.world_depth ? c.resources.world_depth()
+                                                                                           : nullptr;
+    if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
+    if (gpu && item.world_own_solids) gpu->solid = true;
+    if (gpu && wire_style) gpu->wire = true;
+    if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
+    if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
+    // The solid style textured: the first item's textures for all.
+    const bool textured = gpu && item.world_own_solids && item.world_textured;
+    if (textured && !gpu->textured) {
+        gpu->textures = item.world_textures;
+        gpu->textured = true;
+        gpu->texture_light = item.world_texture_light;
+        gpu->relief = item.world_relief;
+        for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
+    }
+    if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
+    // Remove mode: what hides an edge is told by the world's blocks around.
+    const bool through_blocks = item.world_hidden_dashed || item.world_through_blocks;
+    if (gpu && wire_style && item.world_hide_hidden && through_blocks && item.world_solids && !gpu->blocks) {
+        gpu->blocks = item.world_solids;
+        for (int i = 0; i < 3; ++i)
+            gpu->blocks_eye[i] = (view.eye[i] - item.world_solids->origin[i]) / item.world_solids->cell;
+    }
+    if (gpu && gpu->blocks && through_blocks && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
+        WorldDepthDraw::BlocksPart part;
+        part.mesh = shared_mesh;
+        for (int i = 0; i < 3; ++i)
+            part.at[i] = static_cast<int>(std::lround((item.world_cells_origin[i] - gpu->blocks->origin[i]) / gpu->blocks->cell));
+        gpu->blocks_build.push_back(std::move(part));
+    }
+    // A world point in cells of the blocks, times `depth` (as the shader interpolates it).
+    const auto in_blocks = [&](const double world[3], float depth, float out[3]) {
+        for (int i = 0; i < 3; ++i)
+            out[i] = gpu && gpu->blocks
+                ? static_cast<float>((world[i] - gpu->blocks->origin[i]) / gpu->blocks->cell * depth)
+                : 0.0f;
+    };
+    if (gpu) {
+        // Something standing less than the largest offset (and 10 cm) before
+        // our faces is a block of the game the build sits in.
+        double largest = item.world_face_offset;
+        for (const auto& entry : item.world_face_offsets)
+            for (float each : entry.second) largest = std::max(largest, static_cast<double>(each));
+        gpu->own_tolerance = std::max(gpu->own_tolerance, largest + 0.1);
+        // The game's blocks drawn past their cells, from a cell's box: one and
+        // a half the farthest (a corner's bumps, diagonally) and 5 cm.
+        gpu->blocks_relief = std::max(gpu->blocks_relief, 1.5 * largest + 0.05);
+        gpu->focal_pixels = view.matrix
+            ? view.screen.y * 0.5 * std::sqrt(view.m[4] * view.m[4] + view.m[5] * view.m[5] + view.m[6] * view.m[6])
+            : view.screen.y * 0.5 / view.focal_y;
+    }
+    // 30/10: the matrix's near (6.5 mm) made the build look farther than the
+    // game's depth says: hidden behind what stands in front, more with the
+    // distance. 1 cm by default; the matrix's when an item asks.
+    if (gpu && item.world_depth_near > 0.0f) gpu->near_distance = item.world_depth_near;
+    if (gpu && item.world_depth_near == 0.0f && gpu->matrix_near > 0.0) gpu->near_distance = gpu->matrix_near;
     // Hide hidden faces: their results kept per mesh, tested a part per frame.
     HiddenFaces* hidden = nullptr;
-    if (item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
+    if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
         hidden = &hidden_faces_for(item, shared_mesh);
         test_hidden_faces(item, mesh, view, *hidden);
     }
     // only_in_solids, the eye outside the solids' box: no cell is drawn, the
     // world between them and the eye not known.
     if (item.world_only_in_solids && item.world_solids && !in_solids(*item.world_solids, view.eye)) return;
+    // face_offsets_largest: the largest offsets of the characters drawn.
+    bool use_largest = false;
+    std::array<double, 3> largest{0.0, 0.0, 0.0};
+    if (item.world_face_offsets_largest) {
+        const auto& present = characters_of(shared_mesh);
+        for (int ch = 0; ch < 128; ++ch) {
+            if (!present[ch]) continue;
+            std::array<double, 3> own{item.world_face_offset, item.world_face_offset, item.world_face_offset};
+            for (const auto& [key, each] : item.world_face_offsets)
+                if (key == ch) own = {each[0], each[1], each[2]};
+            for (int i = 0; i < 3; ++i) largest[i] = std::max(largest[i], own[i]);
+            use_largest = true;
+        }
+    }
     std::vector<Shown> shown;
     shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
     static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
@@ -752,34 +904,109 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         const bool positive = face.direction % 2 == 1;
         const double base[3] = {item.world_cells_origin[0] + face.x * s, item.world_cells_origin[1] + face.y * s,
             item.world_cells_origin[2] + face.z * s};
-        const double plane = base[axis] + (positive ? s : 0.0);
-        // Only the faces turned to the camera.
-        if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
         const int u = (axis + 1) % 3, v = (axis + 2) % 3;
-        double in[4][3];
+        // face_offset: pushed out, its edges `grow` (u0, u1, v0, v1) longer at
+        // an outer corner, shorter at an inner one, as the game draws its
+        // blocks past their cells (the user's reading, 30/10).
+        // Its offset toward a direction (axis * 2 + positive): the sides', the
+        // top's (+y) or the bottom's (-y) of its character, else the item's.
+        const auto offset_toward = [&](int direction) -> double {
+            if (use_largest) return direction == 3 ? largest[1] : direction == 2 ? largest[2] : largest[0];
+            for (const auto& [ch, own] : item.world_face_offsets)
+                if (ch == face.ch) return direction == 3 ? own[1] : direction == 2 ? own[2] : own[0];
+            return item.world_face_offset;
+        };
+        // The wire view keeps the cells on the grid (its edges must not
+        // cross): the offset only lets the face show that far behind the
+        // game's surface, as a margin.
+        const bool offset_as_margin = gpu && gpu->wire;
+        const double face_margin = offset_as_margin ? offset_toward(face.direction) : 0.0;
+        const double offset = offset_as_margin ? 0.0 : offset_toward(face.direction);
+        bool any_offset = !offset_as_margin && offset > 0.0;
+        for (int direction = 0; direction < 6 && !any_offset && !offset_as_margin; ++direction)
+            any_offset = offset_toward(direction) > 0.0;
+        double grow[4] = {0.0, 0.0, 0.0, 0.0};
+        if (any_offset) {
+            const auto drawn = [&](int p[3]) {
+                if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
+                return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
+            };
+            // Edge k toward -v, +u, +v, -u; grow index u0, u1, v0, v1.
+            static constexpr int kEdgeSide[4][2] = {{1, -1}, {0, 1}, {1, 1}, {0, -1}};
+            static constexpr int kGrow[4] = {2, 1, 3, 0};
+            for (int k = 0; k < 4; ++k) {
+                int beyond[3] = {face.x, face.y, face.z};
+                beyond[kEdgeSide[k][0] == 0 ? u : v] += kEdgeSide[k][1];
+                int front[3] = {beyond[0], beyond[1], beyond[2]};
+                front[axis] += positive ? 1 : -1;
+                // Outer corner: longer by the offset of the face it meets
+                // there (toward the edge); inner corner: shorter by the one
+                // of the face coming back over it; a cell touching only along
+                // this edge (diagonal): unchanged, the two would cross.
+                const int edge_axis = kEdgeSide[k][0] == 0 ? u : v;
+                const int toward = edge_axis * 2 + (kEdgeSide[k][1] > 0 ? 1 : 0);
+                const int back = edge_axis * 2 + (kEdgeSide[k][1] > 0 ? 0 : 1);
+                grow[kGrow[k]] = drawn(front) ? (drawn(beyond) ? -offset_toward(back) : 0.0)
+                                              : drawn(beyond) ? 0.0 : offset_toward(toward);
+            }
+        }
+        const double plane = base[axis] + (positive ? s + offset : -offset);
+        // Only the faces turned to the camera; with back_edges (the wire
+        // view), those turned away too, for their creases with another
+        // turned away.
+        const bool back = (view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0;
+        const bool back_edges = gpu && gpu->wire && item.world_back_edges > 0.0f;
+        if (back && !back_edges) continue;
+        std::uint8_t back_creases = 0xF;
+        if (back) {
+            // The other face at each edge: the cell's own toward the edge (an
+            // outer corner), or the one coming back over it (an inner one);
+            // its plane is the edge's.
+            const auto drawn_at = [&](const int p[3]) {
+                if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
+                return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
+            };
+            static constexpr int kSide[4][2] = {{1, -1}, {0, 1}, {1, 1}, {0, -1}};
+            back_creases = 0;
+            for (int k = 0; k < 4; ++k) {
+                const int edge_axis = kSide[k][0] == 0 ? u : v;
+                const int toward = kSide[k][1];
+                int front[3] = {face.x, face.y, face.z};
+                front[edge_axis] += toward;
+                front[axis] += positive ? 1 : -1;
+                const double at = base[edge_axis] + (toward > 0 ? s : 0.0);
+                const double normal = drawn_at(front) ? -toward : toward;
+                if ((view.eye[edge_axis] - at) * normal <= 0.0) back_creases |= static_cast<std::uint8_t>(1 << k);
+            }
+            if (!(back_creases & face.creases)) continue;
+        }
+        double in[4][3], at_world[4][3];
         double centre[3] = {0.0, 0.0, 0.0};
         for (int k = 0; k < 4; ++k) {
-            double corner[3];
+            double* corner = at_world[k];
             corner[axis] = plane;
-            corner[u] = base[u] + kSquare[k][0] * s;
-            corner[v] = base[v] + kSquare[k][1] * s;
+            corner[u] = kSquare[k][0] ? base[u] + s + grow[1] : base[u] - grow[0];
+            corner[v] = kSquare[k][1] ? base[v] + s + grow[3] : base[v] - grow[2];
             view.to_camera(corner, in[k]);
             for (int i = 0; i < 3; ++i) centre[i] += in[k][i] * 0.25;
         }
         ImU32 color = item.cell_colors[face.ch];
-        if (!hidden && item.world_solids && tests < kMaxHiddenTests) {
+        if (!gpu && !hidden && item.world_solids && tests < kMaxHiddenTests) {
             ++tests;
             double middle[3];
             for (int i = 0; i < 3; ++i) middle[i] = base[i] + 0.5 * s;
             middle[axis] = plane;
             if (behind_solids(item, view, middle)) color = lighter(color);
         }
-        const ImU32 fill = fade(c, shade(color, kLight[face.direction], 1.0f));
+        // Textured: the texture's color, lit by the face's direction.
+        const ImU32 fill = textured ? fade(c, shade(IM_COL32(255, 255, 255, 255), kLight[face.direction], 1.0f))
+                                    : fade(c, shade(color, kLight[face.direction], 1.0f));
         const ImU32 edge = fade(c, (color & ~IM_COL32_A_MASK) |
             IM_COL32(0, 0, 0, static_cast<int>(item.world_cells_edge_opacity * 255.0f + 0.5f)));
         // A hidden part shown dashed: its edges in its color, nearly opaque,
         // whatever the edge opacity (none in the solid style).
-        const ImU32 dashed_edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, 220));
+        const int dash_alpha = item.world_dash_opacity >= 0.0f ? static_cast<int>(item.world_dash_opacity * 255.0f + 0.5f) : 220;
+        const ImU32 dashed_edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, dash_alpha));
         const std::uint8_t face_edges = item.world_cells_smooth ? face.creases : std::uint8_t{0xF};
         // A piece of the face, u0..u1 x v0..v1 of its sides: its corners in
         // camera space, cut at the near plane; its edges only those on the
@@ -788,15 +1015,27 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             Shown entry{};
             const double at[4][2] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
             for (int k = 0; k < 4; ++k)
-                for (int i = 0; i < 3; ++i)
+                for (int i = 0; i < 3; ++i) {
                     entry.corners[k][i] = in[0][i] + (in[1][i] - in[0][i]) * at[k][0] + (in[3][i] - in[0][i]) * at[k][1];
+                    entry.world[k][i] = at_world[0][i] + (at_world[1][i] - at_world[0][i]) * at[k][0] +
+                        (at_world[3][i] - at_world[0][i]) * at[k][1];
+                }
+            const double near_distance = gpu ? gpu->near_distance : 1.0;
             for (int k = 0; k < 4; ++k) {
                 const double* a = entry.corners[k];
                 const double* b = entry.corners[(k + 1) % 4];
-                if (a[2] >= kNear) entry.points[entry.count++] = view.to_screen(a);
+                const double* wa = entry.world[k];
+                const double* wb = entry.world[(k + 1) % 4];
+                if (a[2] >= kNear) {
+                    entry.point_depths[entry.count] = static_cast<float>(near_distance / a[2]);
+                    std::memcpy(entry.point_world[entry.count], wa, sizeof entry.point_world[0]);
+                    entry.points[entry.count++] = view.to_screen(a);
+                }
                 if ((a[2] >= kNear) != (b[2] >= kNear)) {
                     const double t = (kNear - a[2]) / (b[2] - a[2]);
                     const double cut[3] = {a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, kNear};
+                    entry.point_depths[entry.count] = static_cast<float>(near_distance / kNear);
+                    for (int i = 0; i < 3; ++i) entry.point_world[entry.count][i] = wa[i] + (wb[i] - wa[i]) * t;
                     entry.points[entry.count++] = view.to_screen(cut);
                 }
             }
@@ -806,8 +1045,13 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             entry.depth = centre[2];
             entry.dashed = piece_hidden;
             entry.fill = fill;
+            // Against the game's depth, a hidden part of an edge shows dashed
+            // in this color (the renderer decides which part).
             entry.edge = piece_hidden ? dashed_edge : edge;
-            entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges));
+            entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges) & back_creases);
+            entry.margin = face_margin;
+            entry.back = back;
+            entry.direction = face.direction;
             shown.push_back(entry);
         };
         const std::uint8_t state = hidden ? hidden->hidden[index] : 0;
@@ -829,6 +1073,109 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             }
     }
     std::sort(shown.begin(), shown.end(), [](const Shown& a, const Shown& b) { return a.depth > b.depth; });
+    if (gpu) {
+        // The fills, then the edges as thin quads, all with their depth.
+        for (const Shown& entry : shown) {
+            if (entry.back) continue;  // creases only
+            const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
+            // Textured (the solid style): which texture and plane, the point in
+            // meters from the texture origin.
+            // 1 and 2 the sides facing x and z, 3 the top, 4 the bottom; a
+            // side facing the negative way half more (its normal's sign).
+            const int axis = entry.direction / 2;
+            const float tex = !gpu->textured || !gpu->solid ? 0.0f
+                : axis == 0 ? (entry.direction == 0 ? 1.5f : 1.0f) : axis == 2 ? (entry.direction == 4 ? 2.5f : 2.0f)
+                : entry.direction == 3 ? 3.0f : 4.0f;
+            for (int k = 0; k < entry.count; ++k) {
+                float meters[3] = {0.0f, 0.0f, 0.0f};
+                if (tex > 0.0f)
+                    for (int i = 0; i < 3; ++i)
+                        meters[i] = static_cast<float>((entry.point_world[k][i] - gpu->texture_origin[i]) * entry.point_depths[k]);
+                gpu->vertices.push_back({entry.points[k].x, entry.points[k].y, entry.point_depths[k], -1.0f,
+                    static_cast<float>(entry.margin / gpu->near_distance), entry.fill, {meters[0], meters[1], meters[2]},
+                    1.0f, tex});
+            }
+            for (int k = 1; k + 1 < entry.count; ++k) gpu->indices.insert(gpu->indices.end(), {first, first + k, first + k + 1});
+        }
+        gpu->face_indices = gpu->indices.size();
+        const float half = std::max(0.75f, 0.75f * c.scale);
+        const float period = 10.0f * c.scale;  // 6 on, 4 off, as dashed_line
+        // Edges keep 5 cm more: where a cell rests on the game's surface its
+        // outline stays (30/10: with no margin, cubes looked open).
+        const auto edge_extra = static_cast<float>(0.05 / gpu->near_distance);
+        // Solid: edges a hair nearer than their faces, kept over them.
+        const float edge_nearer = gpu->solid ? 1.001f : 1.0f;
+        // Each edge once: two faces seen share theirs (31/10: drawn twice,
+        // the creases between them more opaque than the outline, their
+        // dashes out of step). Known by its ends, to the millimeter.
+        std::unordered_set<std::uint64_t> drawn_edges;
+        drawn_edges.reserve(shown.size() * 2);
+        const auto edge_key = [](const double* p, const double* q) {
+            long long ends[2][3];
+            for (int i = 0; i < 3; ++i) {
+                ends[0][i] = std::llround(p[i] * 1000.0);
+                ends[1][i] = std::llround(q[i] * 1000.0);
+            }
+            if (std::lexicographical_compare(ends[1], ends[1] + 3, ends[0], ends[0] + 3)) std::swap(ends[0], ends[1]);
+            std::uint64_t key = 1469598103934665603ull;
+            for (const auto& end : ends)
+                for (long long value : end) key = (key ^ static_cast<std::uint64_t>(value)) * 1099511628211ull;
+            return key;
+        };
+        for (const Shown& entry : shown)
+            for (int k = 0; k < 4; ++k) {
+                if (!(entry.edges & (1 << k))) continue;
+                if (!drawn_edges.insert(edge_key(entry.world[k], entry.world[(k + 1) % 4])).second) continue;
+                // Unseen edges (the solid style) only matter dashed; the solid
+                // style shows none (30/10: in Remove mode, dashes over the
+                // terrain and the player).
+                const bool hidden_dashed = item.world_hidden_dashed && !gpu->solid;
+                if (!hidden_dashed && !(entry.edge & IM_COL32_A_MASK)) continue;
+                double a[3], b[3], wa[3], wb[3];
+                std::memcpy(a, entry.corners[k], sizeof a);
+                std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
+                std::memcpy(wa, entry.world[k], sizeof wa);
+                std::memcpy(wb, entry.world[(k + 1) % 4], sizeof wb);
+                if (a[2] < kNear && b[2] < kNear) continue;
+                if (a[2] < kNear || b[2] < kNear) {
+                    double* behind = a[2] < kNear ? a : b;
+                    const double* front = a[2] < kNear ? b : a;
+                    double* world_behind = a[2] < kNear ? wa : wb;
+                    const double* world_front = a[2] < kNear ? wb : wa;
+                    const double t = (kNear - front[2]) / (behind[2] - front[2]);
+                    for (int i = 0; i < 3; ++i) {
+                        behind[i] = front[i] + (behind[i] - front[i]) * t;
+                        world_behind[i] = world_front[i] + (world_behind[i] - world_front[i]) * t;
+                    }
+                }
+                const ImVec2 pa = view.to_screen(a), pb = view.to_screen(b);
+                const float dx = pb.x - pa.x, dy = pb.y - pa.y;
+                const float length = std::sqrt(dx * dx + dy * dy);
+                if (length < 0.5f) continue;
+                const float nx = -dy / length * half, ny = dx / length * half;
+                const auto da = static_cast<float>(gpu->near_distance / a[2]) * edge_nearer;
+                const auto db = static_cast<float>(gpu->near_distance / b[2]) * edge_nearer;
+                // Dashes only where the edge is hidden: in Remove mode, and in
+                // the wire view (where the build itself hides it).
+                const bool dashes = hidden_dashed || gpu->wire;
+                const float ua = dashes ? 0.0f : -1.0f;
+                const float ub = dashes ? length / period : -1.0f;
+                const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
+                const auto extra = edge_extra + static_cast<float>(entry.margin / gpu->near_distance);
+                float ca[3], cb[3];
+                in_blocks(wa, da, ca);
+                in_blocks(wb, db, cb);
+                // A crease turned away is behind the build's own faces: the
+                // shader dashes it at back_edges.
+                const float fade = 1.0f;
+                gpu->vertices.push_back({pa.x + nx, pa.y + ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
+                gpu->vertices.push_back({pb.x + nx, pb.y + ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
+                gpu->vertices.push_back({pb.x - nx, pb.y - ny, db, ub, extra, entry.edge, {cb[0], cb[1], cb[2]}, fade});
+                gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
+                gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
+            }
+        return;
+    }
     // The fills without anti-aliased borders, whose overlaps would draw the
     // seams between faces; the edges after, so that no nearer fill covers
     // part of one.
@@ -859,8 +1206,12 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
 
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
-    LocalCamera camera;
-    if (!world_view(view, item.camera_lead, &camera)) return;
+    LocalCamera camera, drawn;
+    if (item.world_depth_picture && c.resources.want_depth_picture) c.resources.want_depth_picture();
+    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn, item.world_depth_camera);
+    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr,
+            item.world_depth_jitter_kept))
+        return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
     const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {
@@ -907,8 +1258,25 @@ void draw_world(const Context& c, const Item& item) {
         segment(line.from, line.to, behind_solids(item, view, middle) ? lighter(line.color) : line.color, line.width);
     }
     double corners[4][3];
-    if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners))
+    if (item.aim_face && camera.has_cursor && !(camera.cursor_flags & 1u) && aimed_face(camera, item, corners)) {
         for (int k = 0; k < 4; ++k) segment(corners[k], corners[(k + 1) % 4], item.aim_face_color, item.aim_face_width);
+        // The game's depth read back at the aimed face's middle, times its
+        // distance: the game's near distance (depth = near / distance), to
+        // check the one assumed (game-depth.on).
+        static auto last_near_log = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (c.resources.game_depth_at && now - last_near_log >= std::chrono::seconds(5)) {
+            double middle[3] = {0.0, 0.0, 0.0}, p[3];
+            for (int k = 0; k < 4; ++k)
+                for (int i = 0; i < 3; ++i) middle[i] += corners[k][i] * 0.25;
+            view.to_camera(middle, p);
+            const float game = p[2] > kNear ? c.resources.game_depth_at(view.to_screen(p)) : -1.0f;
+            if (game > 0.0f) {
+                last_near_log = now;
+                log_line("game depth: at the aimed face, %.2f m away: depth %.6g, near %.5g m", p[2], game, game * p[2]);
+            }
+        }
+    }
     for (const WorldPoint& point : item.world_points) {
         double p[3];
         view.to_camera(point.at, p);
@@ -1466,13 +1834,15 @@ void draw_scene(ImDrawList& list, const SceneSnapshot& scene, ImVec2 screen, con
         return !zone.items.empty() &&
             std::all_of(zone.items.begin(), zone.items.end(), [](const Item& item) { return item.kind == ItemKind::World; });
     };
-    for (const bool world : {true, false})
+    for (const bool world : {true, false}) {
         for (const auto& zone : scene.zones) {
             if (world_only(*zone) != world) continue;
             const Context c{list, resources, screen.y / zone->reference * scene.options.scale, scene.options.opacity,
                 zone->owner + "/" + zone->id};
             draw_zone(c, *zone, screen);
         }
+        if (world && resources.world_drawn) resources.world_drawn(list);
+    }
 }
 
 }  // namespace overlay

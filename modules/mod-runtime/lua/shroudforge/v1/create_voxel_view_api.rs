@@ -140,6 +140,27 @@ fn read_chunks(params: &Table, lo: [i32; 3], hi: [i32; 3]) -> mlua::Result<HashM
 
 /// `plan`: {kind = "add" or "remove", only_empty, lo, hi, cells = {x1, y1,
 /// z1, x2, ...} or nil for the whole box}.
+/// `density_min`: a terrain cell less dense (high byte) reads as empty; 1 to
+/// 255, 1 by default (any).
+fn read_density_min(params: &Table) -> mlua::Result<i32> {
+    Ok(params.raw_get::<Option<i32>>("density_min")?.unwrap_or(1).clamp(1, 255))
+}
+
+/// `palette`: {[voxel value] = letter}, A to Z and a to z.
+fn read_palette(params: &Table) -> mlua::Result<HashMap<i32, u8>> {
+    let mut palette = HashMap::new();
+    let Some(table) = params.raw_get::<Option<Table>>("palette")? else { return Ok(palette) };
+    for pair in table.pairs::<i32, String>() {
+        let (value, letter) = pair?;
+        let byte = letter.as_bytes().first().copied().unwrap_or(0);
+        if letter.len() != 1 || !byte.is_ascii_alphabetic() {
+            return Err(mlua::Error::runtime("world cells: palette letters are A to Z or a to z"));
+        }
+        palette.insert(value, byte);
+    }
+    Ok(palette)
+}
+
 fn read_plan(params: &Table) -> mlua::Result<Option<ViewPlan>> {
     let Some(plan) = params.raw_get::<Option<Table>>("plan")? else { return Ok(None) };
     let cells = match plan.raw_get::<Option<Table>>("cells")? {
@@ -189,6 +210,7 @@ fn read_input(params: &Table) -> mlua::Result<ViewInput> {
         surface: params.raw_get::<Option<bool>>("surface")?.unwrap_or(false),
         depth: params.raw_get::<Option<i32>>("depth")?.unwrap_or(3).clamp(1, 32),
         bases,
+        density_min: read_density_min(params)?,
     })
 }
 
@@ -239,6 +261,8 @@ fn read_world_input(params: &Table) -> mlua::Result<WorldInput> {
         margin,
         solids_max: params.raw_get::<Option<usize>>("solids_max")?.unwrap_or(1 << 18).min(1 << 24),
         solids_box,
+        palette: read_palette(params)?,
+        density_min: read_density_min(params)?,
     })
 }
 

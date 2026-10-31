@@ -249,7 +249,26 @@ function shroudforge_input.wheel_steps(setting_key) end
 --- @field notifications ShroudForgeNotifications Publish notices in the local Modloader feed.
 --- @field i18n ShroudForgeI18n Read mod-authored text from the locale catalogs.
 --- @field overlay ShroudForgeOverlay Draw zones over the game image.
+--- @field contents ShroudForgeContents Read bytes of game contents without waiting for the game files.
 shroudforge = {}
+
+--- @class ShroudForgeContentReadJob
+local ShroudForgeContentReadJob = {}
+--- Nil until the read is done, then `{data = bytes, seconds = read time}`, or `{error = text}`.
+--- @return table?
+function ShroudForgeContentReadJob:result() end
+
+--- @class ShroudForgeContents
+shroudforge.contents = {}
+
+--- Read bytes of a game content (the levels of a texture, for instance) on a thread of its own:
+--- ask the returned job at the next updates, the mod never waits for the game files. `hash`: a
+--- content hash as a resource holds it (`texture.content.hash`), or `{size, hash0, hash1, hash2}`;
+--- `start`: first byte (0); `count`: bytes (to the end). Contents of the game files only, not
+--- those a mod created.
+--- @param params {hash: any, start: integer?, count: integer?}
+--- @return ShroudForgeContentReadJob
+function shroudforge.contents.read(params) end
 
 --- Language the player chose for ShroudForge in the Modloader, such as `"en"`,
 --- `"de"`, `"fr"` or a regional variant such as `"de-AT"`; `"en"` when the
@@ -300,12 +319,13 @@ function shroudforge.voxels.chunks() end
 
 --- Build, on a thread of its own, what a build changes in the world, as tiles of at most `tile`
 --- cells a side (256; the empty ones left out): run-length text as for `view3d`, `+` a cell
---- filled (or replaced, unless `plan.only_empty` keeps the blocks there; a cell not read counts
---- as empty), `-` a block removed, `.` the rest; and the filled cells `margin` around lo..hi (8,
+--- filled (a cell not read counts as empty), `*` a block replaced (unless `plan.only_empty` keeps
+--- the blocks there), `-` a block removed (for both, `palette[value]` instead when given: a letter per
+--- voxel value, A to Z or a to z), `.` the rest; and the filled cells `margin` around lo..hi (8,
 --- less on an axis over 128), or in `solids_lo`..`solids_hi` when given (256 a side at most, such
 --- as the box holding the build and the eye), `#` a filled cell the build does not change;
---- `solids_max` cells at most (262144, up to 16777216).
---- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, tile: integer?, total: integer?, margin: integer?, solids_max: integer?, solids_lo: integer[]?, solids_hi: integer[]?}
+--- `solids_max` cells at most (262144, up to 16777216). `density_min` as for `view3d`.
+--- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, tile: integer?, total: integer?, margin: integer?, solids_max: integer?, solids_lo: integer[]?, solids_hi: integer[]?, palette: table<integer, string>?, density_min: integer?}
 --- `lo`..`hi`: the build's box, or the start cell alone; `chunks` and `plan` as for `view3d`.
 --- @return ShroudForgeWorldCellsJob
 function shroudforge.voxels.world(params) end
@@ -313,8 +333,10 @@ function shroudforge.voxels.world(params) end
 --- from the chunks a mod already read: run-length text, x fastest, then y, then z, a decimal count
 --- before a character repeating it. Characters: `.` air, `#` block, `%` terrain, `^` roof, `+`
 --- planned to build, `-` planned to remove, `S` start, `E` end, `P` the player, `?` not read.
---- Ask the returned job at the next updates: the mod never waits.
---- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, start: integer[]?, finish: integer[]?, player: integer[]?, roofs: integer[]?, surface: boolean?, depth: integer?}
+--- Ask the returned job at the next updates: the mod never waits. `density_min` (1 to 255, 1 by
+--- default): a terrain cell less dense than it (density in a value's high byte, the ground's top
+--- cells in part filled) reads as empty.
+--- @param params {lo: integer[], hi: integer[], chunks: ShroudForgeVoxelChunks|table[]?, plan: table?, start: integer[]?, finish: integer[]?, player: integer[]?, roofs: integer[]?, surface: boolean?, depth: integer?, density_min: integer?}
 --- `chunks`: a store (`shroudforge.voxels.chunks()`), or {x, y, z, cells} per 16 x 16 x 16 chunk
 --- (origin divided by 16; cells 8192 bytes of little-endian u16, or one value for every cell),
 --- copied; a missing chunk reads as not read. `plan`:

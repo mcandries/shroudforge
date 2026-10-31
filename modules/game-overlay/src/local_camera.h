@@ -12,6 +12,12 @@ struct LocalCamera {
     double orientation[4]{};   // x, y, z, w: takes the camera's axes to the world's.
     double fov_y = 0.0;        // Radians.
     double aspect = 0.0;
+    double fov_x = 0.0;        // Radians, when known (the GPU camera); else from the screen's shape.
+    // The GPU camera's view-projection (row-major, world translation; Vulkan
+    // clip space), when `has_matrix`: world items are projected with it as
+    // the GPU does, no axes or focal worked out from it.
+    bool has_matrix = false;
+    double matrix[16]{};
     // The building cursor, when the runtime gives it: the corner of the
     // placement cube (meters), its orientation, and its flags (bit 0: no
     // valid position, aiming at nothing).
@@ -29,5 +35,9 @@ struct LocalCamera {
 // for one read newer than the frame drawn. Either way, how the camera read
 // changes is logged every 5 s.
 bool local_camera(LocalCamera& camera, double lead = 0.0);
+
+// The camera read now, from any thread, kept nowhere (for the game's depth
+// copy: the camera as the game draws the scene).
+bool local_camera_now(LocalCamera& camera);
 
 }  // namespace overlay

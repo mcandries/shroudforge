@@ -5,6 +5,7 @@
 
 #include "overlay.h"
 #include "scene.h"
+#include "game_depth.h"
 
 #include <nlohmann/json.hpp>
 
@@ -142,9 +143,72 @@ bool is_text(const json& value) {
     return value.is_string() || (value.is_object() && value.contains("blob"));
 }
 
+}  // namespace
+
+size_t bc7_bytes(int width, int height, int levels, bool half) {
+    size_t bytes = 0;
+    for (int level = 0; level < levels; ++level) {
+        const int w = std::max(1, width >> level), h = std::max(1, height >> level);
+        bytes += static_cast<size_t>((w + 3) / 4) * static_cast<size_t>((h + 3) / 4) * (half ? 8 : 16);
+    }
+    return bytes;
+}
+
+namespace {
+
+// One texture: {data = its levels (a blob), width, height, levels,
+// format = "bc7" (default), "bc1", "bc4" or "bc5", tiling}.
+void parse_one_texture(const json& face, WorldTexture& out, const std::string& name) {
+    if (!face.contains("data") || !is_text(face["data"]) || !face.contains("width") ||
+        !face["width"].is_number_integer() || !face.contains("height") || !face["height"].is_number_integer() ||
+        !face.contains("levels") || !face["levels"].is_number_integer())
+        fail("world: cells.texture." + name + ": {data, width, height, levels, format, tiling}");
+    out.data = cells_text(face["data"]);
+    out.width = std::clamp(face["width"].get<int>(), 1, 4096);
+    out.height = std::clamp(face["height"].get<int>(), 1, 4096);
+    out.levels = std::clamp(face["levels"].get<int>(), 1, 13);
+    if (face.contains("format") && face["format"].is_string()) {
+        const std::string format = face["format"].get<std::string>();
+        if (format == "bc7") out.format = TextureFormat::bc7;
+        else if (format == "bc1") out.format = TextureFormat::bc1;
+        else if (format == "bc4") out.format = TextureFormat::bc4;
+        else if (format == "bc5") out.format = TextureFormat::bc5;
+        else fail("world: cells.texture." + name + ".format: bc7, bc1, bc4 or bc5");
+    }
+    if (face.contains("tiling") && face["tiling"].is_number())
+        out.tiling = std::clamp(face["tiling"].get<float>(), 0.001f, 64.0f);
+    if (out.data->size() < bc7_bytes(out.width, out.height, out.levels, half_blocks(out.format)))
+        fail("world: cells.texture." + name + ": fewer bytes than its levels");
+}
+
+// cells.texture = {side, top, bottom}, each a texture (parse_one_texture)
+// and optionally `ao`, its ambient occlusion (a texture too, its first
+// channel read; laid as the color), and `normal`, its normal map (x and y in
+// its first two channels): the faces of the solid style textured.
+void parse_world_texture(Item& item, const json& texture) {
+    static const char* kFaces[3] = {"side", "top", "bottom"};
+    for (int i = 0; i < 3; ++i) {
+        if (!texture.contains(kFaces[i]) || !texture[kFaces[i]].is_object())
+            fail(std::string("world: cells.texture needs side, top and bottom; no ") + kFaces[i]);
+        const json& face = texture[kFaces[i]];
+        parse_one_texture(face, item.world_textures[i], kFaces[i]);
+        if (face.contains("ao") && face["ao"].is_object())
+            parse_one_texture(face["ao"], item.world_textures[3 + i], std::string(kFaces[i]) + ".ao");
+        if (face.contains("normal") && face["normal"].is_object())
+            parse_one_texture(face["normal"], item.world_textures[6 + i], std::string(kFaces[i]) + ".normal");
+    }
+    item.world_textured = true;
+}
+
+// cells.texture_keep = {data...}: textures held though not drawn.
+void parse_texture_keep(Item& item, const json& list) {
+    for (const json& data : list)
+        if (is_text(data)) item.world_texture_keep.push_back(cells_text(data));
+}
+
 // A slot to build from these cells once the zone is kept (start_meshes).
 std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<const std::string> cells,
-    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels) {
+    const std::array<ImU32, 128>& colors, const std::array<ImU32, 128>& marks, bool levels, bool one_shape = false) {
     auto source = std::make_shared<VoxelSource>();
     source->sx = sx;
     source->sy = sy;
@@ -153,6 +217,7 @@ std::shared_ptr<VoxelSlot> slot_for(int sx, int sy, int sz, std::shared_ptr<cons
     source->colors = colors;
     source->marks = marks;
     source->levels = levels;
+    source->one_shape = one_shape;
     auto slot = std::make_shared<VoxelSlot>();
     slot->source = std::move(source);
     return slot;
@@ -183,7 +248,11 @@ std::shared_ptr<const WorldSolids> decoded_solids(const int box[3], const std::a
     shape->cell = cell;
     const std::vector<unsigned char> grid = decode_voxel_cells(box[0], box[1], box[2], *data);
     shape->filled.resize(grid.size());
-    for (size_t i = 0; i < grid.size(); ++i) shape->filled[i] = grid[i] == '#' ? 1 : 0;
+    shape->bits.assign((grid.size() + 31) / 32, 0u);
+    for (size_t i = 0; i < grid.size(); ++i) {
+        shape->filled[i] = grid[i] == '#' ? 1 : 0;
+        if (shape->filled[i]) shape->bits[i >> 5] |= 1u << (i & 31);
+    }
     shape->data = std::move(data);
     if (recent_solids.size() >= 16) recent_solids.erase(recent_solids.begin());
     recent_solids.push_back(shape);
@@ -502,6 +571,47 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         }
         if (value.contains("camera_lead"))
             item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), -0.2f, 0.2f);
+        item.world_depth_picture = value.value("depth_picture", false);
+        if (value.contains("depth_near")) {
+            if (value["depth_near"].is_number()) item.world_depth_near = std::clamp(value["depth_near"].get<float>(), 0.0001f, 1.0f);
+            else if (value["depth_near"] == "matrix") item.world_depth_near = 0.0f;
+        }
+        if (value.contains("face_offset") && value["face_offset"].is_number())
+            item.world_face_offset = std::clamp(value["face_offset"].get<float>(), 0.0f, 0.25f);
+        if (value.contains("face_offsets") && value["face_offsets"].is_object())
+            for (const auto& [key, offset] : value["face_offsets"].items()) {
+                if (key.size() != 1) continue;
+                // One number for all, or {sides, top, bottom}.
+                std::array<float, 3> each{};
+                if (offset.is_number()) {
+                    each.fill(std::clamp(offset.get<float>(), 0.0f, 1.0f));
+                } else if (offset.is_array() && offset.size() == 3 && offset[0].is_number() && offset[1].is_number() &&
+                           offset[2].is_number()) {
+                    for (int i = 0; i < 3; ++i) each[i] = std::clamp(offset[i].get<float>(), 0.0f, 1.0f);
+                } else {
+                    continue;
+                }
+                item.world_face_offsets.push_back({static_cast<unsigned char>(key[0]), each});
+            }
+        if (value.contains("depth_margin") && value["depth_margin"].is_number())
+            item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
+        if (value.contains("depth_jitter") && value["depth_jitter"].is_string())
+            item.world_depth_jitter_kept = value["depth_jitter"].get<std::string>() == "keep";
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("back_edges") &&
+            value["cells"]["back_edges"].is_number())
+            item.world_back_edges = std::clamp(value["cells"]["back_edges"].get<float>(), 0.0f, 1.0f);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("through_blocks") &&
+            value["cells"]["through_blocks"].is_boolean())
+            item.world_through_blocks = value["cells"]["through_blocks"].get<bool>();
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("dash_opacity") &&
+            value["cells"]["dash_opacity"].is_number())
+            item.world_dash_opacity = std::clamp(value["cells"]["dash_opacity"].get<float>(), 0.0f, 1.0f);
+        if (value.contains("face_offsets_largest") && value["face_offsets_largest"].is_boolean())
+            item.world_face_offsets_largest = value["face_offsets_largest"].get<bool>();
+        if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
+            const std::string mode = value["depth_camera"].get<std::string>();
+            item.world_depth_camera = mode == "gpu" ? 0 : mode == "copy" ? 1 : mode == "present" ? 2 : -1;
+        }
         if (value.contains("aim_face")) {
             const auto& face = value["aim_face"];
             if (!face.is_object()) fail("world: aim_face: expected {color, width, origin, cell}");
@@ -515,6 +625,22 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             }
             if (face.contains("cell")) item.aim_cell = std::clamp(parse_number(face["cell"], "aim_face.cell"), 0.05f, 16.0f);
         }
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture") &&
+            value["cells"]["texture"].is_object())
+            parse_world_texture(item, value["cells"]["texture"]);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_light") &&
+            value["cells"]["texture_light"].is_boolean())
+            item.world_texture_light = value["cells"]["texture_light"].get<bool>();
+        if (value.contains("under_interface") && value["under_interface"].is_boolean())
+            item.world_under_interface = value["under_interface"].get<bool>();
+        if (value.contains("hud_blur") && value["hud_blur"].is_boolean())
+            item.world_hud_blur = value["hud_blur"].get<bool>();
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_relief") &&
+            value["cells"]["texture_relief"].is_number())
+            item.world_relief = std::clamp(value["cells"]["texture_relief"].get<float>(), 0.0f, 1.0f);
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_keep") &&
+            value["cells"]["texture_keep"].is_array())
+            parse_texture_keep(item, value["cells"]["texture_keep"]);
         if (value.contains("cells")) {
             const auto& cells = value["cells"];
             if (!cells.is_object() || !cells.contains("box") || !cells["box"].is_array() || cells["box"].size() != 3 ||
@@ -563,7 +689,8 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 own->data = text;
                 item.world_own_solids = std::move(own);
             }
-            item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false);
+            item.world_cells = slot_for(box[0], box[1], box[2], std::move(text), item.cell_colors, item.cell_marks, false,
+                cells.value("one_shape", false));
         }
         if (value.contains("solids")) {
             const auto& solids = value["solids"];
@@ -767,6 +894,10 @@ SceneSnapshot snapshot_scene() {
     SceneSnapshot snapshot;
     std::lock_guard lock(scene_mutex);
     snapshot.options = options;
+    // None shown, as scene_has_visible_zones says: the present path also
+    // runs without zones with the game's depth (31/10: the zones showed in
+    // the pause menu, where the mods pause too and cannot hide theirs).
+    if (!options.enabled || hidden || options.opacity <= 0.0f || (options.hide_in_menus && menu_open)) return snapshot;
     for (auto& [key, zone] : zones) {
         if (zone->visible) snapshot.zones.push_back(zone);
     }
@@ -931,6 +1062,10 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
     status["features"] = json::array({"dashes", "same_mesh", "blobs", "frame_time", "hide_hidden", "only_in_solids"});
+    // Drawing the world items against the game's depth (game-depth.on).
+    if (depth::enabled()) status["features"].push_back("game_depth");
+    // cells.texture: the solid style textured (BC7 levels, 31/10).
+    if (depth::enabled()) status["features"].push_back("textures");
     const std::string text = status.dump();
     if (!out || out_size <= text.size()) return -1;
     memcpy(out, text.c_str(), text.size() + 1);

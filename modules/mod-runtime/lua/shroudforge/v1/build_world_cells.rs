@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::build_voxel_view::{chunk_value, flush, plan_contains, ChunkCells, ViewPlan, CHUNK};
+use super::build_voxel_view::{chunk_value, flush, plan_contains, with_density, ChunkCells, ViewPlan, CHUNK};
 
 /// A build shown in the world, as Architect Line's preview.world_tiles and
 /// preview.world_solids make it.
@@ -21,6 +21,12 @@ pub(crate) struct WorldInput {
     /// The box of the filled cells instead, when given: what may hide the
     /// build from a viewpoint, such as the box holding the build and the eye.
     pub solids_box: Option<([i32; 3], [i32; 3])>,
+    /// A letter per voxel value, for a block removed or replaced: what is
+    /// there tells how the cell is drawn (the game's blocks of each material
+    /// are drawn past their cells by their own amount).
+    pub palette: HashMap<i32, u8>,
+    /// Terrain cells less dense read as empty (with_density); 1: any.
+    pub density_min: i32,
 }
 
 /// A box of cells, run-length text x fastest, then y, then z, and how many of
@@ -93,12 +99,21 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
                         if !plan_contains(plan, [x, y, z]) {
                             return b'.';
                         }
-                        let full = chunk_value(&input.chunks, x, y, z) > 0;
+                        let value = with_density(chunk_value(&input.chunks, x, y, z), input.density_min);
+                        let full = value > 0;
                         if plan.add {
-                            // Building keeps the blocks already there (replace off).
-                            if plan.only_empty && full { b'.' } else { b'+' }
+                            // Building keeps the blocks already there (replace off),
+                            // or replaces them: `*`, drawn on a block of the game
+                            // (or the palette's letter for that block).
+                            if !full {
+                                b'+'
+                            } else if plan.only_empty {
+                                b'.'
+                            } else {
+                                input.palette.get(&value).copied().unwrap_or(b'*')
+                            }
                         } else if full {
-                            b'-'
+                            input.palette.get(&value).copied().unwrap_or(b'-')
                         } else {
                             b'.'
                         }
@@ -141,12 +156,14 @@ pub(crate) fn build_world_cells(input: &WorldInput) -> WorldCells {
             }
             let filled = match chunk {
                 None => false,
-                Some(ChunkCells::Uniform(value)) => *value > 0,
+                Some(ChunkCells::Uniform(value)) => with_density(*value, input.density_min) > 0,
                 Some(ChunkCells::Packed(bytes)) => {
                     let index = (x.rem_euclid(CHUNK) + y.rem_euclid(CHUNK) * CHUNK + z.rem_euclid(CHUNK) * CHUNK * CHUNK)
                         as usize
                         * 2;
-                    bytes.get(index..index + 2).is_some_and(|pair| u16::from_le_bytes([pair[0], pair[1]]) > 0)
+                    bytes.get(index..index + 2).is_some_and(|pair| {
+                        with_density(i32::from(u16::from_le_bytes([pair[0], pair[1]])), input.density_min) > 0
+                    })
                 }
             };
             if filled && !changes.is_some_and(|plan| plan_contains(plan, [x, y, z])) { b'#' } else { b'.' }
@@ -173,6 +190,8 @@ mod tests {
             margin: 8,
             solids_max: 1 << 18,
             solids_box: None,
+            palette: HashMap::new(),
+            density_min: 1,
         }
     }
 
@@ -205,6 +224,46 @@ mod tests {
         let solids = cells.solids.unwrap();
         assert_eq!((solids.lo, solids.size, solids.count), ([-1, -1, -1], [6, 3, 3], 1));
         assert_eq!(solids.data, "27.#26.");
+    }
+
+    #[test]
+    fn replaced_cells_are_told_apart() {
+        // Replace on: the filled cell is `*`, the empty one `+`.
+        let mut world = input(
+            Some(ViewPlan { add: true, only_empty: false, lo: [0, 0, 0], hi: [1, 0, 0], cells: None }),
+            [0, 0, 0],
+            [1, 0, 0],
+        );
+        world.chunks.insert([0, 0, 0], ChunkCells::Packed(std::sync::Arc::new({
+            let mut bytes = vec![0u8; 16 * 16 * 16 * 2];
+            bytes[0] = 7;
+            bytes
+        })));
+        let (tiles, changed) = build_world_cells(&world).tiles.unwrap();
+        assert_eq!((tiles[0].data.as_str(), changed), ("*+", 2));
+    }
+
+    #[test]
+    fn a_palette_tells_the_blocks_removed_or_replaced() {
+        // Block 7 is `A`; replacing and removing both write it.
+        let chunk = || {
+            ChunkCells::Packed(std::sync::Arc::new({
+                let mut bytes = vec![0u8; 16 * 16 * 16 * 2];
+                bytes[0] = 7;
+                bytes[2] = 9;
+                bytes
+            }))
+        };
+        let mut world = input(
+            Some(ViewPlan { add: true, only_empty: false, lo: [0, 0, 0], hi: [2, 0, 0], cells: None }),
+            [0, 0, 0],
+            [2, 0, 0],
+        );
+        world.chunks.insert([0, 0, 0], chunk());
+        world.palette.insert(7, b'A');
+        assert_eq!(build_world_cells(&world).tiles.unwrap().0[0].data, "A*+");
+        world.plan = Some(ViewPlan { add: false, only_empty: false, lo: [0, 0, 0], hi: [2, 0, 0], cells: None });
+        assert_eq!(build_world_cells(&world).tiles.unwrap().0[0].data, "A-.");
     }
 
     #[test]
