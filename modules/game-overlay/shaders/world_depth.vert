@@ -5,7 +5,7 @@
 layout(push_constant) uniform Constants {
     vec2 to_clip;      // 2 / screen size
     vec2 depth_scale;  // the game's depth size / screen size
-    float margin;      // how far behind the game's surface still shows, in units of 1 / depth
+    float pad;
     int mode;          // see world_depth.frag
     float own_tolerance;
     float focal;  // screen pixels per unit of tan, vertically

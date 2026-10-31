@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game_depth.h"
 #include "local_camera.h"
 #include "scene.h"
 
@@ -19,7 +20,7 @@ struct Offscreen {
     ImVec2 size;  // Of the screen, in pixels.
 };
 
-// World cells drawn against the game's depth (game-depth.on): triangles in
+// World cells drawn against the game's depth (game_depth.cpp): triangles in
 // screen pixels with their depth as the game's (near_distance / distance), drawn by
 // the renderer under the zones; a fragment behind the game's surface is left
 // out, or dashed on an edge with `dash` >= 0 (counted in dash periods).
@@ -35,17 +36,12 @@ struct WorldDepthVertex {
     float tex = 0.0f;
 };
 struct WorldDepthDraw {
-    double near_distance = 0.01;
-    double margin = -1.0;  // an item's (depth_margin), else game-depth.on's
-    double matrix_near = 0.0;  // the GPU camera matrix's near distance, when known
+    double near_distance = depth::kNearDistance;
     bool solid = false;  // opaque cells (solid style): drawn with a depth of their own, the nearest face kept
     // The wire view (smooth style): our faces' nearest depth drawn first, then
     // an edge hidden by the build itself dashed, hidden by something before
     // the build left out.
     bool wire = false;
-    // The wire view showing what is hidden (hide_hidden off): an edge hidden
-    // by something before the build dashed, not left out.
-    bool show_hidden = false;
     // Wire: how far before our nearest face something hides an edge entirely (meters).
     double own_tolerance = 0.3;
     double focal_pixels = 0.0;  // screen pixels per unit of tan, vertically
@@ -83,9 +79,9 @@ struct DrawResources {
     std::function<WorldDepthDraw*()> world_depth;                  // Null without the game's depth this frame.
     // The game's depth (as read back, a few frames late) at a screen point, or a negative value.
     std::function<float(ImVec2)> game_depth_at;
-    // The camera the game drew the scene with, as `mode` asks (an item's
-    // world_depth_camera), or false: then the one read at the present.
-    std::function<bool(LocalCamera&, int mode)> frame_camera;
+    // The camera the game drew the scene with (from the GPU, else read with
+    // the depth's copy), or false: then the one read at the present.
+    std::function<bool(LocalCamera&)> frame_camera;
     // A world item asks for the picture of the game's depth (diagnostic).
     std::function<void()> want_depth_picture;
     // The zones of world items drawn on the list, the others not yet (the

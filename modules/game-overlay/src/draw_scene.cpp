@@ -450,8 +450,7 @@ struct WorldView {
     }
 };
 
-bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr,
-    bool keep_jitter = false) {
+bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr, const LocalCamera* drawn = nullptr) {
     LocalCamera camera;
     if (!local_camera(camera, lead)) return false;
     if (read) *read = camera;
@@ -485,14 +484,13 @@ bool world_view(WorldView& view, double lead = 0.0, LocalCamera* read = nullptr,
         // The temporal anti-aliasing's jitter: a fraction of a pixel added
         // to clip x and y as w times a new offset each frame, rows 0 and 1
         // taking a part of the gaze row 3. The camera's right and up are
-        // square to its gaze: what of row 3 they hold is the jitter.
-        if (!keep_jitter) {
-            const double gaze = view.m[12] * view.m[12] + view.m[13] * view.m[13] + view.m[14] * view.m[14];
-            for (int row = 0; row < 2 && gaze > 0.0; ++row) {
-                double* r = view.m + row * 4;
-                const double k = (r[0] * view.m[12] + r[1] * view.m[13] + r[2] * view.m[14]) / gaze;
-                for (int i = 0; i < 4; ++i) r[i] -= k * view.m[12 + i];
-            }
+        // square to its gaze: what of row 3 they hold is the jitter, taken
+        // out (30/10: the build shimmered by a pixel with FSR 3).
+        const double gaze = view.m[12] * view.m[12] + view.m[13] * view.m[13] + view.m[14] * view.m[14];
+        for (int row = 0; row < 2 && gaze > 0.0; ++row) {
+            double* r = view.m + row * 4;
+            const double k = (r[0] * view.m[12] + r[1] * view.m[13] + r[2] * view.m[14]) / gaze;
+            for (int i = 0; i < 4; ++i) r[i] -= k * view.m[12 + i];
         }
         view.focal_x = 1.0;
         view.focal_y = 1.0;
@@ -595,26 +593,6 @@ bool behind_solids(const WorldSolids& solids, const double point[3], const doubl
     }
 }
 
-// Whether a point (meters) is inside the box of some solids.
-bool in_solids(const WorldSolids& solids, const double point[3]) {
-    const int size[3] = {solids.sx, solids.sy, solids.sz};
-    for (int i = 0; i < 3; ++i) {
-        const double at = (point[i] - solids.origin[i]) / solids.cell;
-        if (at < 0.0 || at > size[i]) return false;
-    }
-    return true;
-}
-
-// only_in_solids: whether the cell of a face is inside the solids' box (the
-// eye being in it too, the walk from the face to the eye stays inside).
-bool face_in_solids(const Item& item, const VoxelFace& face) {
-    if (!item.world_only_in_solids || !item.world_solids) return true;
-    const double s = item.world_cells_size;
-    const double middle[3] = {item.world_cells_origin[0] + (face.x + 0.5) * s,
-        item.world_cells_origin[1] + (face.y + 0.5) * s, item.world_cells_origin[2] + (face.z + 0.5) * s};
-    return in_solids(*item.world_solids, middle);
-}
-
 // Whether a world point is behind the item's `solids` (or its own cells with
 // `hide_own`), from a hair nearer the eye: a point on the side of a filled
 // cell is not behind it.
@@ -632,126 +610,6 @@ bool behind_solids(const Item& item, const WorldView& view, const double point[3
     const double from[3] = {point[0] + d[0] * hair, point[1] + d[1] * hair, point[2] + d[2] * hair};
     return (item.world_solids && behind_solids(*item.world_solids, from, view.eye)) ||
         (item.world_own_solids && behind_solids(*item.world_own_solids, from, view.eye));
-}
-
-// Which faces of a world mesh are hidden from the eye (hide_hidden): every
-// face is tested, not only the first kMaxHiddenTests, so the results are kept
-// per mesh and occluders, and tested again after the eye moved, a part at
-// each frame within kHiddenBudget for all of them; meanwhile the faces keep
-// their last result (those not tested yet show).
-struct HiddenFaces {
-    const VoxelMesh* mesh = nullptr;
-    const WorldSolids* solids = nullptr;
-    const WorldSolids* own = nullptr;
-    std::shared_ptr<const VoxelMesh> keep_mesh;
-    std::shared_ptr<const WorldSolids> keep_solids, keep_own;
-    double pass_eye[3]{};
-    bool started = false;
-    size_t next = 0;
-    int last_frame = 0;
-    // 0 shown, 1 hidden, 2 not tested yet, 3 in part: `mask` says which of
-    // its 4 x 4 pieces are hidden (bit j * 4 + i, i along the face's first
-    // axis after its normal's).
-    std::vector<std::uint8_t> hidden;
-    std::vector<std::uint16_t> mask;
-};
-constexpr auto kHiddenBudget = std::chrono::microseconds(2000);
-constexpr double kHiddenEyeMove = 0.02;  // Meters the eye moves before a new pass.
-
-HiddenFaces& hidden_faces_for(const Item& item, const std::shared_ptr<const VoxelMesh>& mesh) {
-    static std::vector<HiddenFaces> cache;
-    const int frame = ImGui::GetFrameCount();
-    for (HiddenFaces& entry : cache)
-        if (entry.mesh == mesh.get() && entry.solids == item.world_solids.get() &&
-            entry.own == item.world_own_solids.get()) {
-            entry.last_frame = frame;
-            return entry;
-        }
-    // Entries unused for some 60 frames give their place.
-    std::erase_if(cache, [&](const HiddenFaces& entry) { return frame - entry.last_frame > 60; });
-    if (cache.size() >= 32) cache.erase(cache.begin());
-    HiddenFaces entry;
-    entry.mesh = mesh.get();
-    entry.solids = item.world_solids.get();
-    entry.own = item.world_own_solids.get();
-    entry.keep_mesh = mesh;
-    entry.keep_solids = item.world_solids;
-    entry.keep_own = item.world_own_solids;
-    entry.hidden.assign(mesh->faces.size(), 2);
-    entry.mask.assign(mesh->faces.size(), 0);
-    entry.last_frame = frame;
-    cache.push_back(std::move(entry));
-    return cache.back();
-}
-
-// Tests the faces of `hidden` from where its pass stopped, within what is left
-// of this frame's budget.
-void test_hidden_faces(const Item& item, const VoxelMesh& mesh, const WorldView& view, HiddenFaces& hidden) {
-    static int budget_frame = -1;
-    static std::chrono::steady_clock::time_point budget_end;
-    const int frame = ImGui::GetFrameCount();
-    if (budget_frame != frame) {
-        budget_frame = frame;
-        budget_end = std::chrono::steady_clock::now() + kHiddenBudget;
-    }
-    double moved = 0.0;
-    for (int i = 0; i < 3; ++i) moved += (view.eye[i] - hidden.pass_eye[i]) * (view.eye[i] - hidden.pass_eye[i]);
-    if (!hidden.started || moved > kHiddenEyeMove * kHiddenEyeMove) {
-        for (int i = 0; i < 3; ++i) hidden.pass_eye[i] = view.eye[i];
-        hidden.started = true;
-        hidden.next = 0;
-    }
-    const double s = item.world_cells_size;
-    for (size_t tested = 0; hidden.next < mesh.faces.size(); ++hidden.next, ++tested) {
-        if (tested % 32 == 0 && std::chrono::steady_clock::now() >= budget_end) return;
-        const VoxelFace& face = mesh.faces[hidden.next];
-        if (face.inner || !face_in_solids(item, face)) continue;
-        const int axis = face.direction / 2;
-        const bool positive = face.direction % 2 == 1;
-        const int u = (axis + 1) % 3, v = (axis + 2) % 3;
-        const double base[3] = {item.world_cells_origin[0] + face.x * s, item.world_cells_origin[1] + face.y * s,
-            item.world_cells_origin[2] + face.z * s};
-        const double plane = base[axis] + (positive ? s : 0.0);
-        // Faces turned away are not drawn: nothing to test.
-        if ((view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0) continue;
-        const auto behind_at = [&](double fu, double fv) {
-            double point[3];
-            point[axis] = plane;
-            point[u] = base[u] + fu * s;
-            point[v] = base[v] + fv * s;
-            return behind_solids(item, view, point);
-        };
-        // Its middle and its corners (a little inside): all alike, the face
-        // is shown or hidden whole; else an occluder's border crosses it,
-        // and each of its 4 x 4 pieces is tested at its middle.
-        const bool middle = behind_at(0.5, 0.5);
-        constexpr double kIn = 0.05;
-        const bool alike = behind_at(kIn, kIn) == middle && behind_at(1.0 - kIn, kIn) == middle &&
-            behind_at(1.0 - kIn, 1.0 - kIn) == middle && behind_at(kIn, 1.0 - kIn) == middle;
-        if (alike) {
-            hidden.hidden[hidden.next] = middle ? 1 : 0;
-            continue;
-        }
-        std::uint16_t mask = 0;
-        for (int j = 0; j < 4; ++j)
-            for (int i = 0; i < 4; ++i)
-                if (behind_at((i + 0.5) / 4.0, (j + 0.5) / 4.0)) mask |= static_cast<std::uint16_t>(1u << (j * 4 + i));
-        hidden.mask[hidden.next] = mask;
-        hidden.hidden[hidden.next] = mask == 0 ? 0 : mask == 0xFFFF ? 1 : 3;
-    }
-}
-
-// A line cut into dashes on the screen.
-void dashed_line(const Context& c, ImVec2 a, ImVec2 b, ImU32 color, float width) {
-    const float dash = 6.0f * c.scale, gap = 4.0f * c.scale;
-    const float dx = b.x - a.x, dy = b.y - a.y;
-    const float length = std::sqrt(dx * dx + dy * dy);
-    if (length < 0.5f) return;
-    for (float t = 0.0f; t < length; t += dash + gap) {
-        const float e = std::min(t + dash, length);
-        c.list.AddLine(ImVec2(a.x + dx * t / length, a.y + dy * t / length),
-            ImVec2(a.x + dx * e / length, a.y + dy * e / length), color, width);
-    }
 }
 
 // The characters of a mesh's outer faces, kept for the last few meshes.
@@ -776,14 +634,12 @@ const std::array<bool, 128>& characters_of(const std::shared_ptr<const VoxelMesh
     return entries.back().present;
 }
 
-// A box of cells in the world (`cells` of a world item): the faces turned to
-// the camera filled with their cell's color, lit by their direction, the
-// farthest first (at most kMaxWorldFaces); then over all of them their edges,
-// in the color more opaque: each face's, or only the creases when smooth. A
-// face behind the item's solids is drawn lighter (the first kMaxHiddenTests
-// faces tested).
+// A box of cells in the world (`cells` of a world item), drawn against the
+// game's depth by the renderer: the faces turned to the camera, filled with
+// their cell's color and lit by their direction (at most kMaxWorldFaces),
+// then their edges as thin quads: each face's, or only the creases when
+// smooth. Without the game's depth this frame, nothing is drawn.
 constexpr size_t kMaxWorldFaces = 30000;
-constexpr size_t kMaxHiddenTests = 4000;
 void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<const VoxelMesh>& shared_mesh,
     const WorldView& view) {
     constexpr double kNear = 0.05;
@@ -799,27 +655,21 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         int count;
         ImU32 fill, edge;
         std::uint8_t edges;
-        bool dashed;  // Hidden, shown by its edges dashed only.
         double margin;  // more margin against the game's depth (the wire view's offsets), meters
         bool back;      // turned away from the eye: only its creases with another turned away (back_edges)
         int direction;  // the face's (axis * 2 + positive)
     };
-    // Against the game's depth (game-depth.on): every face sent to the
-    // renderer, which leaves out, pixel by pixel, what the game's surface
-    // hides; no test here.
-    // The wire view goes there whether hidden faces are hidden or not
-    // (30/10: drawn by ImGui, its edges over everything and its offsets as
-    // geometry, a block removed looked two deep).
+    // Every face sent to the renderer, which leaves out, pixel by pixel, what
+    // the game's surface hides. The solid style (`hide_own`): opaque, the
+    // nearest face kept; the wire view (smooth): its creases.
+    WorldDepthDraw* gpu = c.resources.world_depth ? c.resources.world_depth() : nullptr;
+    if (!gpu) return;
     const bool wire_style = item.world_cells_smooth && !item.world_own_solids;
-    WorldDepthDraw* gpu = (item.world_hide_hidden || wire_style) && c.resources.world_depth ? c.resources.world_depth()
-                                                                                           : nullptr;
-    if (gpu && item.world_depth_margin >= 0.0f) gpu->margin = item.world_depth_margin;
-    if (gpu && item.world_own_solids) gpu->solid = true;
-    if (gpu && wire_style) gpu->wire = true;
-    if (gpu && wire_style && !item.world_hide_hidden) gpu->show_hidden = true;
-    if (gpu && item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
+    if (item.world_own_solids) gpu->solid = true;
+    if (wire_style) gpu->wire = true;
+    if (item.world_dash_opacity >= 0.0f) gpu->dash_alpha = item.world_dash_opacity;
     // The solid style textured: the first item's textures for all.
-    const bool textured = gpu && item.world_own_solids && item.world_textured;
+    const bool textured = item.world_own_solids && item.world_textured;
     if (textured && !gpu->textured) {
         gpu->textures = item.world_textures;
         gpu->textured = true;
@@ -827,15 +677,15 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         gpu->relief = item.world_relief;
         for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
     }
-    if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
+    if (wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
     // Remove mode: what hides an edge is told by the world's blocks around.
     const bool through_blocks = item.world_hidden_dashed || item.world_through_blocks;
-    if (gpu && wire_style && item.world_hide_hidden && through_blocks && item.world_solids && !gpu->blocks) {
+    if (wire_style && through_blocks && item.world_solids && !gpu->blocks) {
         gpu->blocks = item.world_solids;
         for (int i = 0; i < 3; ++i)
             gpu->blocks_eye[i] = (view.eye[i] - item.world_solids->origin[i]) / item.world_solids->cell;
     }
-    if (gpu && gpu->blocks && through_blocks && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
+    if (gpu->blocks && through_blocks && std::fabs(item.world_cells_size - gpu->blocks->cell) < 1e-6) {
         WorldDepthDraw::BlocksPart part;
         part.mesh = shared_mesh;
         for (int i = 0; i < 3; ++i)
@@ -845,11 +695,11 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     // A world point in cells of the blocks, times `depth` (as the shader interpolates it).
     const auto in_blocks = [&](const double world[3], float depth, float out[3]) {
         for (int i = 0; i < 3; ++i)
-            out[i] = gpu && gpu->blocks
+            out[i] = gpu->blocks
                 ? static_cast<float>((world[i] - gpu->blocks->origin[i]) / gpu->blocks->cell * depth)
                 : 0.0f;
     };
-    if (gpu) {
+    {
         // Something standing less than the largest offset (and 10 cm) before
         // our faces is a block of the game the build sits in.
         double largest = item.world_face_offset;
@@ -863,20 +713,6 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             ? view.screen.y * 0.5 * std::sqrt(view.m[4] * view.m[4] + view.m[5] * view.m[5] + view.m[6] * view.m[6])
             : view.screen.y * 0.5 / view.focal_y;
     }
-    // 30/10: the matrix's near (6.5 mm) made the build look farther than the
-    // game's depth says: hidden behind what stands in front, more with the
-    // distance. 1 cm by default; the matrix's when an item asks.
-    if (gpu && item.world_depth_near > 0.0f) gpu->near_distance = item.world_depth_near;
-    if (gpu && item.world_depth_near == 0.0f && gpu->matrix_near > 0.0) gpu->near_distance = gpu->matrix_near;
-    // Hide hidden faces: their results kept per mesh, tested a part per frame.
-    HiddenFaces* hidden = nullptr;
-    if (!gpu && item.world_hide_hidden && (item.world_solids || item.world_own_solids)) {
-        hidden = &hidden_faces_for(item, shared_mesh);
-        test_hidden_faces(item, mesh, view, *hidden);
-    }
-    // only_in_solids, the eye outside the solids' box: no cell is drawn, the
-    // world between them and the eye not known.
-    if (item.world_only_in_solids && item.world_solids && !in_solids(*item.world_solids, view.eye)) return;
     // face_offsets_largest: the largest offsets of the characters drawn.
     bool use_largest = false;
     std::array<double, 3> largest{0.0, 0.0, 0.0};
@@ -894,11 +730,8 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     std::vector<Shown> shown;
     shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
     static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-    size_t tests = 0;
-    for (size_t index = 0; index < mesh.faces.size(); ++index) {
-        const VoxelFace& face = mesh.faces[index];
-        if (face.inner || !face_in_solids(item, face)) continue;
-        if (hidden && hidden->hidden[index] == 1 && !item.world_hidden_dashed) continue;
+    for (const VoxelFace& face : mesh.faces) {
+        if (face.inner) continue;
         if (shown.size() >= kMaxWorldFaces) break;
         const int axis = face.direction / 2;
         const bool positive = face.direction % 2 == 1;
@@ -919,7 +752,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         // The wire view keeps the cells on the grid (its edges must not
         // cross): the offset only lets the face show that far behind the
         // game's surface, as a margin.
-        const bool offset_as_margin = gpu && gpu->wire;
+        const bool offset_as_margin = gpu->wire;
         const double face_margin = offset_as_margin ? offset_toward(face.direction) : 0.0;
         const double offset = offset_as_margin ? 0.0 : offset_toward(face.direction);
         bool any_offset = !offset_as_margin && offset > 0.0;
@@ -955,7 +788,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         // view), those turned away too, for their creases with another
         // turned away.
         const bool back = (view.eye[axis] - plane) * (positive ? 1.0 : -1.0) <= 0.0;
-        const bool back_edges = gpu && gpu->wire && item.world_back_edges > 0.0f;
+        const bool back_edges = gpu->wire && item.world_back_edges > 0.0f;
         if (back && !back_edges) continue;
         std::uint8_t back_creases = 0xF;
         if (back) {
@@ -990,37 +823,19 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             view.to_camera(corner, in[k]);
             for (int i = 0; i < 3; ++i) centre[i] += in[k][i] * 0.25;
         }
-        ImU32 color = item.cell_colors[face.ch];
-        if (!gpu && !hidden && item.world_solids && tests < kMaxHiddenTests) {
-            ++tests;
-            double middle[3];
-            for (int i = 0; i < 3; ++i) middle[i] = base[i] + 0.5 * s;
-            middle[axis] = plane;
-            if (behind_solids(item, view, middle)) color = lighter(color);
-        }
+        const ImU32 color = item.cell_colors[face.ch];
         // Textured: the texture's color, lit by the face's direction.
         const ImU32 fill = textured ? fade(c, shade(IM_COL32(255, 255, 255, 255), kLight[face.direction], 1.0f))
                                     : fade(c, shade(color, kLight[face.direction], 1.0f));
         const ImU32 edge = fade(c, (color & ~IM_COL32_A_MASK) |
             IM_COL32(0, 0, 0, static_cast<int>(item.world_cells_edge_opacity * 255.0f + 0.5f)));
-        // A hidden part shown dashed: its edges in its color, nearly opaque,
-        // whatever the edge opacity (none in the solid style).
-        const int dash_alpha = item.world_dash_opacity >= 0.0f ? static_cast<int>(item.world_dash_opacity * 255.0f + 0.5f) : 220;
-        const ImU32 dashed_edge = fade(c, (color & ~IM_COL32_A_MASK) | IM_COL32(0, 0, 0, dash_alpha));
         const std::uint8_t face_edges = item.world_cells_smooth ? face.creases : std::uint8_t{0xF};
-        // A piece of the face, u0..u1 x v0..v1 of its sides: its corners in
-        // camera space, cut at the near plane; its edges only those on the
-        // face's border.
-        const auto add_piece = [&](double u0, double u1, double v0, double v1, bool piece_hidden) {
+        // Its corners in camera space, cut at the near plane.
+        {
             Shown entry{};
-            const double at[4][2] = {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}};
-            for (int k = 0; k < 4; ++k)
-                for (int i = 0; i < 3; ++i) {
-                    entry.corners[k][i] = in[0][i] + (in[1][i] - in[0][i]) * at[k][0] + (in[3][i] - in[0][i]) * at[k][1];
-                    entry.world[k][i] = at_world[0][i] + (at_world[1][i] - at_world[0][i]) * at[k][0] +
-                        (at_world[3][i] - at_world[0][i]) * at[k][1];
-                }
-            const double near_distance = gpu ? gpu->near_distance : 1.0;
+            std::memcpy(entry.corners, in, sizeof entry.corners);
+            std::memcpy(entry.world, at_world, sizeof entry.world);
+            const double near_distance = gpu->near_distance;
             for (int k = 0; k < 4; ++k) {
                 const double* a = entry.corners[k];
                 const double* b = entry.corners[(k + 1) % 4];
@@ -1039,41 +854,21 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                     entry.points[entry.count++] = view.to_screen(cut);
                 }
             }
-            if (entry.count < 3) return;
-            const std::uint8_t border = (v0 == 0.0 ? 1 : 0) | (u1 == 1.0 ? 2 : 0) | (v1 == 1.0 ? 4 : 0) |
-                (u0 == 0.0 ? 8 : 0);
+            if (entry.count < 3) continue;
             entry.depth = centre[2];
-            entry.dashed = piece_hidden;
             entry.fill = fill;
-            // Against the game's depth, a hidden part of an edge shows dashed
-            // in this color (the renderer decides which part).
-            entry.edge = piece_hidden ? dashed_edge : edge;
-            entry.edges = static_cast<std::uint8_t>(border & (piece_hidden ? 0xF : face_edges) & back_creases);
+            // A hidden part of an edge shows dashed in this color (the
+            // renderer decides which part).
+            entry.edge = edge;
+            entry.edges = static_cast<std::uint8_t>(face_edges & back_creases);
             entry.margin = face_margin;
             entry.back = back;
             entry.direction = face.direction;
             shown.push_back(entry);
-        };
-        const std::uint8_t state = hidden ? hidden->hidden[index] : 0;
-        if (state != 3) {
-            add_piece(0.0, 1.0, 0.0, 1.0, state == 1);
-            continue;
         }
-        // In part: each row of pieces cut into runs alike, the hidden ones
-        // left out (or dashed).
-        const std::uint16_t mask = hidden->mask[index];
-        for (int j = 0; j < 4; ++j)
-            for (int i = 0; i < 4;) {
-                const bool piece_hidden = (mask >> (j * 4 + i)) & 1;
-                int end = i + 1;
-                while (end < 4 && (((mask >> (j * 4 + end)) & 1) != 0) == piece_hidden) ++end;
-                if (!piece_hidden || item.world_hidden_dashed)
-                    add_piece(i / 4.0, end / 4.0, j / 4.0, (j + 1) / 4.0, piece_hidden);
-                i = end;
-            }
     }
     std::sort(shown.begin(), shown.end(), [](const Shown& a, const Shown& b) { return a.depth > b.depth; });
-    if (gpu) {
+    {
         // The fills, then the edges as thin quads, all with their depth.
         for (const Shown& entry : shown) {
             if (entry.back) continue;  // creases only
@@ -1099,7 +894,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         }
         gpu->face_indices = gpu->indices.size();
         const float half = std::max(0.75f, 0.75f * c.scale);
-        const float period = 10.0f * c.scale;  // 6 on, 4 off, as dashed_line
+        const float period = 10.0f * c.scale;  // 6 on, 4 off
         // Edges keep 5 cm more: where a cell rests on the game's surface its
         // outline stays (30/10: with no margin, cubes looked open).
         const auto edge_extra = static_cast<float>(0.05 / gpu->near_distance);
@@ -1174,44 +969,15 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
                 gpu->vertices.push_back({pa.x - nx, pa.y - ny, da, ua, extra, entry.edge, {ca[0], ca[1], ca[2]}, fade});
                 gpu->indices.insert(gpu->indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
             }
-        return;
     }
-    // The fills without anti-aliased borders, whose overlaps would draw the
-    // seams between faces; the edges after, so that no nearer fill covers
-    // part of one.
-    const ImDrawListFlags flags = c.list.Flags;
-    c.list.Flags &= ~ImDrawListFlags_AntiAliasedFill;
-    for (const Shown& entry : shown)
-        if (!entry.dashed) c.list.AddConvexPolyFilled(entry.points, entry.count, entry.fill);
-    c.list.Flags = flags;
-    for (const Shown& entry : shown)
-        for (int k = 0; k < 4; ++k) {
-            if (!(entry.edges & (1 << k))) continue;
-            double a[3], b[3];
-            std::memcpy(a, entry.corners[k], sizeof a);
-            std::memcpy(b, entry.corners[(k + 1) % 4], sizeof b);
-            if (a[2] < kNear && b[2] < kNear) continue;
-            if (a[2] < kNear || b[2] < kNear) {
-                double* behind = a[2] < kNear ? a : b;
-                const double* front = a[2] < kNear ? b : a;
-                const double t = (kNear - front[2]) / (behind[2] - front[2]);
-                for (int i = 0; i < 3; ++i) behind[i] = front[i] + (behind[i] - front[i]) * t;
-            }
-            if (entry.dashed)
-                dashed_line(c, view.to_screen(a), view.to_screen(b), entry.edge, 1.5f * c.scale);
-            else
-                c.list.AddLine(view.to_screen(a), view.to_screen(b), entry.edge, 1.5f * c.scale);
-        }
 }
 
 void draw_world(const Context& c, const Item& item) {
     WorldView view;
     LocalCamera camera, drawn;
     if (item.world_depth_picture && c.resources.want_depth_picture) c.resources.want_depth_picture();
-    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn, item.world_depth_camera);
-    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr,
-            item.world_depth_jitter_kept))
-        return;
+    const bool synced = c.resources.frame_camera && c.resources.frame_camera(drawn);
+    if (!world_view(view, synced ? 0.0 : item.camera_lead, &camera, synced ? &drawn : nullptr)) return;
     constexpr double kNear = 0.05;
     c.list.PushClipRectFullScreen();
     const auto segment = [&](const double from[3], const double to[3], ImU32 color, float width) {
@@ -1262,7 +1028,7 @@ void draw_world(const Context& c, const Item& item) {
         for (int k = 0; k < 4; ++k) segment(corners[k], corners[(k + 1) % 4], item.aim_face_color, item.aim_face_width);
         // The game's depth read back at the aimed face's middle, times its
         // distance: the game's near distance (depth = near / distance), to
-        // check the one assumed (game-depth.on).
+        // check the one assumed (depth::kNearDistance).
         static auto last_near_log = std::chrono::steady_clock::time_point{};
         const auto now = std::chrono::steady_clock::now();
         if (c.resources.game_depth_at && now - last_near_log >= std::chrono::seconds(5)) {

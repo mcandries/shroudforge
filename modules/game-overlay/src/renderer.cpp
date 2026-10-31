@@ -65,7 +65,7 @@ struct OffscreenTarget {
     bool failed = false;  // Not created for this extent and format: views are drawn directly.
 };
 
-// The game's scene depth read back (game-depth.on): reduced on the GPU to
+// The game's scene depth read back (a diagnostic): reduced on the GPU to
 // kDepthWidth across (a blit, nearest), copied into a host buffer of the
 // frame slot, read when the slot comes back (kFrames presents later) and
 // shown in a corner as a picture, near cells bright. D32 only.
@@ -90,7 +90,7 @@ struct DepthReadback {
     bool skip_logged = false;
 };
 
-// World cells drawn against the game's depth (game-depth.on): our pipeline
+// World cells drawn against the game's depth (game_depth.cpp): our pipeline
 // in the zones' pass, before the zones, sampling the game's depth image (in
 // a read-only layout for the pass, back to the game's after). Buffers and
 // descriptor set per frame slot.
@@ -220,8 +220,8 @@ struct WorldDepthPipeline {
 struct WorldDepthConstants {
     float to_clip[2];
     float depth_scale[2];
-    float margin;
-    int32_t mode;         // 0 against the game's depth, 1 our faces' depth, 2 the wire view
+    float pad;            // (a margin once, 31/10: always 0)
+    int32_t mode;         // 0 against the game's depth, 1 our faces' depth, 2 the wire view, 4 through the blocks
     float own_tolerance;  // wire: how far before our nearest face something hides an edge entirely
     float focal;          // screen pixels per unit of tan, vertically (the wire view's slopes)
     float eye[4];         // mode 4: the eye in cells of the blocks' grid; [3] the relief's tolerance, in cells
@@ -2125,10 +2125,10 @@ bool world_target(DeviceData& d, Renderer& r, VkExtent2D extent, VkImageView vie
 }
 
 // In the world's pass (mode 0), the wire view's depth pass (1, the faces
-// alone) or the zones' pass (2, the wire view; 3 showing what is hidden; 4
-// in Remove mode, the world's blocks telling what hides an edge).
+// alone) or the zones' pass (2, the wire view; 4 the world's blocks telling
+// what hides an edge).
 void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t slot, const depth::SceneDepth& scene,
-        VkExtent2D screen, const depth::Settings& settings, VkPipeline pipeline, int mode, size_t indices) {
+        VkExtent2D screen, VkPipeline pipeline, int mode, size_t indices) {
     WorldDepthPipeline& w = r.world;
     d.fn.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     d.fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, w.layout, 0, 1, &w.sets[slot], 0, nullptr);
@@ -2141,8 +2141,6 @@ void draw_world_depth(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32_t s
     constants.to_clip[1] = 2.0f / screen.height;
     constants.depth_scale[0] = static_cast<float>(scene.extent.width) / screen.width;
     constants.depth_scale[1] = static_cast<float>(scene.extent.height) / screen.height;
-    const double margin = r.world_draw.margin >= 0.0 ? r.world_draw.margin : settings.margin;
-    constants.margin = static_cast<float>(margin / r.world_draw.near_distance);
     constants.mode = mode;
     // Wire: an edge hidden by something 30 cm (or the largest face offset
     // and 10 cm) or more before our nearest face is left out (a tree, a
@@ -2310,8 +2308,10 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     if (!target || family == UINT32_MAX) return VK_NULL_HANDLE;
     set_output(true, static_cast<int>(target->extent.width), static_cast<int>(target->extent.height));
     count_frame();
-    // The game's depth shown in a corner (game-depth.on): drawn without zones too.
-    if (!scene_has_visible_zones() && !depth::enabled()) return VK_NULL_HANDLE;
+    // Nothing to draw, unless the game's interface went to its layer for
+    // this image: it must be laid back.
+    if (!scene_has_visible_zones() && !depth::take_interface_layer(target->images[image_index]).image)
+        return VK_NULL_HANDLE;
 
     if (!d.renderer) {
         d.renderer = new Renderer{};
@@ -2381,16 +2381,13 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     offscreen.PushTexture(io.Fonts->TexRef);
     offscreen.PushClipRectFullScreen();
     r.offscreen_used = false;
-    // The game's depth (game-depth.on): this frame's scene depth, and the
-    // world pipeline when it can be read.
-    const depth::SceneDepth scene_depth = depth::enabled() ? depth::scene_depth(target->extent) : depth::SceneDepth{};
-    const depth::Settings depth_settings = depth::enabled() ? depth::settings() : depth::Settings{};
+    // The game's depth: this frame's scene depth, and the world pipeline when
+    // it can be read.
+    const depth::SceneDepth scene_depth = depth::scene_depth(target->extent);
     r.world_draw.vertices.clear();
     r.world_draw.indices.clear();
-    r.world_draw.margin = -1.0;
     r.world_draw.solid = false;
     r.world_draw.wire = false;
-    r.world_draw.show_hidden = false;
     r.world_draw.own_tolerance = 0.3;
     r.world_draw.focal_pixels = 0.0;
     r.world_draw.blocks.reset();
@@ -2405,20 +2402,18 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     // The game's interface layer of the image shown, if it went there: it
     // must be laid back at this present.
     const VkImage shown_image = target->images[image_index];
-    const depth::InterfaceLayer layer = depth::enabled() ? depth::take_interface_layer(shown_image) : depth::InterfaceLayer{};
+    const depth::InterfaceLayer layer = depth::take_interface_layer(shown_image);
     r.world.interface_ready = false;
     r.world.interface_laid = false;
     r.world.interface_device = &d;
     r.world.interface_slot = slot;
     r.world.interface_extent = target->extent;
     r.world_draw.face_indices = 0;
-    // The scene's camera from the GPU, when found: its near distance whatever
-    // camera draws.
+    // The scene's camera from the GPU, when found.
     LocalCamera gpu_camera;
     const bool gpu_known = scene_depth.gpu_camera.valid && scene_depth.has_camera &&
         camera_of(scene_depth.gpu_camera, scene_depth.camera, gpu_camera);
-    r.world_draw.near_distance = depth_settings.near_distance;
-    r.world_draw.matrix_near = gpu_known ? scene_depth.gpu_camera.matrix[11] : 0.0;
+    r.world_draw.near_distance = depth::kNearDistance;
     const bool world_ready = scene_depth.image && scene_depth.format == VK_FORMAT_D32_SFLOAT &&
         scene_depth.layout != VK_IMAGE_LAYOUT_UNDEFINED && scene_depth.layout != VK_IMAGE_LAYOUT_PREINITIALIZED &&
         ensure_world(d, r, target->format, pass);
@@ -2439,13 +2434,14 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
             if (x < 0 || y < 0 || x >= static_cast<int>(e.width) || y >= static_cast<int>(e.height)) return -1.0f;
             return r.depth_values[static_cast<size_t>(y) * e.width + x];
         },
-        [&](LocalCamera& camera, int mode) {
-            const auto chosen = mode >= 0 ? static_cast<depth::CameraMode>(mode) : depth_settings.camera;
-            if (chosen == depth::CameraMode::Gpu && gpu_known) {
+        // The scene's camera from the GPU; until it is found, the one read as
+        // the depth's copy was recorded; else (false) the one read now.
+        [&](LocalCamera& camera) {
+            if (gpu_known) {
                 camera = gpu_camera;
                 return true;
             }
-            if (!scene_depth.has_camera || chosen == depth::CameraMode::Present) return false;
+            if (!scene_depth.has_camera) return false;
             camera = scene_depth.camera;
             return true;
         },
@@ -2509,7 +2505,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         depth_begin.pClearValues = &clear;
         d.fn.CmdBeginRenderPass(cb, &depth_begin, VK_SUBPASS_CONTENTS_INLINE);
         if (r.world_draw.face_indices)
-            draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.depth_pipeline, 1,
+            draw_world_depth(d, r, cb, slot, scene_depth, target->extent, r.world.depth_pipeline, 1,
                 r.world_draw.face_indices);
         d.fn.CmdEndRenderPass(cb);
     } else if (world_drawn) {
@@ -2522,7 +2518,7 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         world_begin.clearValueCount = 2;
         world_begin.pClearValues = clears;
         d.fn.CmdBeginRenderPass(cb, &world_begin, VK_SUBPASS_CONTENTS_INLINE);
-        draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings,
+        draw_world_depth(d, r, cb, slot, scene_depth, target->extent,
             r.world_draw.solid ? r.world.solid_pipeline : r.world.pipeline, 0, r.world_draw.indices.size());
         d.fn.CmdEndRenderPass(cb);
         // Its colors written before the zones' pass loads the image.
@@ -2567,8 +2563,8 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     }
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
     if (wire)
-        draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline,
-            r.world_draw.blocks ? 4 : r.world_draw.show_hidden ? 3 : 2, r.world_draw.indices.size());
+        draw_world_depth(d, r, cb, slot, scene_depth, target->extent, r.world.wire_pipeline,
+            r.world_draw.blocks ? 4 : 2, r.world_draw.indices.size());
     ImGui_ImplVulkan_RenderDrawData(zones, cb);
     // The game's interface layer, if ImGui's callback did not lay it (it
     // must be: the interface is not on the image).

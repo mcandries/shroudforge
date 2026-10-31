@@ -1,7 +1,7 @@
 // The game's scene depth, copied as the game draws it, for the overlay to
 // read at the present (to draw the world items against the game's own
-// depth). On only with a file `game-depth.on` next to the layer, read once
-// when the game creates its device; off, no function is intercepted.
+// depth). Always on in the game, but while the render probe runs
+// (`render-probe.on`, a diagnostic taking the same functions).
 //
 // Enshrouded (render probe, 29/10/2026) renders with vkCmdBeginRendering on
 // one queue; its scene depth is a D32 image the size of its render. Read at
@@ -25,6 +25,7 @@
 #include "overlay.h"
 #include "game_depth.h"
 #include "gpu_camera.h"
+#include "render_probe.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -813,13 +814,8 @@ VKAPI_ATTR void VKAPI_CALL CmdEndRenderingKHR(VkCommandBuffer buffer) {
     end_rendering(buffer);
 }
 
-// game-depth.on's light_probe, read before taking depth_mutex.
-std::atomic<bool> light_probe_on{false};
-
 void submitted(VkCommandBuffer buffer) {
     // Called under depth_mutex.
-    // The scene's light, in any command buffer (the deferred lighting's own).
-    if (copy.has_camera && light_probe_on) gpu::light_submitted(buffer, copy.camera.position);
     auto found = recordings.find(buffer);
     if (found != recordings.end() && found->second.albedo_copied) albedo.submitted_at = presents;
     if (found != recordings.end())
@@ -839,7 +835,6 @@ void submitted(VkCommandBuffer buffer) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
-    light_probe_on = settings().light_probe;
     {
         std::lock_guard lock(depth_mutex);
         for (uint32_t i = 0; i < count; ++i)
@@ -849,7 +844,6 @@ VKAPI_ATTR VkResult VKAPI_CALL QueueSubmit(VkQueue queue, uint32_t count, const 
 }
 
 void submitted2(uint32_t count, const VkSubmitInfo2* submits) {
-    light_probe_on = settings().light_probe;
     std::lock_guard lock(depth_mutex);
     for (uint32_t i = 0; i < count; ++i)
         for (uint32_t j = 0; j < submits[i].commandBufferInfoCount; ++j)
@@ -976,30 +970,11 @@ VKAPI_ATTR VkDeviceAddress VKAPI_CALL GetBufferDeviceAddressEXT(VkDevice device,
     return address;
 }
 
-std::wstring flag_path() {
-    wchar_t path[MAX_PATH]{};
-    HMODULE self{};
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&flag_path), &self);
-    GetModuleFileNameW(self, path, MAX_PATH);
-    std::wstring file(path);
-    file.erase(file.find_last_of(L'\\') + 1);
-    return file + L"game-depth.on";
-}
-
-bool read_enabled() {
-    return GetFileAttributesW(flag_path().c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-std::mutex settings_mutex;
-Settings current;
-ULONGLONG settings_checked = 0;
-FILETIME settings_written{};
-
 }  // namespace
 
 bool enabled() {
-    static const bool on = is_game_process() && read_enabled();
+    // The render probe (a diagnostic) takes the same functions: then off.
+    static const bool on = is_game_process() && !probe::enabled();
     return on;
 }
 
@@ -1017,7 +992,7 @@ void start(DeviceData& d, PFN_vkGetDeviceProcAddr next_gdpa) {
     next.CmdBlitImage = reinterpret_cast<PFN_vkCmdBlitImage>(next_gdpa(d.device, "vkCmdBlitImage"));
     next.CmdClearColorImage = reinterpret_cast<PFN_vkCmdClearColorImage>(next_gdpa(d.device, "vkCmdClearColorImage"));
     if (!next.CmdClearColorImage) layer_failed = true;
-    log_line("game depth: on (game-depth.on), device %p", static_cast<void*>(d.device));
+    log_line("game depth: on, device %p", static_cast<void*>(d.device));
 }
 
 PFN_vkVoidFunction function(const char* requested) {
@@ -1099,41 +1074,6 @@ InterfaceLayer take_interface_layer(VkImage image) {
     return {found->second.image, found->second.view, found->second.layout, found->second.id};
 }
 
-Settings settings() {
-    std::lock_guard lock(settings_mutex);
-    const ULONGLONG now = GetTickCount64();
-    if (now - settings_checked < 1000) return current;
-    settings_checked = now;
-    static const std::wstring path = flag_path();
-    WIN32_FILE_ATTRIBUTE_DATA attributes{};
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attributes) ||
-            CompareFileTime(&attributes.ftLastWriteTime, &settings_written) == 0)
-        return current;
-    settings_written = attributes.ftLastWriteTime;
-    std::ifstream file(path);
-    std::stringstream text;
-    text << file.rdbuf();
-    Settings read;
-    std::string word;
-    while (text >> word) {
-        const size_t equals = word.find('=');
-        if (equals == std::string::npos) continue;
-        const std::string name = word.substr(0, equals);
-        const double value = std::atof(word.c_str() + equals + 1);
-        if (name == "near" && value > 0.0) read.near_distance = value;
-        if (name == "margin" && value >= 0.0) read.margin = value;
-        if (name == "light_probe") read.light_probe = value > 0.0;
-        if (name == "camera") {
-            const std::string mode = word.substr(equals + 1);
-            read.camera = mode == "present" ? CameraMode::Present : mode == "copy" ? CameraMode::Copy : CameraMode::Gpu;
-        }
-    }
-    current = read;
-    static const char* const kModes[] = {"the scene's, from the GPU", "read with the copy", "read at the present"};
-    log_line("game depth: near %.4g m, margin %.3g m, camera %s (unless a world item says), light probe %s",
-        current.near_distance, current.margin, kModes[static_cast<int>(current.camera)], current.light_probe ? "on" : "off");
-    return current;
-}
 
 void presented(const std::vector<VkImage>& images) {
     if (!enabled()) return;
