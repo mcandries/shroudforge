@@ -463,7 +463,8 @@ bool make_own_blur(VkExtent2D extent) {
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // Drawn into by the overlay's blur (renderer.cpp), copied from here.
+    info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkMemoryRequirements requirements{};
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -498,7 +499,7 @@ void record_blur_copy(VkCommandBuffer buffer, VkImage image) {
     before[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     before[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     before[0].image = image;
-    before[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     before[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     before[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     before[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -521,7 +522,7 @@ void record_blur_copy(VkCommandBuffer buffer, VkImage image) {
     after[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     after[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     after[1].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    after[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     after[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     after[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     next.CmdPipelineBarrier(buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
