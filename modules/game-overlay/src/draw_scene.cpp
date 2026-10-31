@@ -732,11 +732,31 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
     std::vector<Shown> shown;
     shown.reserve(std::min(mesh.faces.size(), kMaxWorldFaces));
     static constexpr int kSquare[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    // A cell of the world kept filled next to the build (the item's
+    // `solids`), from a cell of the mesh: the game merges a block placed
+    // against it, so in the solid style a face against it is not drawn and
+    // no edge grows over it (31/10: a wall drawn over the logs it leans on).
+    const WorldSolids* kept = item.world_solids.get();
+    const auto world_filled = [&](const int p[3]) {
+        if (!kept) return false;
+        const int size[3] = {kept->sx, kept->sy, kept->sz};
+        int q[3];
+        for (int i = 0; i < 3; ++i) {
+            q[i] = static_cast<int>(std::floor((item.world_cells_origin[i] + (p[i] + 0.5) * s - kept->origin[i]) / kept->cell));
+            if (q[i] < 0 || q[i] >= size[i]) return false;
+        }
+        return kept->filled[(static_cast<size_t>(q[2]) * size[1] + q[1]) * size[0] + q[0]] != 0;
+    };
     for (const VoxelFace& face : mesh.faces) {
         if (face.inner) continue;
         if (shown.size() >= kMaxWorldFaces) break;
         const int axis = face.direction / 2;
         const bool positive = face.direction % 2 == 1;
+        if (!gpu->wire && kept) {
+            int against[3] = {face.x, face.y, face.z};
+            against[axis] += positive ? 1 : -1;
+            if (world_filled(against)) continue;
+        }
         const double base[3] = {item.world_cells_origin[0] + face.x * s, item.world_cells_origin[1] + face.y * s,
             item.world_cells_origin[2] + face.z * s};
         const int u = (axis + 1) % 3, v = (axis + 2) % 3;
@@ -762,7 +782,9 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             any_offset = offset_toward(direction) > 0.0;
         double grow[4] = {0.0, 0.0, 0.0, 0.0};
         if (any_offset) {
+            // The build's cells, and the world's kept next to it (merged).
             const auto drawn = [&](int p[3]) {
+                if (world_filled(p)) return true;
                 if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= mesh.sx || p[1] >= mesh.sy || p[2] >= mesh.sz) return false;
                 return mesh.drawn[(static_cast<size_t>(p[2]) * mesh.sy + p[1]) * mesh.sx + p[0]] != 0;
             };
