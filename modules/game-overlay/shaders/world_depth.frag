@@ -34,13 +34,14 @@ layout(push_constant) uniform Constants {
     int mode;
     float own_tolerance;  // in units of 1 / depth
     float focal;  // screen pixels per unit of tan, vertically
-    vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells
+    vec4 eye;     // mode 4: the eye in cells of the blocks' grid; w: the relief's tolerance, in cells.
+                  // The solid style textured: the eye in meters from the texture origin.
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
     float relief;      // how much the normal maps tilt the faces (cells.texture_relief)
     float normal_faces;  // which faces have a normal map: 1 sides, 2 top, 4 bottom
-    vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom; w: the scene's brightness readable
+    vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
     float glow;        // the solid style's glow, 1 as the game's (cells.texture_glow)
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
@@ -58,9 +59,6 @@ layout(location = 5) flat in float v_fade;
 layout(location = 6) flat in float v_tex;
 // The solid style's textures: sides, top, bottom (the game's BC7 levels).
 layout(set = 0, binding = 3) uniform sampler2D textures[9];
-// The image shown before the overlay draws, a quarter of the screen with
-// three smaller levels (c.tiling.w on): the scene's brightness.
-layout(set = 0, binding = 5) uniform sampler2D screen_small;
 layout(location = 0) out vec4 out_color;
 // Distance (in units of 1 / depth) of the game's surface at a texel; the sky far.
 float far_at(ivec2 p) {
@@ -161,88 +159,56 @@ bool through_mass(vec3 from, float surface_at) {
     }
     return false;
 }
-// The scene's brightness against a day's (0.2 to 1.3, 1 when it cannot be
-// read): the mean of 9 taps of the image shown at its smallest level. The
-// game's build to place follows it, not the scene's hue (31/10, captures of
-// a wall to build by day, at dusk, at night and by a fire: its stones as
-// bright as the scene's mean, 0.37 by day, 0.10 at night; no orange by the
-// fire).
-float scene_brightness() {
-    if (c.tiling.w < 0.5) return 1.0;
-    float sum = 0.0;
-    for (int y = 0; y < 3; ++y)
-        for (int x = 0; x < 3; ++x)
-            sum += dot(textureLod(screen_small, vec2(0.2 + 0.3 * float(x), 0.2 + 0.3 * float(y)), 3.0).rgb,
-                vec3(0.2126, 0.7152, 0.0722));
-    return clamp(sum / 9.0 / 0.37, 0.2, 1.3);
-}
-
-// The relief of a face from its normal map (x and y in its first two
-// channels, the green toward the image's top, as the game stores it: 31/10,
-// tested in game; z made from them; tilted by c.relief), laid as its color
-// (u along `along`, v along `down`): lit from above (a side, from above and
-// in front), against the flat face so lit; 1 where it is flat.
-float relief(vec4 stored, vec3 face, vec3 along, vec3 down) {
+// A face's normal from its normal map (x and y in its first two channels,
+// the green toward the image's top, as the game stores it: 31/10, tested in
+// game; z made from them; tilted by c.relief), laid as its color (u along
+// `along`, v along `down`).
+vec3 normal_of(vec4 stored, vec3 face, vec3 along, vec3 down) {
     vec2 xy = (stored.rg * 2.0 - 1.0) * c.relief;
-    vec3 n = normalize(along * xy.x - down * xy.y + face * sqrt(max(1.0 - dot(xy, xy), 0.0)));
-    vec3 light = abs(face.y) > 0.5 ? face : normalize(face + vec3(0.0, 0.8, 0.0));
-    return clamp(max(dot(n, light), 0.0) / max(dot(face, light), 0.2), 0.35, 1.6);
+    return normalize(along * xy.x - down * xy.y + face * sqrt(max(1.0 - dot(xy, xy), 0.0)));
 }
 
-// A face of the solid style as the game draws a build to place (31/10,
-// captures): a hologram in blues. The brightness of the material's texture
-// (its sides, top or bottom), darkened by its ambient occlusion and shaded
-// by its normal map, in a ramp from navy to blue, as bright as the scene;
-// a cyan glow, nearly the same day and night, where the normal map bends
-// hard (the joints and the edges of stones). Laid along the world's axes at
-// the game's tiling (v_cell: meters from the texture origin, times depth).
-// The three are sampled alike and one kept (indexing them would want the
-// same index for all the draw).
-const vec3 HOLO_DARK = vec3(0.20, 0.22, 0.30);
-const vec3 HOLO_LIGHT = vec3(0.52, 0.58, 0.78);
-const vec3 HOLO_FLOOR = vec3(0.03, 0.05, 0.10);
-const vec3 GLOW_NIGHT = vec3(0.44, 0.61, 0.94);
-const vec3 GLOW_DAY = vec3(0.71, 0.81, 1.00);
+// A face of the solid style as the game draws a build to place: the game's
+// own formula (31/10, capture frame12458: its material shader, for a block
+// in the hammer's preview), a light of its own, the scene's light left
+// out. With n the face's normal from its normal map, g the face's, v toward
+// the eye: m = mix(1 - n.g, 1 - n.v, clamp(g.v / 2, 0, 1)) / 2 (how much
+// the relief bends from the face, and turns from the eye); f = 1 - (1 - m)^3;
+// the game adds f x 2.5 x (0.752, 1.486, 4.002) as light. On the screen
+// that is (0.188, 0.371, 1) x (0.077 + 2.1 f), linear (three pixels of the
+// capture fitted: the stone's own color hardly shows), the blue at most 1.
+// c.glow scales f (1 as the game's). Laid along the world's axes at the
+// game's tiling (v_cell: meters from the texture origin, times depth). The
+// three normal maps are sampled alike and one kept (indexing them would
+// want the same index for all the draw).
+const vec3 HOLO_HUE = vec3(0.188, 0.371, 1.0);
+vec3 to_srgb(vec3 linear) {
+    return mix(linear * 12.92, 1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), linear));
+}
 vec4 textured(vec4 color) {
     if (v_tex < 0.5) return color;
     vec3 p = v_cell / v_depth;
     int kind = int(v_tex);
     float sign = fract(v_tex) > 0.25 ? -1.0 : 1.0;
     vec2 plane = kind == 1 ? vec2(p.z, -p.y) : kind == 2 ? vec2(p.x, -p.y) : vec2(p.x, p.z);
-    vec3 side = texture(textures[0], plane * c.tiling.x).rgb;
-    vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
-    vec3 bottom = texture(textures[2], plane * c.tiling.z).rgb;
-    vec3 rgb = kind <= 2 ? side : kind == 3 ? top : bottom;
-    // Their ambient occlusion (white when the material has none), against
-    // its mean (its smallest level): the light lent by the game's surfaces
-    // already holds theirs (31/10: counted twice, the wall too dark).
-    float side_ao = texture(textures[3], plane * c.tiling.x).r / max(textureLod(textures[3], vec2(0.5), 16.0).r, 0.25);
-    float top_ao = texture(textures[4], plane * c.tiling.y).r / max(textureLod(textures[4], vec2(0.5), 16.0).r, 0.25);
-    float bottom_ao = texture(textures[5], plane * c.tiling.z).r / max(textureLod(textures[5], vec2(0.5), 16.0).r, 0.25);
-    float shade = min(kind <= 2 ? side_ao : kind == 3 ? top_ao : bottom_ao, 1.5);
-    // Their normal maps: the face's outward normal, and the world's axes
-    // along which its texture's u and v run.
+    vec3 face = kind == 1 ? vec3(sign, 0.0, 0.0) : kind == 2 ? vec3(0.0, 0.0, sign)
+        : kind == 3 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+    vec3 n = face;
     vec4 side_n = texture(textures[6], plane * c.tiling.x);
     vec4 top_n = texture(textures[7], plane * c.tiling.y);
     vec4 bottom_n = texture(textures[8], plane * c.tiling.z);
     int faces = int(c.normal_faces + 0.5);
     int bit = kind <= 2 ? 1 : kind == 3 ? 2 : 4;
-    float glow = 0.0;
     if ((faces & bit) != 0) {
-        vec4 stored = kind <= 2 ? side_n : kind == 3 ? top_n : bottom_n;
-        vec3 face = kind == 1 ? vec3(sign, 0.0, 0.0) : kind == 2 ? vec3(0.0, 0.0, sign)
-            : kind == 3 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
         vec3 along = kind == 1 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
         vec3 down = kind <= 2 ? vec3(0.0, -1.0, 0.0) : vec3(0.0, 0.0, 1.0);
-        shade *= relief(stored, face, along, down);
-        // How far the normal map leans from the face: steep at the joints.
-        glow = smoothstep(0.45, 0.9, length(stored.rg * 2.0 - 1.0)) * c.glow;
+        n = normal_of(kind <= 2 ? side_n : kind == 3 ? top_n : bottom_n, face, along, down);
     }
-    float bright = scene_brightness();
-    float level = clamp(dot(rgb, vec3(0.2126, 0.7152, 0.0722)) * 1.8, 0.0, 1.0);
-    vec3 body = max(mix(HOLO_DARK, HOLO_LIGHT, level) * shade * bright, HOLO_FLOOR);
-    vec3 light = mix(GLOW_NIGHT, GLOW_DAY, clamp(bright, 0.0, 1.0));
-    return vec4(mix(body, light, clamp(glow, 0.0, 1.0)), color.a);
+    vec3 to_eye = normalize(c.eye.xyz - p);
+    float m = mix(1.0 - dot(n, face), 1.0 - dot(n, to_eye), clamp(dot(face, to_eye) * 0.5, 0.0, 1.0)) * 0.5;
+    float f = (1.0 - pow(1.0 - clamp(m, 0.0, 1.0), 3.0)) * c.glow;
+    vec3 linear = HOLO_HUE * clamp(0.077 + 2.1 * f, 0.0, 1.0);
+    return vec4(to_srgb(linear), color.a);
 }
 void main() {
     if (c.mode == 1) {
