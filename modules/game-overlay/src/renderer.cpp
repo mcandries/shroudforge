@@ -206,6 +206,13 @@ struct WorldDepthPipeline {
     VkExtent2D interface_extent{};
     bool interface_ready = false;  // its set written, the layer readable
     bool interface_laid = false;
+    // Our HUD blur, made there too (the zones' pass ended and begun again):
+    // from the image shown with every world item on it.
+    bool hud_fill = false;    // asked, and possible this frame
+    bool hud_filled = false;  // made
+    VkImage hud_shown{};
+    depth::HudBlur hud_blur_into;
+    VkRenderPassBeginInfo zones_begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     std::unordered_map<int, VkImageView> views;  // of the game's depth images, by their number
     bool drawn_logged = false;
 };
@@ -1847,17 +1854,25 @@ void draw_interface_layer(DeviceData& d, Renderer& r, VkCommandBuffer cb, uint32
     d.fn.CmdDraw(cb, 3, 1, 0, 0);
 }
 
-// ImGui's draw callback between the world-only zones and the others: the
-// game's interface layer laid back there (the path's points and line under
-// it, the panels over it).
+// ImGui's draw callback between the world-only zones and the others: our HUD
+// blur made from the image shown with every world item on it (the zones'
+// pass ended for it, then begun again), then the game's interface layer laid
+// back there (the path's points and line under it, the panels over it).
 void lay_interface(const ImDrawList*, const ImDrawCmd* command) {
     auto* r = static_cast<Renderer*>(command->UserCallbackData);
     if (!r || !r->world.interface_ready || r->world.interface_laid || !r->world.interface_device) return;
     auto* state = static_cast<ImGui_ImplVulkan_RenderState*>(ImGui::GetPlatformIO().Renderer_RenderState);
     if (!state) return;
-    draw_interface_layer(*r->world.interface_device, *r, state->CommandBuffer, r->world.interface_slot,
-        r->world.interface_extent);
-    r->world.interface_laid = true;
+    DeviceData& d = *r->world.interface_device;
+    WorldDepthPipeline& w = r->world;
+    if (w.hud_fill) {
+        d.fn.CmdEndRenderPass(state->CommandBuffer);
+        w.hud_filled = fill_hud_blur(d, *r, state->CommandBuffer, w.interface_slot, w.hud_shown, w.interface_extent,
+            w.hud_blur_into);
+        d.fn.CmdBeginRenderPass(state->CommandBuffer, &w.zones_begin, VK_SUBPASS_CONTENTS_INLINE);
+    }
+    draw_interface_layer(d, *r, state->CommandBuffer, w.interface_slot, w.interface_extent);
+    w.interface_laid = true;
 }
 
 // A view of the game's G-buffer color copy (game_depth.cpp), by its number.
@@ -2344,6 +2359,14 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
 
     // Build this frame's draw lists.
     const SceneSnapshot scene = snapshot_scene();
+    // The interface layer and the HUD blur, while a world item asks for them.
+    bool layer_asked = false, blur_asked = false;
+    for (const auto& zone : scene.zones)
+        for (const Item& item : zone->items)
+            if (item.kind == ItemKind::World) {
+                layer_asked = layer_asked || item.world_under_interface;
+                blur_asked = blur_asked || (item.world_under_interface && item.world_hud_blur);
+            }
     for (const auto& zone : scene.zones) collect_fonts(r, zone->items);
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(target->extent.width), static_cast<float>(target->extent.height));
@@ -2378,8 +2401,6 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     r.world_draw.textured = false;
     r.world_draw.texture_light = false;
     r.world_draw.relief = 1.0f;
-    r.world_draw.under_interface = true;
-    r.world_draw.hud_blur = true;
     r.world_draw.textures = {};
     // The game's interface layer of the image shown, if it went there: it
     // must be laid back at this present.
@@ -2510,12 +2531,6 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         written.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         d.fn.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 1, &written, 0, nullptr, 0, nullptr);
-        // The HUD's blurred scene with the build in it, for the game's next
-        // frame: only from the scene alone (its interface in its layer), in a
-        // format the game's blur shares.
-        hud_blur = r.world_draw.hud_blur && r.world.interface_ready && target->copyable &&
-            (target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM) &&
-            fill_hud_blur(d, r, cb, slot, shown_image, target->extent, depth::hud_blur_target());
     }
     if (r.offscreen_used) {
         ImDrawData data;
@@ -2539,6 +2554,17 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
     pass_begin.renderPass = pass;
     pass_begin.framebuffer = target->framebuffers[image_index];
     pass_begin.renderArea.extent = target->extent;
+    // Our HUD blur, made in ImGui's callback: only from the scene alone (the
+    // game's interface in its layer), in a format the game's blur shares.
+    r.world.zones_begin = pass_begin;
+    r.world.hud_shown = shown_image;
+    r.world.hud_filled = false;
+    r.world.hud_fill = blur_asked && r.world.interface_ready && target->copyable &&
+        (target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM);
+    if (r.world.hud_fill) {
+        r.world.hud_blur_into = depth::hud_blur_target();
+        r.world.hud_fill = r.world.hud_blur_into.image != VK_NULL_HANDLE;
+    }
     d.fn.CmdBeginRenderPass(cb, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
     if (wire)
         draw_world_depth(d, r, cb, slot, scene_depth, target->extent, depth_settings, r.world.wire_pipeline,
@@ -2569,10 +2595,10 @@ VkSemaphore render_frame(DeviceData& d, VkQueue queue, const VkPresentInfoKHR& p
         return VK_NULL_HANDLE;
     }
     frame.submitted = true;
-    // The game's interface under its layer from now on, while the world items
-    // are drawn under it.
-    keep_layer = world_drawn && r.world_draw.under_interface && r.world.interface_pipeline;
-    hud_blur = hud_blur && keep_layer;
+    // The game's interface under its layer from now on, while a world item
+    // asks for it (Architect Line: while it is active).
+    keep_layer = layer_asked && r.world.interface_pipeline;
+    hud_blur = r.world.hud_filled && keep_layer;
     if (!hud_blur) r.world.hud_history = false;
     if (!r.first_frame_logged) {
         r.first_frame_logged = true;
