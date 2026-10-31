@@ -72,6 +72,20 @@ struct InterfaceLayer {
 // at this present: the game's interface is not on the image.
 InterfaceLayer take_interface_layer(VkImage image);
 
+// The HUD's blurred scene. Enshrouded blurs its scene into a 320x180 image
+// (an eighth of the screen, R8G8B8A8_UNORM, by compute) that its HUD's
+// frosted panels read (31/10 capture). Our own (`image`, its size, null while
+// the game's is not known), filled by the overlay at a present from the scene
+// with the world items, is copied over the game's in the next frame, right
+// after the game's barrier making its blur readable: the frosted panels show
+// the build, a frame late. `filled` says, at each present, whether it was.
+struct HudBlur {
+    VkImage image{};
+    VkExtent2D extent{};
+};
+HudBlur hud_blur_target();
+void hud_blur_filled(bool filled);
+
 // The light view's images: this many levels, each half the one before.
 constexpr uint32_t kLightLevels = 4;
 // Levels 1 to kLightLevels - 1 of `image` (level 0 in TRANSFER_DST_OPTIMAL,
