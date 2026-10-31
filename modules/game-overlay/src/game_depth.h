@@ -1,6 +1,6 @@
-// game_depth.cpp: the game's scene depth, copied as the game draws it (when a
-// file `game-depth.on` sits next to the layer), for the overlay to read at
-// the present.
+// game_depth.cpp: the game's scene depth, copied as the game draws it, for
+// the overlay to read at the present (always in the game, unless the render
+// probe runs).
 #pragma once
 
 #include "gpu_camera.h"
@@ -15,6 +15,11 @@ struct DeviceData;
 }
 
 namespace overlay::depth {
+
+// The game's near distance (meters): its depth is near / distance. 1 cm
+// (30/10: the GPU matrix's 6.5 mm made the build look farther than the
+// game's depth says).
+constexpr double kNearDistance = 0.01;
 
 bool enabled();
 // The game's device created: the next layer's functions taken.
@@ -93,27 +98,6 @@ constexpr uint32_t kLightLevels = 4;
 void make_light_levels(VkCommandBuffer buffer, VkImage image, VkExtent2D extent, PFN_vkCmdPipelineBarrier barrier_fn,
     PFN_vkCmdBlitImage blit_fn);
 
-// Read from game-depth.on (`near=0.01 margin=0.15`), again when it changes:
-// the game's near distance (its depth is near / distance) and how far behind
-// the game's surface (meters) a world cell still shows.
-enum class CameraMode { Gpu, Copy, Present };
-struct Settings {
-    double near_distance = 0.01;  // unless a world item asks for the GPU matrix's (depth_near)
-    // How far behind the game's surface a cell still shows. 0 (30/10): the
-    // cells are drawn past their cells instead (face_offset), as the game's
-    // blocks; more, the build shows through what stands just in front of it.
-    double margin = 0.0;
-    // Which camera draws the world items: `camera=gpu` (default), the
-    // scene's as handed to the GPU (else as `copy`); `camera=copy`, the one
-    // read as the game recorded the scene; `camera=present`, the one read at
-    // the present, as without the game's depth.
-    CameraMode camera = CameraMode::Gpu;
-    // `light_probe=1`: the probe of the scene's sun and light factors in every
-    // command buffer (gpu::light_submitted); off by default (31/10: not found
-    // in the scene's pass, a lead set aside for the game's own lighting).
-    bool light_probe = false;
-};
-Settings settings();
 // At each present, after the overlay drew: a frame ends, `images` shown
 // (their interface layers free for their next frame).
 void presented(const std::vector<VkImage>& images);

@@ -177,32 +177,11 @@ struct Item {
     // Opacity of its edges (0 to 1), in their cell's color.
     float world_cells_edge_opacity = 0.9f;
     std::shared_ptr<const WorldSolids> world_solids;
-    // World: the faces of `cells` hidden from the eye (behind `solids`, or
-    // behind its own cells with `hide_own`) are not drawn, or only their
-    // edges dashed (`hidden_dashed`), instead of drawn lighter.
-    bool world_hide_hidden = false;
+    // World, the wire view: an edge hidden by the world's blocks (`solids`)
+    // dashed even where the edges are not drawn (`hidden_dashed`, Remove).
     bool world_hidden_dashed = false;
-    // World: the cells drawn only inside the box of `solids`, and none while
-    // the eye is outside it: elsewhere what hides them is not known, and they
-    // would show in front of the world.
-    bool world_only_in_solids = false;
-    // World: asks for the picture of the game's depth (game-depth.on), a diagnostic.
+    // World: asks for the picture of the game's depth, a diagnostic.
     bool world_depth_picture = false;
-    // World: the camera drawing it against the game's depth (game-depth.on):
-    // 0 the scene's from the GPU, 1 read with the depth's copy, 2 read at the
-    // present; -1 as game-depth.on says.
-    int world_depth_camera = -1;
-    // World: how far behind the game's surface its cells still show (meters),
-    // against the game's depth; negative: as game-depth.on says.
-    float world_depth_margin = -1.0f;
-    // World: the game's near distance for its depth (meters); 0: the GPU
-    // camera matrix's; negative: as game-depth.on says.
-    float world_depth_near = -1.0f;
-    // World: the GPU camera's matrix kept as the game gives it, with its
-    // temporal anti-aliasing jitter (depth_jitter = "keep"); by default
-    // taken out, the build steady on the image (30/10: shimmering by a pixel
-    // with FSR 3, not without anti-aliasing or with FXAA).
-    bool world_depth_jitter_kept = false;
     // World: its cells drawn this much larger (meters) where their surface is
     // open, as the game draws its blocks past their cells; they stay on the
     // grid. Faces pushed out, their edges longer at an outer corner, shorter

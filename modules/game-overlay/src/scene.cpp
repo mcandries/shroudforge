@@ -561,10 +561,6 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("camera_lead"))
             item.camera_lead = std::clamp(parse_number(value["camera_lead"], "camera_lead"), -0.2f, 0.2f);
         item.world_depth_picture = value.value("depth_picture", false);
-        if (value.contains("depth_near")) {
-            if (value["depth_near"].is_number()) item.world_depth_near = std::clamp(value["depth_near"].get<float>(), 0.0001f, 1.0f);
-            else if (value["depth_near"] == "matrix") item.world_depth_near = 0.0f;
-        }
         if (value.contains("face_offset") && value["face_offset"].is_number())
             item.world_face_offset = std::clamp(value["face_offset"].get<float>(), 0.0f, 0.25f);
         if (value.contains("face_offsets") && value["face_offsets"].is_object())
@@ -582,10 +578,6 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
                 }
                 item.world_face_offsets.push_back({static_cast<unsigned char>(key[0]), each});
             }
-        if (value.contains("depth_margin") && value["depth_margin"].is_number())
-            item.world_depth_margin = std::clamp(value["depth_margin"].get<float>(), 0.0f, 2.0f);
-        if (value.contains("depth_jitter") && value["depth_jitter"].is_string())
-            item.world_depth_jitter_kept = value["depth_jitter"].get<std::string>() == "keep";
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("back_edges") &&
             value["cells"]["back_edges"].is_number())
             item.world_back_edges = std::clamp(value["cells"]["back_edges"].get<float>(), 0.0f, 1.0f);
@@ -597,10 +589,6 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             item.world_dash_opacity = std::clamp(value["cells"]["dash_opacity"].get<float>(), 0.0f, 1.0f);
         if (value.contains("face_offsets_largest") && value["face_offsets_largest"].is_boolean())
             item.world_face_offsets_largest = value["face_offsets_largest"].get<bool>();
-        if (value.contains("depth_camera") && value["depth_camera"].is_string()) {
-            const std::string mode = value["depth_camera"].get<std::string>();
-            item.world_depth_camera = mode == "gpu" ? 0 : mode == "copy" ? 1 : mode == "present" ? 2 : -1;
-        }
         if (value.contains("aim_face")) {
             const auto& face = value["aim_face"];
             if (!face.is_object()) fail("world: aim_face: expected {color, width, origin, cell}");
@@ -660,9 +648,7 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
             } catch (const std::runtime_error& error) {
                 fail(error.what());
             }
-            item.world_hide_hidden = cells.value("hide_hidden", false);
             item.world_hidden_dashed = cells.value("hidden_dashed", false);
-            item.world_only_in_solids = cells.value("only_in_solids", false);
             if (cells.value("hide_own", false)) {
                 // Its own cells, those with a color, hide each other too.
                 auto own = std::make_shared<WorldSolids>();
@@ -1026,8 +1012,8 @@ OVERLAY_EXPORT int ShroudforgeOverlay_GetStatus(char* out, uint32_t out_size) {
     }
     // What this overlay knows beyond API version 1, for mods that fall back
     // without it (an older overlay ignores the fields it does not know).
-    status["features"] = json::array({"dashes", "same_mesh", "blobs", "hide_hidden", "only_in_solids"});
-    // Drawing the world items against the game's depth (game-depth.on).
+    status["features"] = json::array({"dashes", "same_mesh", "blobs"});
+    // Drawing the world items against the game's depth (off only while the render probe runs).
     if (depth::enabled()) status["features"].push_back("game_depth");
     // cells.texture: the solid style textured (BC7 levels, 31/10).
     if (depth::enabled()) status["features"].push_back("textures");
