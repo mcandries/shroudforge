@@ -40,6 +40,8 @@ layout(push_constant) uniform Constants {
     ivec4 size;   // mode 4: the grid's size in cells
     float dash_alpha;  // a hidden edge's dashes, this opaque (cells.dash_opacity)
     float back_alpha;  // the wire view: those behind the build's own faces (cells.back_edges)
+    float normal_y;    // the normal maps' green: 1 as stored, -1 the other way
+    float normal_faces;  // which faces have a normal map: 1 sides, 2 top, 4 bottom
     vec4 tiling;       // the solid style's textures: repeats a meter of the sides, top and bottom
 } c;
 layout(set = 0, binding = 0) uniform sampler2D game_depth;
@@ -56,7 +58,7 @@ layout(location = 4) noperspective in vec3 v_cell;
 layout(location = 5) flat in float v_fade;
 layout(location = 6) flat in float v_tex;
 // The solid style's textures: sides, top, bottom (the game's BC7 levels).
-layout(set = 0, binding = 3) uniform sampler2D textures[6];
+layout(set = 0, binding = 3) uniform sampler2D textures[9];
 // The light view (c.tiling.w on): the color of the game's surfaces without
 // light (its G-buffer) and the image shown, both a quarter of the screen.
 layout(set = 0, binding = 4) uniform sampler2D albedo_small;
@@ -207,15 +209,29 @@ vec3 light_at() {
     return mix(vec3(brightness), light, clamp(3.0 * near / all_taps, 0.0, 1.0));
 }
 
+// The relief of a face from its normal map (x and y in its first two
+// channels, z made from them), laid as its color (u along `along`, v along
+// `down`): lit from above (a side, from above and in front), against the
+// flat face so lit; 1 where it is flat.
+float relief(vec4 stored, vec3 face, vec3 along, vec3 down) {
+    vec2 xy = stored.rg * 2.0 - 1.0;
+    vec3 n = normalize(along * xy.x + down * (xy.y * c.normal_y) +
+        face * sqrt(max(1.0 - dot(xy, xy), 0.0)));
+    vec3 light = abs(face.y) > 0.5 ? face : normalize(face + vec3(0.0, 0.8, 0.0));
+    return clamp(max(dot(n, light), 0.0) / max(dot(face, light), 0.2), 0.35, 1.6);
+}
+
 // A face of the solid style textured as the game draws its material: the
-// texture of its sides, top or bottom, darkened by its ambient occlusion, laid along the world's axes at the
-// game's tiling (v_cell: meters from the texture origin, times depth). The
-// three are sampled alike and one kept (indexing them would want the same
-// index for all the draw).
+// texture of its sides, top or bottom, darkened by its ambient occlusion and
+// shaded by its normal map, laid along the world's axes at the game's tiling
+// (v_cell: meters from the texture origin, times depth). The three are
+// sampled alike and one kept (indexing them would want the same index for
+// all the draw).
 vec4 textured(vec4 color) {
     if (v_tex < 0.5) return color;
     vec3 p = v_cell / v_depth;
-    int kind = int(v_tex + 0.5);
+    int kind = int(v_tex);
+    float sign = fract(v_tex) > 0.25 ? -1.0 : 1.0;
     vec2 plane = kind == 1 ? vec2(p.z, -p.y) : kind == 2 ? vec2(p.x, -p.y) : vec2(p.x, p.z);
     vec3 side = texture(textures[0], plane * c.tiling.x).rgb;
     vec3 top = texture(textures[1], plane * c.tiling.y).rgb;
@@ -226,6 +242,20 @@ vec4 textured(vec4 color) {
     float top_ao = texture(textures[4], plane * c.tiling.y).r;
     float bottom_ao = texture(textures[5], plane * c.tiling.z).r;
     rgb *= kind <= 2 ? side_ao : kind == 3 ? top_ao : bottom_ao;
+    // Their normal maps: the face's outward normal, and the world's axes
+    // along which its texture's u and v run.
+    vec4 side_n = texture(textures[6], plane * c.tiling.x);
+    vec4 top_n = texture(textures[7], plane * c.tiling.y);
+    vec4 bottom_n = texture(textures[8], plane * c.tiling.z);
+    int faces = int(c.normal_faces + 0.5);
+    int bit = kind <= 2 ? 1 : kind == 3 ? 2 : 4;
+    if ((faces & bit) != 0) {
+        vec3 face = kind == 1 ? vec3(sign, 0.0, 0.0) : kind == 2 ? vec3(0.0, 0.0, sign)
+            : kind == 3 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+        vec3 along = kind == 1 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+        vec3 down = kind <= 2 ? vec3(0.0, -1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+        rgb *= relief(kind <= 2 ? side_n : kind == 3 ? top_n : bottom_n, face, along, down);
+    }
     if (c.tiling.w > 0.5) rgb *= light_at();
     return vec4(color.rgb * rgb, color.a);
 }

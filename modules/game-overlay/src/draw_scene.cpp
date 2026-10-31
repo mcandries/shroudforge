@@ -824,6 +824,7 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
         gpu->textures = item.world_textures;
         gpu->textured = true;
         gpu->texture_light = item.world_texture_light;
+        gpu->normal_flip = item.world_normal_flip;
         for (int i = 0; i < 3; ++i) gpu->texture_origin[i] = std::floor(item.world_cells_origin[i] / 64.0) * 64.0;
     }
     if (gpu && wire_style && item.world_back_edges > 0.0f) gpu->back_alpha = item.world_back_edges;
@@ -1079,9 +1080,12 @@ void draw_world_cells(const Context& c, const Item& item, const std::shared_ptr<
             const auto first = static_cast<std::uint32_t>(gpu->vertices.size());
             // Textured (the solid style): which texture and plane, the point in
             // meters from the texture origin.
+            // 1 and 2 the sides facing x and z, 3 the top, 4 the bottom; a
+            // side facing the negative way half more (its normal's sign).
             const int axis = entry.direction / 2;
             const float tex = !gpu->textured || !gpu->solid ? 0.0f
-                : axis == 0 ? 1.0f : axis == 2 ? 2.0f : entry.direction == 3 ? 3.0f : 4.0f;
+                : axis == 0 ? (entry.direction == 0 ? 1.5f : 1.0f) : axis == 2 ? (entry.direction == 4 ? 2.5f : 2.0f)
+                : entry.direction == 3 ? 3.0f : 4.0f;
             for (int k = 0; k < entry.count; ++k) {
                 float meters[3] = {0.0f, 0.0f, 0.0f};
                 if (tex > 0.0f)

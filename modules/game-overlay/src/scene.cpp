@@ -145,19 +145,19 @@ bool is_text(const json& value) {
 
 }  // namespace
 
-size_t bc7_bytes(int width, int height, int levels, bool bc4) {
+size_t bc7_bytes(int width, int height, int levels, bool half) {
     size_t bytes = 0;
     for (int level = 0; level < levels; ++level) {
         const int w = std::max(1, width >> level), h = std::max(1, height >> level);
-        bytes += static_cast<size_t>((w + 3) / 4) * static_cast<size_t>((h + 3) / 4) * (bc4 ? 8 : 16);
+        bytes += static_cast<size_t>((w + 3) / 4) * static_cast<size_t>((h + 3) / 4) * (half ? 8 : 16);
     }
     return bytes;
 }
 
 namespace {
 
-// One texture: {data = BC7 or BC4 levels (a blob), width, height, levels,
-// format = "bc7" (default) or "bc4", tiling}.
+// One texture: {data = its levels (a blob), width, height, levels,
+// format = "bc7" (default), "bc1", "bc4" or "bc5", tiling}.
 void parse_one_texture(const json& face, WorldTexture& out, const std::string& name) {
     if (!face.contains("data") || !is_text(face["data"]) || !face.contains("width") ||
         !face["width"].is_number_integer() || !face.contains("height") || !face["height"].is_number_integer() ||
@@ -169,18 +169,22 @@ void parse_one_texture(const json& face, WorldTexture& out, const std::string& n
     out.levels = std::clamp(face["levels"].get<int>(), 1, 13);
     if (face.contains("format") && face["format"].is_string()) {
         const std::string format = face["format"].get<std::string>();
-        if (format != "bc7" && format != "bc4") fail("world: cells.texture." + name + ".format: bc7 or bc4");
-        out.bc4 = format == "bc4";
+        if (format == "bc7") out.format = TextureFormat::bc7;
+        else if (format == "bc1") out.format = TextureFormat::bc1;
+        else if (format == "bc4") out.format = TextureFormat::bc4;
+        else if (format == "bc5") out.format = TextureFormat::bc5;
+        else fail("world: cells.texture." + name + ".format: bc7, bc1, bc4 or bc5");
     }
     if (face.contains("tiling") && face["tiling"].is_number())
         out.tiling = std::clamp(face["tiling"].get<float>(), 0.001f, 64.0f);
-    if (out.data->size() < bc7_bytes(out.width, out.height, out.levels, out.bc4))
+    if (out.data->size() < bc7_bytes(out.width, out.height, out.levels, half_blocks(out.format)))
         fail("world: cells.texture." + name + ": fewer bytes than its levels");
 }
 
 // cells.texture = {side, top, bottom}, each a texture (parse_one_texture)
 // and optionally `ao`, its ambient occlusion (a texture too, its first
-// channel read; laid as the color): the faces of the solid style textured.
+// channel read; laid as the color), and `normal`, its normal map (x and y in
+// its first two channels): the faces of the solid style textured.
 void parse_world_texture(Item& item, const json& texture) {
     static const char* kFaces[3] = {"side", "top", "bottom"};
     for (int i = 0; i < 3; ++i) {
@@ -190,6 +194,8 @@ void parse_world_texture(Item& item, const json& texture) {
         parse_one_texture(face, item.world_textures[i], kFaces[i]);
         if (face.contains("ao") && face["ao"].is_object())
             parse_one_texture(face["ao"], item.world_textures[3 + i], std::string(kFaces[i]) + ".ao");
+        if (face.contains("normal") && face["normal"].is_object())
+            parse_one_texture(face["normal"], item.world_textures[6 + i], std::string(kFaces[i]) + ".normal");
     }
     item.world_textured = true;
 }
@@ -625,6 +631,9 @@ Item parse_item(const json& value, const TextStyle& text_style, int depth, size_
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_light") &&
             value["cells"]["texture_light"].is_boolean())
             item.world_texture_light = value["cells"]["texture_light"].get<bool>();
+        if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_normal_flip") &&
+            value["cells"]["texture_normal_flip"].is_boolean())
+            item.world_normal_flip = value["cells"]["texture_normal_flip"].get<bool>();
         if (value.contains("cells") && value["cells"].is_object() && value["cells"].contains("texture_keep") &&
             value["cells"]["texture_keep"].is_array())
             parse_texture_keep(item, value["cells"]["texture_keep"]);
