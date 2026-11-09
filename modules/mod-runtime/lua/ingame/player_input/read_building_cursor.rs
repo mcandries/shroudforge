@@ -1,5 +1,19 @@
 use super::*;
 
+/// Publishes reflection-derived offsets before a native DLL asks for its first
+/// camera sample; it does not depend on the Lua cursor getter being called.
+pub(crate) fn publish_local_camera_layout(state: &AppState) {
+    let Some(metadata) = state
+        .type_registry()
+        .get_by_name(kfc::reflection::LookupKey::Qualified(
+            "keen::ecs::ClientPlayerInput",
+        ))
+    else {
+        return;
+    };
+    share_local_camera_layout(state, metadata.index, metadata.size as usize);
+}
+
 pub(crate) fn lua_world_cursor_get(
     lua: &mlua::Lua,
     args: FunctionArgs,
@@ -199,7 +213,9 @@ fn reflected_local_cursor(lua: &mlua::Lua, state: &AppState) -> Result<mlua::Tab
         .map_err(|error| error.to_string())?;
     // The local player's camera, from the same input snapshot. Left out when
     // this game's layout has no such fields: the cursor stays readable.
-    if let Ok(camera) = reflected_local_camera(lua, state, metadata.index, metadata.size as usize, &bytes) {
+    if let Ok(camera) =
+        reflected_local_camera(lua, state, metadata.index, metadata.size as usize, &bytes)
+    {
         value
             .raw_set("camera", camera)
             .map_err(|error| error.to_string())?;
@@ -232,6 +248,7 @@ fn reflected_local_camera(
     component_size: usize,
     bytes: &[u8],
 ) -> Result<mlua::Table, String> {
+    // Retry if the native provider was not ready when the runtime API was created.
     share_local_camera_layout(state, root, component_size);
     let field = |path: &str| -> Result<LuaValue, String> {
         state
@@ -275,23 +292,36 @@ fn reflected_local_camera(
     Ok(camera)
 }
 
-// The native runtime reads the camera for the game overlay at every frame,
-// at the byte offsets the reflection gives: sent once per component size.
-fn share_local_camera_layout(state: &AppState, root: kfc::reflection::TypeIndex, component_size: usize) {
+// The native DLL reader uses this layout against the same owned input sample
+// as the Lua cursor snapshot. Keep every offset sourced from reflection here.
+fn share_local_camera_layout(
+    state: &AppState,
+    root: kfc::reflection::TypeIndex,
+    component_size: usize,
+) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static SENT: AtomicUsize = AtomicUsize::new(0);
     if SENT.load(Ordering::Relaxed) == component_size {
         return;
     }
-    // The camera, then the building cursor's transform and flags: the overlay
-    // also draws the aimed face at every frame.
     let paths = [
-        "camera.position.x", "camera.position.y", "camera.position.z", "camera.orientation.x",
-        "camera.orientation.y", "camera.orientation.z", "camera.orientation.w", "camera.fovY",
-        "camera.aspectRatio", "cursorInput.primaryTransform.position.x", "cursorInput.primaryTransform.position.y",
-        "cursorInput.primaryTransform.position.z", "cursorInput.primaryTransform.orientation.x",
-        "cursorInput.primaryTransform.orientation.y", "cursorInput.primaryTransform.orientation.z",
-        "cursorInput.primaryTransform.orientation.w", "cursorInput.primaryFlags",
+        "camera.position.x",
+        "camera.position.y",
+        "camera.position.z",
+        "camera.orientation.x",
+        "camera.orientation.y",
+        "camera.orientation.z",
+        "camera.orientation.w",
+        "camera.fovY",
+        "camera.aspectRatio",
+        "cursorInput.primaryTransform.position.x",
+        "cursorInput.primaryTransform.position.y",
+        "cursorInput.primaryTransform.position.z",
+        "cursorInput.primaryTransform.orientation.x",
+        "cursorInput.primaryTransform.orientation.y",
+        "cursorInput.primaryTransform.orientation.z",
+        "cursorInput.primaryTransform.orientation.w",
+        "cursorInput.primaryFlags",
     ];
     let mut offsets = Vec::with_capacity(paths.len() + 1);
     for path in paths {
@@ -300,7 +330,6 @@ fn share_local_camera_layout(state: &AppState, root: kfc::reflection::TypeIndex,
             Err(_) => return,
         }
     }
-    // The flags' width (8, 16 or 32 bits as reflected).
     match state.inline_field(root, "data.cursorInput.primaryFlags") {
         Ok(field) => offsets.push(field.byte_range().len() as u32),
         Err(_) => return,

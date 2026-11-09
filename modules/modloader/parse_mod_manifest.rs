@@ -30,8 +30,8 @@ const EXTENDED_MOD_FIELDS: &[&str] = &[
     "changelog",
     "settings",
     "groups",
-    "presets",
     "inputReservations",
+    "presets",
 ];
 
 fn unknown_manifest_fields_allowed(root: &Path) -> Result<bool, String> {

@@ -64,9 +64,9 @@ const classAliases = {
   ShroudForgeSettings: "shroudforge.settings",
   ShroudForgeUi: "shroudforge.ui",
   ShroudForgeInput: "shroudforge.input",
-  ShroudForgeNative: "shroudforge.native",
   ShroudForgeContents: "shroudforge.contents",
   ShroudForgeContentReadJob: "shroudforge.contents.ReadJob",
+  ShroudForgeNative: "shroudforge.native",
   TypeRegistry: "game.types",
 };
 
