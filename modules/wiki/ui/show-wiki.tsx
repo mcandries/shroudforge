@@ -5,11 +5,14 @@ import { Icon } from '../../ui-resources/show-icon'
 import { PageHeader } from '../../ui-resources/show-page-header'
 import type { CommandResult } from '../../notifications/ui/notification-types'
 import {
+  DEFAULT_WIKI_CATEGORY,
   loadWikiArticle,
   getCachedWikiArticleRefreshDelay,
   mergeWikiPages,
+  readCachedWikiCategories,
   readCachedWikiArticle,
   readCachedWikiSearch,
+  refreshWikiCategories,
   refreshWikiPageSummaries,
   searchWikiPages,
   selectWikiLocalePages,
@@ -29,18 +32,24 @@ function isAbort(error: unknown): boolean {
 
 export function WikiPage({
   selectedArticleId,
+  category,
   onSelectArticle,
+  onOpenCategory,
   moduleSettings,
   notifyCommandResult,
 }: {
   selectedArticleId: string | null
+  category: string
   onSelectArticle(articleId: string | null): void
+  onOpenCategory(category: string): void
   moduleSettings?: WikiModuleSettings
   notifyCommandResult(result: CommandResult): void
 }) {
-  const { t, locale } = useI18n()
+  const { t, locale, locales } = useI18n()
   const apiSettings = resolveWikiApiSettings(moduleSettings)
   const [query, setQuery] = useState('')
+  const [languageFilter, setLanguageFilter] = useState('auto')
+  const [categories, setCategories] = useState(() => readCachedWikiCategories()?.categories || [])
   const [listRetryAttempt, setListRetryAttempt] = useState(0)
   const [articleRetryAttempt, setArticleRetryAttempt] = useState(0)
   const [pages, setPages] = useState<WikiPageSummary[]>([])
@@ -56,7 +65,13 @@ export function WikiPage({
   const [articleRefreshFailedReference, setArticleRefreshFailedReference] = useState<string>()
   const selected = selectedArticleId
   const filter = query.trim()
-  const visiblePages = useMemo(() => selectWikiLocalePages(pages, locale), [pages, locale])
+  const selectedCategoryOption = categories.find(
+    (item) => item.toLocaleLowerCase() === category.toLocaleLowerCase(),
+  ) ?? category
+  const visiblePages = useMemo(
+    () => selectWikiLocalePages(pages, locale, languageFilter),
+    [pages, locale, languageFilter],
+  )
   const pagesRef = useRef<WikiPageSummary[]>([])
   const continuationRef = useRef<Record<string, string> | undefined>(undefined)
   const listController = useRef<AbortController | undefined>(undefined)
@@ -67,6 +82,39 @@ export function WikiPage({
   const loadingMore = useRef(false)
   const refreshingList = useRef(false)
   const lastArticleFailure = useRef('')
+
+  useEffect(() => {
+    if (!apiSettings.enabled) return
+    let active = true
+    const controller = new AbortController()
+    const cached = readCachedWikiCategories()
+    if (cached) setCategories(cached.categories)
+    let interval: number | undefined
+    const refresh = async () => {
+      try {
+        const result = await refreshWikiCategories(controller.signal)
+        if (active) setCategories(result.categories)
+      } catch (error) {
+        if (active && !isAbort(error)) {
+          logUiEvent({ level: 'WARN', source: 'wiki', operation: 'Load MediaWiki categories',
+            subject: 'categories', message: String(error) })
+        }
+      }
+    }
+    const delay = cached
+      ? Math.max(0, cached.savedAt + apiSettings.refreshIntervalMs - Date.now())
+      : 0
+    const timer = window.setTimeout(() => {
+      void refresh()
+      interval = window.setInterval(refresh, apiSettings.refreshIntervalMs)
+    }, delay)
+    return () => {
+      active = false
+      controller.abort()
+      window.clearTimeout(timer)
+      if (interval !== undefined) window.clearInterval(interval)
+    }
+  }, [apiSettings.enabled, apiSettings.refreshIntervalMs])
 
   useEffect(() => {
     if (opened.current) return
@@ -90,7 +138,9 @@ export function WikiPage({
     let active = true
     const controller = new AbortController()
     listController.current = controller
-    const cached = readCachedWikiSearch(filter, locale, apiSettings.maxResultsPerQuery)
+    const cached = readCachedWikiSearch(
+      filter, locale, apiSettings.maxResultsPerQuery, category, languageFilter,
+    )
     const cacheIsFresh = Boolean(cached && !forceRefresh &&
       Date.now() - cached.savedAt < apiSettings.refreshIntervalMs)
     if (cached) {
@@ -115,7 +165,10 @@ export function WikiPage({
     )
 
     const timer = cacheIsFresh ? undefined : window.setTimeout(() => {
-      void searchWikiPages(filter, undefined, controller.signal, firstPageLimit)
+      void searchWikiPages(
+        { query: filter, category, language: languageFilter, locale },
+        undefined, controller.signal, firstPageLimit,
+      )
         .then((result) => {
           if (!active) return
           pagesRef.current = result.pages
@@ -124,7 +177,10 @@ export function WikiPage({
           continuationRef.current = result.continuation
           setHasLoadedPages(true)
           setListFailed(false)
-          writeCachedWikiSearch(filter, locale, result.pages, result.continuation, apiSettings.maxResultsPerQuery)
+          writeCachedWikiSearch(
+            filter, locale, result.pages, result.continuation,
+            apiSettings.maxResultsPerQuery, category, languageFilter,
+          )
         })
         .catch((error: unknown) => {
           if (!active || isAbort(error)) return
@@ -132,7 +188,7 @@ export function WikiPage({
           setListFailed(true)
           const hasCachedResults = Boolean(cached?.pages.length)
           logUiEvent({ level: hasCachedResults ? 'WARN' : 'ERROR', source: 'wiki', operation: 'Search MediaWiki',
-            subject: filter || 'all-pages', message: String(error), notify: !hasCachedResults,
+            subject: category || filter || 'all-pages', message: String(error), notify: !hasCachedResults,
             notifyMessage: hasCachedResults ? undefined : t('wiki.loadFailed') })
         })
         .finally(() => {
@@ -148,7 +204,10 @@ export function WikiPage({
       refreshingList.current = true
       setRefreshingPages(true)
       try {
-        const result = await searchWikiPages(filter, undefined, controller.signal, firstPageLimit)
+        const result = await searchWikiPages(
+          { query: filter, category, language: languageFilter, locale },
+          undefined, controller.signal, firstPageLimit,
+        )
         if (!active) return
         const refreshedTitles = new Set(result.pages.map((page) => page.pageTitle.toLowerCase()))
         const loadedTail = pagesRef.current.filter((page) =>
@@ -157,7 +216,11 @@ export function WikiPage({
         const hasLoadedTail = loadedTail.length > 0
         const refreshedTail = await refreshWikiPageSummaries(loadedTail, controller.signal)
         if (!active) return
-        const next = mergeWikiPages(result.pages, refreshedTail).slice(0, apiSettings.maxResultsPerQuery)
+        const eligibleTail = refreshedTail.filter((page) =>
+          (!category || page.categories?.some((item) => item.toLocaleLowerCase() === category.toLocaleLowerCase())) &&
+          selectWikiLocalePages([page], locale, languageFilter).length > 0,
+        )
+        const next = mergeWikiPages(result.pages, eligibleTail).slice(0, apiSettings.maxResultsPerQuery)
         pagesRef.current = next
         setPages(next)
         const nextContinuation = next.length >= apiSettings.maxResultsPerQuery
@@ -166,13 +229,16 @@ export function WikiPage({
         setContinuation(nextContinuation)
         continuationRef.current = nextContinuation
         setListFailed(false)
-        writeCachedWikiSearch(filter, locale, next, nextContinuation, apiSettings.maxResultsPerQuery)
+        writeCachedWikiSearch(
+          filter, locale, next, nextContinuation,
+          apiSettings.maxResultsPerQuery, category, languageFilter,
+        )
       } catch (error) {
         if (!active || isAbort(error)) return
         setListFailed(true)
         if (manual) throw error
         logUiEvent({ level: 'WARN', source: 'wiki', operation: 'Refresh MediaWiki pages',
-          subject: filter || 'all-pages', message: String(error) })
+          subject: category || filter || 'all-pages', message: String(error) })
       } finally {
         refreshingList.current = false
         if (active) setRefreshingPages(false)
@@ -199,7 +265,7 @@ export function WikiPage({
       if (listController.current === controller) listController.current = undefined
       if (interval !== undefined) window.clearInterval(interval)
     }
-  }, [apiSettings.enabled, apiSettings.maxResultsPerQuery, apiSettings.pageSize, apiSettings.refreshIntervalMs, filter, listRetryAttempt, locale, selected, t])
+  }, [apiSettings.enabled, apiSettings.maxResultsPerQuery, apiSettings.pageSize, apiSettings.refreshIntervalMs, category, filter, languageFilter, listRetryAttempt, locale, selected, t])
 
   const loadMore = useCallback(async () => {
     const controller = listController.current
@@ -217,7 +283,7 @@ export function WikiPage({
       subject: filter || 'all-pages', message: `Requested more results. Current count: ${pagesRef.current.length}.` })
     try {
       const result = await searchWikiPages(
-        filter,
+        { query: filter, category, language: languageFilter, locale },
         continuation,
         controller.signal,
         Math.min(apiSettings.pageSize, remaining),
@@ -230,7 +296,10 @@ export function WikiPage({
         : result.continuation
       setContinuation(nextContinuation)
       continuationRef.current = nextContinuation
-      writeCachedWikiSearch(filter, locale, next, nextContinuation, apiSettings.maxResultsPerQuery)
+      writeCachedWikiSearch(
+        filter, locale, next, nextContinuation,
+        apiSettings.maxResultsPerQuery, category, languageFilter,
+      )
     } catch (error) {
       if (!isAbort(error)) {
         setLoadMoreFailed(true)
@@ -242,7 +311,7 @@ export function WikiPage({
       loadingMore.current = false
       if (!controller.signal.aborted) setLoadingPages(false)
     }
-  }, [apiSettings.enabled, apiSettings.maxResultsPerQuery, apiSettings.pageSize, continuation, filter, loadingPages, locale, selected, t])
+  }, [apiSettings.enabled, apiSettings.maxResultsPerQuery, apiSettings.pageSize, category, continuation, filter, languageFilter, loadingPages, locale, selected, t])
 
   useEffect(() => {
     if (!selected || !apiSettings.enabled) {
@@ -257,8 +326,13 @@ export function WikiPage({
 
     let active = true
     const controller = new AbortController()
-    const articleKey = `${selected}:${locale}`
     const known = pages.find((page) => page.pageTitle === selected && page.id.startsWith('mediawiki:'))
+    const articleLocale = languageFilter === 'auto'
+      ? locale
+      : languageFilter === 'all'
+        ? known?.locale || locale
+        : languageFilter
+    const articleKey = `${selected}:${locale}:${languageFilter}`
     const cached = known ? readCachedWikiArticle(known.pageTitle) : readCachedWikiArticle(selected)
     let hasCachedArticle = Boolean(cached)
     lastArticleFailure.current = ''
@@ -274,7 +348,7 @@ export function WikiPage({
 
     const refresh = async (revalidate = false, manual = false) => {
       try {
-        const remote = await loadWikiArticle(selected, locale, known, controller.signal, revalidate)
+        const remote = await loadWikiArticle(selected, articleLocale, known, controller.signal, revalidate)
         if (!active) return
         if (remote) {
           hasCachedArticle = true
@@ -338,16 +412,16 @@ export function WikiPage({
       if (interval !== undefined) window.clearInterval(interval)
       if (manualRefresh.current === refreshManually) manualRefresh.current = undefined
     }
-  }, [apiSettings.enabled, apiSettings.refreshIntervalMs, selected, locale, articleRetryAttempt, t])
+  }, [apiSettings.enabled, apiSettings.refreshIntervalMs, selected, locale, languageFilter, pages, articleRetryAttempt, t])
 
-  const currentArticle = selected && articleReference === `${selected}:${locale}` ? article : undefined
-  const searchKey = `${locale}:${filter}:${visiblePages.length}`
+  const currentArticle = selected && articleReference === `${selected}:${locale}:${languageFilter}` ? article : undefined
+  const searchKey = `${locale}:${languageFilter}:${category}:${filter}:${visiblePages.length}`
   const lastSearch = useRef('')
   useEffect(() => {
     if (selected || lastSearch.current === searchKey) return
     lastSearch.current = searchKey
     logUiEvent({ level: 'TRACE', source: 'wiki', operation: 'Find articles', subject: 'article-list',
-      message: `${visiblePages.length} articles shown. Search length: ${filter.length}. Language: ${locale}.` })
+      message: `${visiblePages.length} articles shown. Search length: ${filter.length}. Category: ${category || 'all'}. Language: ${languageFilter}.` })
   }, [filter, locale, searchKey, selected, visiblePages.length])
 
   function selectArticle(pageTitle: string | null) {
@@ -356,6 +430,33 @@ export function WikiPage({
       subject: pageTitle || selected || 'article-list', message: pageTitle ? 'Article selected.' : 'Article list opened.' })
     onSelectArticle(pageTitle)
   }
+
+  function selectCategoryFilter(nextCategory: string) {
+    onOpenCategory(nextCategory)
+  }
+
+  function selectArticleCategory(nextCategory: string) {
+    onOpenCategory(nextCategory)
+    setQuery('')
+  }
+
+  function changeQuery(nextQuery: string) {
+    const hadSearch = Boolean(filter)
+    const hasSearch = Boolean(nextQuery.trim())
+    if (!hadSearch && hasSearch && category) {
+      onOpenCategory('')
+    } else if (hadSearch && !hasSearch && !category) {
+      onOpenCategory(DEFAULT_WIKI_CATEGORY)
+    }
+    setQuery(nextQuery)
+  }
+
+  const languageOptions = [...new Map(locales.map((option) => {
+    const normalized = option.locale.toLowerCase().startsWith('en')
+      ? 'en-gb'
+      : option.locale.toLowerCase().split('-')[0]
+    return [normalized, { value: normalized, label: option.name }] as const
+  })).values()]
 
   function retryList() {
     logUiEvent({ level: 'DEBUG', source: 'wiki', operation: 'Retry MediaWiki search',
@@ -379,7 +480,8 @@ export function WikiPage({
       />} />
     {!apiSettings.enabled ? <p className="builder-notice warning" role="status">{t('settings.moduleUnavailable')}</p>
       : selected ? currentArticle ? <>
-      <WikiArticle article={currentArticle} onOpenWikiArticle={(pageTitle) => selectArticle(pageTitle)}>
+      <WikiArticle article={currentArticle} onOpenWikiArticle={(pageTitle) => selectArticle(pageTitle)}
+        onSelectCategory={selectArticleCategory}>
         <div className="feature-banner-actions"><button type="button" className="button ghost"
           onClick={() => selectArticle(null)}>{t('wiki.back')}</button></div>
       </WikiArticle>
@@ -393,13 +495,31 @@ export function WikiPage({
       : null : <>
       <label className="searchbar wiki-search"><Icon name="search" />
         <input type="search" aria-label={t('wiki.search')} placeholder={t('wiki.search')}
-          value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          value={query} onChange={(event) => changeQuery(event.currentTarget.value)} />
       </label>
+      <div className="wiki-search-filters">
+        <label>{t('wiki.filterCategory')}
+          <select value={selectedCategoryOption} onChange={(event) => selectCategoryFilter(event.currentTarget.value)}>
+            <option value="">{t('wiki.allCategories')}</option>
+            {category && selectedCategoryOption === category && !categories.includes(category) &&
+              <option value={category}>{category}</option>}
+            {categories.map((item) => <option value={item} key={item}>{item}</option>)}
+          </select>
+        </label>
+        <label>{t('wiki.filterLanguage')}
+          <select value={languageFilter} onChange={(event) => setLanguageFilter(event.currentTarget.value)}>
+            <option value="auto">{t('wiki.languageAutomatic')}</option>
+            <option value="all">{t('wiki.languageAll')}</option>
+            {languageOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <p className="wiki-result-count" aria-live="polite">{t('wiki.resultsCount', { count: visiblePages.length })}</p>
       <div className="wiki-article-list" aria-busy={loadingPages || refreshingPages}>
         {visiblePages.map((item) => <button type="button" className="wiki-article-link" key={item.pageTitle}
           onClick={() => selectArticle(item.pageTitle)}>
           <WikiArtwork article={item} />
-          <span><strong>{item.title}</strong><small>{item.summary}</small></span>
+          <span><strong>{item.title}</strong>{item.summary && <small>{item.summary}</small>}</span>
           <Icon name="wiki" />
         </button>)}
       </div>

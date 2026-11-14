@@ -37,6 +37,7 @@ html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}body{color:var(-
 .nav-group{flex-shrink:0}.nav-group-mods{min-height:0;display:flex;flex:1;flex-direction:column}.nav-group-mods .sidebar-mods{min-height:0;max-height:none;flex:1;overflow-y:auto}
 .sidebar-mods .mod-nav-avatar{width:18px;height:18px;display:grid;place-items:center;flex:0 0 18px;margin-right:0;border-radius:5px;background:transparent}
 .sidebar-mods .mod-nav-avatar .icon{width:15px;height:15px}
+.nav-group-modloader h2{display:flex;align-items:baseline;gap:8px}.nav-group-modloader .nav-group-version{color:var(--sf-faint);font-size:7px;font-weight:500;letter-spacing:normal;white-space:nowrap}
 .mod-state-chip.active{color:var(--sf-green);background:rgba(91,203,146,.1);border-color:rgba(91,203,146,.18)}
 .mod-state-chip.restart{color:var(--sf-orange);background:rgba(231,169,86,.1);border-color:rgba(231,169,86,.18)}.mod-state-chip.waiting{color:var(--sf-blue);background:rgba(83,173,215,.1);border-color:rgba(83,173,215,.18)}
 .mod-state-chip.disabled{color:var(--sf-muted);background:rgba(255,255,255,.04);border-color:var(--sf-line)}
@@ -296,3 +297,9 @@ html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}body{color:var(-
 .mod-state-chip.restart,.mod-state-panel .mod-state-chip.restart,.mod-status-row .mod-state-chip.restart{color:var(--sf-blue);background:rgba(83,173,215,.1);border-color:rgba(83,173,215,.24)}
 .mod-status-row .mod-state-chip.restart .icon{width:12px;height:12px}
 .mod-multiselect-filter{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin:0 0 8px;padding-left:14px}.mod-multiselect-filter>.mod-input{flex:1 1 220px;height:32px;padding:0 9px;color:var(--sf-text);border:1px solid var(--sf-line-strong);border-radius:8px;background:#0b1519}.mod-multiselect-selected-only{display:flex;align-items:center;gap:7px;color:var(--sf-muted);font-size:11px;cursor:pointer}.mod-multiselect-filter>small{color:var(--sf-muted);font-size:10px}.mod-multiselect-filter+.settings-options{max-height:420px;overflow:auto}
+
+/* Tab hit area: extend segments into the bar padding and adjacent gaps. */
+.segments button{position:relative}
+.segments button::after{content:"";position:absolute;inset:-4px -1px}
+.segments button:first-child::after{left:-4px}
+.segments button:last-child::after{right:-4px}
