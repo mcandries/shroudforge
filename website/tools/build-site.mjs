@@ -4,6 +4,7 @@ import config from "../config.mjs";
 import { renderPage } from "../src/render-page.mjs";
 import { renderModSettingsPage } from "../src/render-tool-page.mjs";
 import { renderSchemasPage } from "../src/render-schemas-page.mjs";
+import { renderApiPlaygroundPage, renderApiReferencePage } from "../src/render-api-tools.mjs";
 import { readGithubReleases } from "./github-releases.mjs";
 import { readSecurityReports } from "./security-reports.mjs";
 
@@ -11,10 +12,13 @@ const websiteDirectory = path.resolve(import.meta.dirname, "..");
 const repositoryDirectory = path.resolve(websiteDirectory, "..");
 const buildDirectory = path.join(repositoryDirectory, "build");
 const outputDirectory = path.join(buildDirectory, "download-website");
-const browserAssets = ["styles.css", "filters.js", "installation-guide.js", "mod-settings.css", "mod-settings.js", "schemas.css", "schemas.js", "theme.js"];
+const browserAssets = ["styles.css", "filters.js", "installation-guide.js", "mod-settings.css", "mod-settings.js", "schemas.css", "schemas.js", "api-tools.css", "api-tools.js", "theme.js"];
 const modSettingsRelativePath = path.join("tools", "modding", "mod-settings");
+const apiReferenceRelativePath = path.join("tools", "modding", "api-reference");
+const apiPlaygroundRelativePath = path.join("tools", "modding", "api-playground");
 const schemasRelativePath = "schemas";
 const schemaSnapshotDirectory = path.join(websiteDirectory, "schema-snapshots");
+const apiSnapshotDirectory = path.join(websiteDirectory, "api-snapshots");
 const schemaNames = ["manifest.schema.json", "extended.mod.schema.json", "mod-locale.schema.json"];
 const starterModDirectory = path.join(repositoryDirectory, "docs", "examples", "starter-mod");
 
@@ -111,6 +115,63 @@ async function readSchemaSnapshots(siteUrl, currentVersion) {
   return { versions, files: published };
 }
 
+function compareSemverDescending(left, right) {
+	const a = left.split(".").map(Number)
+	const b = right.split(".").map(Number)
+	return b[0] - a[0] || b[1] - a[1] || b[2] - a[2]
+}
+
+async function readApiCatalogs(currentCatalog, currentExamples, currentOperations) {
+	const snapshots = [{ catalog: currentCatalog, examples: currentExamples, operations: currentOperations, current: true }]
+	const entries = await fs.readdir(apiSnapshotDirectory, { withFileTypes: true })
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue
+		if (!/^\d+\.\d+\.\d+$/.test(entry.name)) throw new Error(`API snapshot directory must use MAJOR.MINOR.PATCH: ${entry.name}`)
+		if (entry.name === currentCatalog.version) continue
+		const directory = path.join(apiSnapshotDirectory, entry.name)
+		const catalog = JSON.parse(await fs.readFile(path.join(directory, "catalog.json"), "utf8"))
+		const examples = JSON.parse(await fs.readFile(path.join(directory, "examples.json"), "utf8"))
+		const operations = JSON.parse(await fs.readFile(path.join(directory, "runtime-operations.json"), "utf8"))
+		if (catalog.version !== entry.name) throw new Error(`API snapshot folder ${entry.name} does not match catalog version ${catalog.version}.`)
+		if (!Array.isArray(catalog.symbols) || !Array.isArray(examples.scenarios) || !Array.isArray(operations.runtimeOperations)) {
+			throw new Error(`API snapshot ${entry.name} is missing symbols, examples, or runtime operation declarations.`)
+		}
+		snapshots.push({ catalog, examples, operations, current: false })
+	}
+	snapshots.sort((left, right) => compareSemverDescending(left.catalog.version, right.catalog.version))
+	return snapshots
+}
+
+async function readGameSnapshots(dataDirectory, currentSnapshot) {
+	const entries = await fs.readdir(dataDirectory, { withFileTypes: true })
+	const snapshots = []
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue
+		const directory = path.join(dataDirectory, entry.name)
+		const files = await Promise.all(["profile.json", "types.json", "resources.json"].map(async name => {
+			const file = path.join(directory, name)
+			const stat = await fs.lstat(file).catch(error => error.code === "ENOENT" ? null : Promise.reject(error))
+			if (!stat || !stat.isFile() || stat.isSymbolicLink()) throw new Error(`Game snapshot ${entry.name} is missing a regular ${name} file.`)
+			return file
+		}))
+		const profile = JSON.parse(await fs.readFile(files[0], "utf8"))
+		const gameVersion = typeof profile.game_version === "string" ? profile.game_version : ""
+		const gameBuild = gameVersion.split("|")[0]
+		if (!/^\d+$/.test(gameBuild)) throw new Error(`Game snapshot ${entry.name} has an invalid game build: ${gameVersion}`)
+		const capturedAt = Date.parse(gameVersion.split("|").at(-1)) || 0
+		snapshots.push({ snapshot: entry.name, gameBuild, capturedAt })
+	}
+	if (!snapshots.length) throw new Error("The generated website data has no complete game snapshots.")
+	if (!snapshots.some(snapshot => snapshot.snapshot === currentSnapshot)) throw new Error(`Current game snapshot is not published: ${currentSnapshot}`)
+	snapshots.sort((left, right) => Number(right.snapshot === currentSnapshot) - Number(left.snapshot === currentSnapshot) || right.capturedAt - left.capturedAt || Number(right.gameBuild) - Number(left.gameBuild))
+	const uniqueBuilds = new Set()
+	return snapshots.filter(snapshot => {
+		if (uniqueBuilds.has(snapshot.gameBuild)) return false
+		uniqueBuilds.add(snapshot.gameBuild)
+		return true
+	})
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
 }
@@ -130,6 +191,70 @@ async function build() {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`VERSION must use MAJOR.MINOR.PATCH: ${version}`);
   const schemaCatalog = await readSchemaSnapshots(siteUrl, version);
   const readJson = async relative => JSON.parse(await fs.readFile(path.join(repositoryDirectory, relative), "utf8"));
+  const generatedWebsiteData = path.join(buildDirectory, "website-data");
+  const apiCatalog = JSON.parse(await fs.readFile(path.join(generatedWebsiteData, "api.json"), "utf8"));
+  if (!/^\d+\.\d+\.\d+$/.test(apiCatalog.version) || !Array.isArray(apiCatalog.symbols)) {
+    throw new Error("Generated API catalogue must contain an API SemVer and symbols array.");
+  }
+  if (apiCatalog.shroudforge_version !== version) {
+    throw new Error(`Generated API catalogue release ${apiCatalog.shroudforge_version} does not match ShroudForge ${version}.`);
+  }
+  const apiExamples = await readJson(path.join("website", "api-examples.json"));
+  const sfSurvivalCapture = await readJson(path.join("website", "api-example-captures", "sf-survival-live.json"));
+  const settingValues = extended => Object.fromEntries(Object.entries(extended.settings || {}).map(([key, setting]) => [key, setting && typeof setting === "object" && Object.hasOwn(setting, "value") ? setting.value : setting]));
+  const sfSurvivalDefaults = settingValues(await readJson(path.join("mods", "sf-survival", "extended.mod.json")));
+  const capturedSettingEntries = (sfSurvivalCapture.calls || []).flatMap(call => {
+    const match = /^shroudforge\.settings\.get\("([^"]+)", false\)$/.exec(call.call || "");
+    const result = call.returns?.[0]?.value;
+    return match && call.ok === true && call.return_count === 1 && result?.lua_type === "boolean"
+      ? [[match[1], result.value]]
+      : [];
+  });
+  const sfSurvivalSettings = Object.fromEntries(capturedSettingEntries);
+  const survivalScenario = apiExamples.find(scenario => scenario.id === "read-mod-setting");
+  const survivalKeyInput = survivalScenario?.inputs?.find(input => input.name === "key");
+  if (survivalScenario?.fixture !== "sfSurvivalLive" || survivalKeyInput?.type !== "select" ||
+      !Array.isArray(survivalKeyInput.options) ||
+      JSON.stringify([...survivalKeyInput.options].sort()) !== JSON.stringify(Object.keys(sfSurvivalSettings).sort()) ||
+      JSON.stringify(Object.keys(sfSurvivalSettings).sort()) !== JSON.stringify(Object.keys(sfSurvivalDefaults).sort()) ||
+      Object.values(sfSurvivalSettings).some(value => typeof value !== "boolean") ||
+      sfSurvivalCapture.status !== "complete" || sfSurvivalCapture.mod_id !== "sf-survival" ||
+      sfSurvivalCapture.process_target !== "client" || typeof sfSurvivalCapture.world_session?.value !== "number" || sfSurvivalCapture.world_session.value === 0 ||
+      sfSurvivalCapture.safety?.world_values_changed !== false) {
+    throw new Error("The SF Survival API example must match every Boolean setting captured from the live client and its declared package setting keys.");
+  }
+  const capturedCallNames = new Set((sfSurvivalCapture.calls || []).map(call => call.call));
+  const referencedCallNames = new Set();
+  for (const scenario of apiExamples.filter(item => item.fixture === "sfSurvivalLive")) {
+    const inputName = scenario.captureInput || scenario.inputs?.[0]?.name;
+    const selectedCalls = scenario.captureCalls || Object.values(scenario.captureCallsByInput || {}).flat();
+    if (!selectedCalls.length || selectedCalls.some(callName => !capturedCallNames.has(callName))) {
+      throw new Error(`SF Survival API scenario ${scenario.id} must reference calls present in the live capture.`);
+    }
+    if (scenario.captureCallsByInput && (!inputName || Object.keys(scenario.captureCallsByInput).some(value =>
+      !scenario.inputs?.find(input => input.name === inputName)?.options?.includes(value)))) {
+      throw new Error(`SF Survival API scenario ${scenario.id} must map every capture selector to an input option.`);
+    }
+    for (const callName of selectedCalls) referencedCallNames.add(callName);
+  }
+  const unreferencedCapturedCalls = [...capturedCallNames].filter(callName => !referencedCallNames.has(callName));
+  if (unreferencedCapturedCalls.length) {
+    throw new Error(`SF Survival API scenarios must expose every captured call. Unused: ${unreferencedCapturedCalls.join(", ")}`);
+  }
+  const currentGame = JSON.parse(await fs.readFile(path.join(generatedWebsiteData, "current.json"), "utf8"));
+  const gameSnapshotDirectory = path.join(generatedWebsiteData, currentGame.snapshot);
+  const gameProfile = JSON.parse(await fs.readFile(path.join(gameSnapshotDirectory, "profile.json"), "utf8"));
+  const gameSnapshot = { id: currentGame.snapshot, gameVersion: gameProfile.game_version, profile: gameProfile };
+  const gameSnapshots = await readGameSnapshots(generatedWebsiteData, currentGame.snapshot);
+  const apiExamplesDocument = {
+    version: apiCatalog.version,
+    shroudforgeVersion: apiCatalog.shroudforge_version,
+    gameSnapshot,
+    fixtures: { sfSurvivalLive: sfSurvivalCapture },
+    scenarios: apiExamples,
+  };
+  const runtimeOperations = await readJson(path.join("modules", "mod-runtime", "lua", "shroudforge", "v1", "runtime-operations.json"));
+  const apiCatalogs = await readApiCatalogs(apiCatalog, apiExamplesDocument, runtimeOperations);
   const exampleManifest = await readJson(path.join("docs", "examples", "starter-mod", "mod.json"));
   const exampleExtended = await readJson(path.join("docs", "examples", "starter-mod", "extended.mod.json"));
   const websiteManifest = { ...exampleManifest, $schema: new URL(`/schemas/${version}/manifest.schema.json`, siteUrl).href };
@@ -167,6 +292,8 @@ async function build() {
     schemaVersions: schemaCatalog.versions,
     currentVersion: version,
   });
+  const apiReferenceHtml = renderApiReferencePage({ config, siteUrl });
+  const apiPlaygroundHtml = renderApiPlaygroundPage({ config, siteUrl });
   const publicDirectory = path.join(websiteDirectory, "public");
   await assertRegularTree(publicDirectory);
   for (const name of browserAssets) {
@@ -196,6 +323,45 @@ async function build() {
     path.join(starterModDirectory, exampleManifest.icon),
     path.join(toolDirectory, "icon.svg"),
   );
+  for (const [relative, html] of [[apiReferenceRelativePath, apiReferenceHtml], [apiPlaygroundRelativePath, apiPlaygroundHtml]]) {
+	const directory = path.join(outputDirectory, relative)
+	await fs.mkdir(directory, { recursive: true })
+	await fs.writeFile(path.join(directory, "index.html"), html, "utf8")
+  }
+  const apiDataDirectory = path.join(outputDirectory, "data", "api")
+  await fs.mkdir(apiDataDirectory, { recursive: true })
+  const apiVersionIndex = {
+	current: apiCatalog.version,
+	versions: apiCatalogs.map(({ catalog, current }) => ({
+		version: catalog.version,
+		shroudforgeVersion: catalog.shroudforge_version || null,
+		symbolCount: catalog.symbols.length,
+		current,
+	})),
+  }
+  await fs.writeFile(path.join(apiDataDirectory, "versions.json"), `${JSON.stringify(apiVersionIndex, null, 2)}\n`, "utf8")
+  for (const snapshot of apiCatalogs) {
+	const directory = path.join(apiDataDirectory, snapshot.catalog.version)
+	await fs.mkdir(directory, { recursive: true })
+	await fs.writeFile(path.join(directory, "catalog.json"), `${JSON.stringify(snapshot.catalog)}\n`, "utf8")
+	await fs.writeFile(path.join(directory, "examples.json"), `${JSON.stringify(snapshot.examples)}\n`, "utf8")
+	await fs.writeFile(path.join(directory, "runtime-operations.json"), `${JSON.stringify(snapshot.operations)}\n`, "utf8")
+  }
+  const gameDataDirectory = path.join(outputDirectory, "data", "game")
+  await fs.mkdir(gameDataDirectory, { recursive: true })
+  await fs.writeFile(path.join(gameDataDirectory, "current.json"), `${JSON.stringify({ snapshot: currentGame.snapshot })}\n`, "utf8")
+  await fs.writeFile(path.join(gameDataDirectory, "builds.json"), `${JSON.stringify({
+	current: currentGame.snapshot,
+	builds: gameSnapshots.map(({ snapshot, gameBuild }) => ({ snapshot, gameBuild })),
+  }, null, 2)}\n`, "utf8")
+  for (const { snapshot } of gameSnapshots) {
+	const sourceSnapshot = path.join(generatedWebsiteData, snapshot)
+	const outputSnapshot = path.join(gameDataDirectory, snapshot)
+	await fs.mkdir(outputSnapshot, { recursive: true })
+	for (const name of ["profile.json", "types.json", "resources.json"]) {
+		await fs.copyFile(path.join(sourceSnapshot, name), path.join(outputSnapshot, name))
+	}
+  }
   const badgeIconDirectory = path.join(outputDirectory, "assets", "mod-settings-links");
   await fs.mkdir(badgeIconDirectory, { recursive: true });
   for (const link of linkCatalog) {
@@ -207,8 +373,8 @@ async function build() {
   await fs.writeFile(path.join(outputDirectory, "404.html"), renderNotFound(siteUrl), "utf8");
   await fs.writeFile(path.join(outputDirectory, "releases.json"), `${JSON.stringify({ generatedAt, releases, securityReports }, null, 2)}\n`, "utf8");
   await fs.writeFile(path.join(outputDirectory, "robots.txt"), `User-agent: *\nAllow: /\nSitemap: ${siteUrl}/sitemap.xml\n`, "utf8");
-  await fs.writeFile(path.join(outputDirectory, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${escapeHtml(siteUrl)}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/${modSettingsRelativePath.replaceAll(path.sep, "/")}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/schemas/</loc><lastmod>${generatedAt}</lastmod></url></urlset>\n`, "utf8");
-  console.log(`Built ${releases.length} ShroudForge releases into build/download-website.`);
+  await fs.writeFile(path.join(outputDirectory, "sitemap.xml"), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${escapeHtml(siteUrl)}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/${modSettingsRelativePath.replaceAll(path.sep, "/")}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/${apiReferenceRelativePath.replaceAll(path.sep, "/")}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/${apiPlaygroundRelativePath.replaceAll(path.sep, "/")}/</loc><lastmod>${generatedAt}</lastmod></url><url><loc>${escapeHtml(siteUrl)}/schemas/</loc><lastmod>${generatedAt}</lastmod></url></urlset>\n`, "utf8");
+  console.log(`Built ${releases.length} ShroudForge releases and API ${apiCatalog.version} into build/download-website.`);
 }
 
 build().catch(error => {

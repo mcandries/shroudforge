@@ -72,6 +72,7 @@ html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}body{color:var(-
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 .header-link .icon { color: var(--header-color, currentColor); transition: transform var(--sf-speed) ease; }
+.top-actions .header-link.discord .icon { width: 20px; height: 20px; }
 .header-link.github { --header-color: #d4e4e5; --header-border: rgba(145, 181, 181, 0.26); --header-bg: rgba(34, 54, 57, 0.48); }
 .header-link.discord { --header-color: #b4baff; --header-border: rgba(88, 101, 242, 0.48); --header-bg: rgba(55, 63, 145, 0.3); }
 .header-link.danger { --header-color: #ff9a9f; --header-border: rgba(255, 112, 120, 0.28); --header-bg: rgba(96, 35, 40, 0.28); }
@@ -90,6 +91,18 @@ html,body,#root{width:100%;height:100%;margin:0;overflow:hidden}body{color:var(-
 .header-link:active { transform: translateY(0); }
 .header-link:focus-visible { outline-color: var(--header-color, var(--sf-blue)); }
 .header-link b { color: #061318; background: #8be1f7; box-shadow: 0 0 0 2px rgba(7, 16, 19, 0.72); }
+.top-actions .header-link.expand-on-hover { gap: 0; }
+.top-actions .header-link.expand-on-hover > span { display: inline-block !important; max-width: 0; overflow: hidden; opacity: 0; white-space: nowrap; transition: max-width .22s ease, opacity .16s ease; }
+.top-actions .header-link.expand-on-hover:hover,
+.top-actions .header-link.expand-on-hover:focus-visible { gap: 7px; }
+.top-actions .header-link.expand-on-hover:hover > span,
+.top-actions .header-link.expand-on-hover:focus-visible > span { max-width: 160px; opacity: 1; }
+.header-link.youtube { --header-color: #ff8e94; --header-border: rgba(255, 72, 82, 0.38); --header-bg: rgba(112, 28, 36, 0.28); }
+.header-link.youtube:hover { border-color: rgba(255, 113, 121, 0.65); background: rgba(136, 39, 47, 0.45); box-shadow: 0 5px 17px rgba(255, 72, 82, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.055); }
+@media (prefers-reduced-motion: reduce) {
+  .top-actions .header-link.expand-on-hover,
+  .top-actions .header-link.expand-on-hover > span { transition: none; }
+}
 
 /* Keep the top actions labelled until the window is genuinely narrow. */
 @media (min-width: 761px) {
@@ -365,3 +378,39 @@ body.reduced-motion .server-admin-spinner{animation:none;border-color:var(--sf-g
 @keyframes remote-server-glint{to{--remote-server-glint-angle:360deg}}
 @media(prefers-reduced-motion:reduce){.remote-target button.server-target::after{animation:none;--remote-server-glint-angle:35deg}.remote-target.server-selected button.server-target[aria-pressed="true"]{box-shadow:0 0 0 1px rgba(255,225,157,.58),0 0 8px 2px rgba(235,185,76,.42)}}
 .mod-links .header-link.discord{--header-color:#b4baff;--header-border:rgba(88,101,242,.48);--header-bg:rgba(55,63,145,.3)}.mod-links .header-link.youtube{--header-color:#ff9c9c;--header-border:rgba(255,72,72,.42);--header-bg:rgba(112,28,28,.28)}
+
+/* Keep the top actions aligned with the centered content heading on every page. */
+.shell {
+  --sf-sidebar-width: 228px;
+  --sf-content-gutter: 38px;
+  --sf-header-left-inset: 19px;
+  --sf-header-gap: 12px;
+  --sf-page-content-start: max(
+    calc(var(--sf-sidebar-width) + var(--sf-content-gutter)),
+    calc((100vw + var(--sf-sidebar-width) - 1180px) / 2)
+  );
+}
+.topbar {
+  gap: var(--sf-header-gap);
+  padding-left: var(--sf-header-left-inset);
+}
+.topbar .brand {
+  flex: 0 0 calc(var(--sf-page-content-start) - var(--sf-header-left-inset) - var(--sf-header-gap));
+  min-width: 0;
+}
+.workspace {
+  grid-template-columns: var(--sf-sidebar-width) minmax(0, 1fr);
+}
+.content {
+  padding-inline: var(--sf-content-gutter);
+}
+@media (max-width: 980px) {
+  .shell { --sf-content-gutter: 25px; }
+}
+@media (max-width: 760px) {
+  .shell {
+    --sf-sidebar-width: 190px;
+    --sf-content-gutter: 18px;
+    --sf-header-gap: 6px;
+  }
+}
