@@ -5,7 +5,7 @@
 //! loaded Steam API DLL and passes bounded messages through the native runtime.
 
 pub const MAX_MESSAGE_BYTES: usize = 512 * 1024;
-/// Reserved for Modloader file mirroring. 65535 remains Network health.
+/// Reserved for the Modloader remote UI. 65535 remains Network health.
 pub const REMOTE_UI_CHANNEL: i32 = 65_534;
 
 #[cfg(windows)]
@@ -364,7 +364,7 @@ mod read_network_allowlist;
 mod read_session_peers;
 mod report_network_health;
 pub use read_network_allowlist::read_network_allowlist;
-pub use read_session_peers::{SessionPeers, SessionRole, read_session_peers};
+pub use read_session_peers::{SessionPeers, SessionPlayer, SessionRole, read_session_peers};
 pub use report_network_health::{
     RemoteServerConnectionState, remote_server_connection_state, report_network_health,
 };

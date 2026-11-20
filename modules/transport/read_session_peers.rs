@@ -36,10 +36,16 @@ pub struct SessionPeers {
     pub role: SessionRole,
     /// The other machines' SteamID64 by machine index.
     pub peers: BTreeMap<u32, u64>,
-    /// The permissions each player logged in with, by SteamID64.
-    pub permissions: BTreeMap<u64, Vec<String>>,
+    /// The game name and permissions learned for each connected Steam peer.
+    pub player_records: BTreeMap<u64, SessionPlayer>,
     awaiting_login: VecDeque<u64>,
-    reading_permissions: Option<(u64, Vec<String>)>,
+    reading_permissions: Option<(u64, String, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionPlayer {
+    pub name: Option<String>,
+    pub permissions: Vec<String>,
 }
 
 impl SessionPeers {
@@ -48,7 +54,9 @@ impl SessionPeers {
         if self.role != SessionRole::Hosting || !self.peers.values().any(|id| *id == steam_id) {
             return None;
         }
-        self.permissions.get(&steam_id).map(Vec::as_slice)
+        self.player_records
+            .get(&steam_id)
+            .map(|player| player.permissions.as_slice())
     }
 
     /// The machine that hosts the game this client joined.
@@ -64,14 +72,20 @@ impl SessionPeers {
     }
 
     fn apply(&mut self, line: &str) {
-        if let Some((steam_id, mut names)) = self.reading_permissions.take() {
+        if let Some((steam_id, player_name, mut names)) = self.reading_permissions.take() {
             if let Some(name) = permission_name(line) {
                 names.push(name.to_owned());
-                self.reading_permissions = Some((steam_id, names));
+                self.reading_permissions = Some((steam_id, player_name, names));
                 return;
             }
             if steam_id != 0 {
-                self.permissions.insert(steam_id, names);
+                self.player_records.insert(
+                    steam_id,
+                    SessionPlayer {
+                        name: Some(player_name),
+                        permissions: names,
+                    },
+                );
             }
         }
         if let Some(rest) = after(line, "[online] Added peer ") {
@@ -81,13 +95,20 @@ impl SessionPeers {
             }
         } else if let Some(rest) = after(line, "[online] Removed peer ") {
             if let Some(id) = machine_index(rest).and_then(|machine| self.peers.remove(&machine)) {
-                self.permissions.remove(&id);
+                self.player_records.remove(&id);
                 self.awaiting_login.retain(|waiting| *waiting != id);
             }
         } else if line.contains("[server] Player '") && line.contains("' logged in with Permissions:") {
             // 0: a login without a peer waiting, the hosting game's own.
             let steam_id = self.awaiting_login.pop_front().unwrap_or(0);
-            self.reading_permissions = Some((steam_id, Vec::new()));
+            let player_name = after(line, "[server] Player '")
+                .and_then(|rest| {
+                    rest.split_once("' logged in with Permissions:")
+                        .map(|(name, _)| name)
+                })
+                .unwrap_or_default()
+                .to_owned();
+            self.reading_permissions = Some((steam_id, player_name, Vec::new()));
         } else if let Some(rest) = after(line, "[Session] finished transition from '") {
             match rest.split("' to '").nth(1).and_then(|to| to.split('\'').next()) {
                 Some("Host_Online") => self.role = SessionRole::Hosting,
