@@ -211,6 +211,7 @@ A file contains the implementation of the action named by that file. Related hel
 | Split a remote UI message larger than one Steam message into fragments | `modules/transport/split_remote_ui_message.rs` |
 | Put a remote UI message's fragments back together, peer by peer | `modules/transport/reassemble_remote_ui_message.rs` |
 | Send remote UI messages to each peer in order as Steam's send buffer takes them | `modules/transport/pace_remote_ui_sends.rs` |
+| Keep and show a player the Dedicated Server's version check of them | `modules/transport/record_server_versions.rs` |
 | Read the joined game's host, the hosted game's players and their permissions from the game's session log | `modules/transport/read_session_peers.rs` |
 
 ### Updater migration timing
